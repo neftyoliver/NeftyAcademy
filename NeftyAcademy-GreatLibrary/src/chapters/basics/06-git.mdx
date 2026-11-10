@@ -1,0 +1,59 @@
+import { Cmd, Note } from 'neftyacademy-paragons-bookshelf';
+
+Git은 **파일들의 사진첩**입니다. 마음에 드는 순간마다 사진(커밋)을 찍어 두면, 언제든 그때로 돌아가거나 무엇이 바뀌었는지 비교할 수 있습니다.
+
+## 세 군데
+
+| 곳 | 무엇 |
+| --- | --- |
+| 작업 폴더 | 지금 편집하는 파일들 |
+| 스테이징(index) | 다음 사진에 넣기로 고른 변경 |
+| 저장소(`.git`) | 찍어 둔 사진들 |
+
+`git add`는 작업 폴더 → 스테이징, `git commit`은 스테이징 → 저장소입니다.
+
+## 처음 한 번
+
+```sh
+git config --global user.name "이름"
+git config --global user.email "메일@주소"
+git config --global init.defaultBranch main
+```
+
+## 매일 쓰는 것
+
+<Cmd means="이 폴더를 저장소로 만들기">git init</Cmd>
+<Cmd means="지금 상태 (가장 자주 침)">git status</Cmd>
+<Cmd means="무엇이 바뀌었나">git diff</Cmd>
+<Cmd means="다음 커밋에 넣기">git add 파일</Cmd>
+<Cmd means="사진 찍기">git commit -m "설명"</Cmd>
+<Cmd means="지난 커밋들 보기">git log --oneline --graph</Cmd>
+<Cmd means="원격 저장소 복제해 오기">git clone 주소</Cmd>
+<Cmd means="원격에서 받아 합치기">git pull</Cmd>
+<Cmd means="원격으로 올리기">git push</Cmd>
+
+## 가지(branch)
+
+가지는 **같은 저장소 안의 다른 줄기**입니다. 새 기능을 가지에서 만들다가 다 되면 합칩니다.
+
+```sh
+git switch -c new-feature   # 가지 만들고 옮겨 가기
+# ...작업하고 커밋...
+git switch main
+git merge new-feature       # main에 합치기
+```
+
+## .gitignore
+
+빌드 결과물, 내려받은 의존성, 비밀번호 파일처럼 **저장소에 넣으면 안 되는 것**은 `.gitignore`에 적어 둡니다.
+
+```text
+build/
+*.o
+node_modules/
+.env
+```
+
+<Note kind="warn">
+암호나 토큰을 한 번 커밋하면, 나중 커밋에서 지워도 **기록에는 남습니다**. 올리기 전에 `git status`와 `git diff --staged`로 확인하는 버릇을 들이세요.
+</Note>

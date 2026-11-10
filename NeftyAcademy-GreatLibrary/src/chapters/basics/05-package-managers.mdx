@@ -1,0 +1,49 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+apt만 패키지 매니저가 아닙니다. OS마다, 언어마다 저마다의 창고와 관리 도구가 있습니다. 하는 일은 같습니다: **찾고, 받고, 의존성을 챙기고, 지울 수 있게 기록한다.**
+
+## OS의 패키지 매니저
+
+| 계열 | 아래층(파일 하나) | 위층(저장소·의존성) | 패키지 파일 |
+| --- | --- | --- | --- |
+| 데비안·우분투·라즈베리파이 OS | dpkg | apt | `.deb` |
+| 페도라·RHEL | rpm | dnf | `.rpm` |
+| 아치·가루다·만자로 | — | pacman (AUR은 yay 등 도우미) | `.pkg.tar.zst` |
+| openSUSE | rpm | zypper | `.rpm` |
+| 알파인 | — | apk | `.apk` |
+| 맥 | — | Homebrew (`brew`) | 공식 OS 도구는 아님 |
+| 윈도우 | — | winget, Scoop, Chocolatey | |
+
+## 배포판을 가리지 않는 것
+
+- **Flatpak**, **Snap** — 프로그램을 필요한 라이브러리와 통째로 묶어 어느 배포판에서나 돌게 함. 크고 느릴 수 있지만 데스크톱 앱 배포가 편함
+- **AppImage** — 실행 파일 하나. 받고 `chmod +x` 하면 실행
+
+## 윈도우에서 리눅스 도구 쓰기
+
+| 방법 | 무엇 |
+| --- | --- |
+| WSL | 윈도우 안에서 진짜 리눅스 커널과 배포판을 돌림. apt 그대로 |
+| MSYS2 | 윈도우용으로 옮겨 온 GNU 도구 모음. **pacman**으로 gcc·make 등을 설치 |
+
+## 언어별 패키지 매니저
+
+| 언어 | 도구 | 창고 |
+| --- | --- | --- |
+| JavaScript | npm (pnpm, yarn) | npmjs.com |
+| Python | pip (uv) | PyPI |
+| Rust | cargo | crates.io |
+| C·C++ | 정해진 것 없음 | OS 패키지, vcpkg, Conan |
+
+<Note kind="warn">
+OS 패키지 매니저가 관리하는 곳에 언어 패키지 매니저로 `sudo` 설치를 하면 둘이 서로 덮어씁니다. 요즘 우분투는 그래서 `sudo pip install`을 막아 둡니다(가상환경을 쓰라는 뜻).
+</Note>
+
+## C에서는 왜 OS 패키지인가
+
+C에는 언어 공식 패키지 매니저가 없어서, 라이브러리를 **OS 패키지 매니저로** 깝니다. 이때 이름 끝의 `-dev`가 중요합니다.
+
+```sh
+sudo apt install libgtk-4-1     # 실행에 필요한 라이브러리(.so)만
+sudo apt install libgtk-4-dev   # + 헤더(.h)와 pkg-config 정보 → 직접 컴파일할 때 필요
+```

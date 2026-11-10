@@ -1,0 +1,81 @@
+import { Cmd, Note } from 'neftyacademy-paragons-bookshelf';
+
+데비안·우분투 계열은 프로그램을 **저장소**(인터넷의 큰 창고)에서 받아 설치합니다. 그 창고를 다루는 도구가 `apt`입니다.
+
+## dpkg와 apt
+
+| 층 | 도구 | 하는 일 |
+| --- | --- | --- |
+| 아래 | `dpkg` | `.deb` 파일 **하나**를 풀어 설치·제거. 의존성은 챙기지 않음 |
+| 위 | `apt`, `apt-get` | 저장소에서 찾아 받고, **필요한 다른 패키지(의존성)까지** 같이 깔아 줌 |
+
+## apt와 apt-get
+
+둘 다 같은 일을 합니다. 차이는 누구를 위한 것이냐입니다.
+
+- `apt` — 사람이 치는 용도. 진행 막대, 색, 짧은 명령. 출력 모양이 버전마다 바뀔 수 있어 스크립트에는 쓰지 말라고 스스로 경고합니다
+- `apt-get`, `apt-cache` — 스크립트용. 출력과 옵션이 오래 그대로 유지됩니다
+
+<Cmd means="저장소 목록 새로 받기 (설치 전에 먼저)">sudo apt update</Cmd>
+<Cmd means="깔린 패키지 최신으로">sudo apt upgrade</Cmd>
+<Cmd means="설치">sudo apt install 이름</Cmd>
+<Cmd means="제거 (설정 파일은 남김)">sudo apt remove 이름</Cmd>
+<Cmd means="제거 + 설정 파일까지">sudo apt purge 이름</Cmd>
+<Cmd means="이름·설명에서 찾기">apt search 낱말</Cmd>
+<Cmd means="패키지 정보 보기">apt show 이름</Cmd>
+<Cmd means="이제 아무도 안 쓰는 의존성 정리">sudo apt autoremove</Cmd>
+
+## 저장소 설정 읽기
+
+요즘 우분투는 `/etc/apt/sources.list.d/ubuntu.sources`에 이런 꼴로 적습니다(deb822 형식).
+
+```text
+Types: deb
+URIs: http://archive.ubuntu.com/ubuntu/
+Suites: noble noble-updates noble-backports
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+```
+
+옛 형식(`/etc/apt/sources.list`)은 같은 내용을 한 줄에 씁니다.
+
+```text
+deb http://archive.ubuntu.com/ubuntu/ noble main restricted universe multiverse
+```
+
+| 칸 | 뜻 |
+| --- | --- |
+| Types | `deb`는 실행 파일 패키지, `deb-src`는 소스 패키지 |
+| URIs | 창고 주소(미러) |
+| Suites | 배포판 버전 이름(`noble`은 24.04). `-updates`, `-security`, `-backports`는 그 버전의 갱신 줄기 |
+| Components | 창고 안의 구역. 아래 표 |
+| Signed-By | 이 창고의 서명을 확인할 열쇠 |
+
+<Note>
+내 버전 이름은 `lsb_release -cs` 또는 `cat /etc/os-release`로 확인합니다. 버전마다 이름이 다르니 위 예시의 `noble`을 그대로 베끼지 마세요.
+</Note>
+
+## main, universe 같은 구역
+
+| 우분투 | 뜻 | 데비안에서 비슷한 것 |
+| --- | --- | --- |
+| main | 캐노니컬이 지원하는 자유 소프트웨어 | main |
+| restricted | 캐노니컬이 지원하는 비자유(그래픽 드라이버 등) | non-free, non-free-firmware |
+| universe | 커뮤니티가 관리하는 자유 소프트웨어 | main |
+| multiverse | 저작권·특허 제약이 있는 것 | non-free, contrib |
+
+## 저장소(미러) 바꾸기
+
+해외 서버가 느리면 가까운 미러로 `URIs`만 바꿉니다.
+
+```sh
+sudo cp /etc/apt/sources.list.d/ubuntu.sources ~/ubuntu.sources.bak   # 백업 먼저
+sudo nano /etc/apt/sources.list.d/ubuntu.sources                       # URIs 줄 고치기
+sudo apt update                                                       # 새 주소에서 목록 받기
+```
+
+국내 미러 예: `http://mirror.kakao.com/ubuntu/`. 보안 갱신(`-security`) 줄은 공식 주소 그대로 두는 경우가 많습니다.
+
+## PPA
+
+PPA는 개인·팀이 우분투용으로 따로 운영하는 작은 저장소입니다. `sudo add-apt-repository ppa:이름/저장소`로 추가합니다. 공식 저장소보다 새 버전을 얻을 수 있지만, **그 운영자를 믿는다는 뜻**이니 꼭 필요한 것만 씁니다.

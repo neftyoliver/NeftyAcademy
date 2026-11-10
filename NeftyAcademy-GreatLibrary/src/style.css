@@ -1,0 +1,41 @@
+/* Great Library만의 모양. 틀(ParagonsBookShelf)의 색을 바꾸려면 여기서 --bf-* 변수를 덮어쓴다. */
+
+/* ---------- PcStepper ---------- */
+.pc-stepper { display: grid; gap: 12px; font-size: 15px; }
+.pc-program { margin: 0; padding: 0; list-style: none; counter-reset: line -1; }
+.pc-program li {
+  counter-increment: line;
+  display: grid;
+  grid-template-columns: 2.2em 11em 1fr;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 8px;
+  border-radius: 7px;
+  transition: background 0.15s;
+}
+.pc-program li::before { content: counter(line); color: var(--bf-muted); font-family: var(--bf-mono); text-align: right; }
+.pc-program li span { color: var(--bf-muted); font-size: 14px; }
+.pc-program li.is-pc { background: color-mix(in srgb, var(--node) 22%, transparent); }
+.pc-program li.is-pc::before { content: '▶'; color: var(--node); }
+.pc-regs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.pc-regs div { padding: 8px 10px; border: 1px solid var(--bf-line); border-radius: 9px; text-align: center; }
+.pc-regs small { display: block; color: var(--bf-muted); font-size: 12px; }
+.pc-regs b { font-family: var(--bf-mono); font-size: 20px; }
+.pc-buttons { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pc-buttons button {
+  padding: 6px 14px;
+  border: 1px solid var(--bf-line);
+  border-radius: 8px;
+  background: var(--bf-paper);
+  color: var(--bf-ink);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+.pc-buttons button:first-child { background: var(--node); border-color: var(--node); color: #fff; }
+.pc-buttons button:disabled { opacity: 0.4; cursor: default; }
+@media (max-width: 560px) {
+  .pc-program li { grid-template-columns: 2em 1fr; }
+  .pc-program li span { grid-column: 2; }
+  .pc-regs { grid-template-columns: repeat(2, 1fr); }
+}

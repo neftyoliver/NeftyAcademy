@@ -1,0 +1,46 @@
+import { Figure, Note } from 'neftyacademy-paragons-bookshelf';
+import { Layers } from '../../components/Layers';
+
+OS를 새로 깔려면 **설치용 USB를 만들고**, 컴퓨터가 **그 USB로 부팅**하게 해야 합니다. 이 챕터는 그 두 가지를 다룹니다.
+
+## 설치 USB 만드는 도구
+
+| 도구 | 쓰는 곳 | 특징 |
+| --- | --- | --- |
+| Ventoy | 윈도우·리눅스 | USB에 한 번 깔아 두면 ISO 파일을 **복사만** 해서 여러 개를 골라 부팅 |
+| Rufus | 윈도우 | ISO 하나를 USB에 굽기. 설정이 자세함 |
+| balenaEtcher | 윈도우·맥·리눅스 | 단순함. 고르고 굽기 |
+| Raspberry Pi Imager | 윈도우·맥·리눅스 | 라즈베리파이 SD카드용. 사용자 이름·와이파이·SSH를 미리 넣을 수 있음 |
+| `dd` | 리눅스·맥 | 명령어 하나로 그대로 복사. **대상 장치를 잘못 적으면 그 디스크가 지워짐** |
+
+<Note kind="warn">
+굽기 도구들은 USB 안의 내용을 지웁니다. Ventoy도 처음 설치할 때는 지웁니다(그 뒤로는 ISO만 넣고 빼면 됩니다).
+</Note>
+
+## 전원을 켜면 일어나는 일
+
+<Figure caption="아래에서 위로 차례대로 넘겨받습니다">
+  <Layers
+    label="부팅 순서"
+    items={[
+      { name: '펌웨어 (UEFI 또는 BIOS)', desc: '메인보드에 들어 있는 첫 프로그램. 장치를 점검하고 부팅할 디스크를 고른다' },
+      { name: '부트로더', desc: '디스크에서 OS를 찾아 커널을 메모리에 올린다', eg: 'GRUB, systemd-boot' },
+      { name: '커널', desc: '하드웨어를 맡고, 첫 사용자 프로세스를 띄운다', eg: 'vmlinuz' },
+      { name: 'init', desc: '나머지 서비스와 로그인 화면을 띄운다', eg: 'systemd (PID 1)' },
+    ].reverse()}
+  />
+</Figure>
+
+## BIOS와 UEFI, MBR과 GPT
+
+| | 옛 방식 | 요즘 방식 |
+| --- | --- | --- |
+| 펌웨어 | BIOS (16비트 실모드로 시작) | UEFI |
+| 디스크 칸 나누기 | MBR: 주 파티션 4개, 2TiB까지 | GPT: 파티션 128개 이상, 사실상 크기 제한 없음 |
+| 부트로더 위치 | 디스크 맨 앞 512바이트 | **EFI 시스템 파티션(ESP)**, FAT32로 된 작은 칸 안의 `.efi` 파일 |
+
+요즘 PC는 UEFI + GPT가 기본입니다. UEFI에는 **Secure Boot**가 있어서 서명된 부트로더만 실행하는데, 우분투 계열은 서명이 되어 있어 대개 켠 채로 설치됩니다.
+
+## 부팅 메뉴 들어가기
+
+전원을 켜자마자 제조사마다 정해진 키를 누르면 부팅 장치를 고를 수 있습니다. 흔한 키는 <kbd>F12</kbd>, <kbd>F11</kbd>, <kbd>F8</kbd>, <kbd>Esc</kbd>이고, 설정 화면(UEFI 설정)은 <kbd>Del</kbd>이나 <kbd>F2</kbd>인 경우가 많습니다. 정확한 키는 메인보드·노트북 설명서를 보세요.

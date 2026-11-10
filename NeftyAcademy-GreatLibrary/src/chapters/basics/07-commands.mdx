@@ -1,0 +1,70 @@
+import { Cmd, Note } from 'neftyacademy-paragons-bookshelf';
+
+터미널 명령어 중에는 <strong>유닉스 계열이면 어디서나 되는 것(POSIX)</strong>과 **리눅스에서만 되는 것**이 섞여 있습니다. 구분해 두면 맥이나 BSD, 라즈베리파이에서 무엇이 그대로 통할지 미리 알 수 있습니다.
+
+## POSIX란
+
+POSIX는 "유닉스처럼 생긴 OS라면 이 정도는 갖추자"는 IEEE 표준입니다. 셸(`sh`)의 문법, 기본 명령어, 그리고 C 함수(`fork`, `open` 등)까지 정합니다. 리눅스와 맥은 대부분 따르고, 윈도우는 따르지 않습니다(그래서 WSL·MSYS2가 있습니다).
+
+## POSIX 명령어 (어디서나)
+
+<Cmd means="목록">ls</Cmd>
+<Cmd means="폴더 이동 / 지금 위치">cd, pwd</Cmd>
+<Cmd means="복사 / 옮기기·이름 바꾸기 / 지우기">cp, mv, rm</Cmd>
+<Cmd means="폴더 만들기 / 빈 폴더 지우기">mkdir, rmdir</Cmd>
+<Cmd means="내용 보기 / 앞·뒤 몇 줄">cat, head, tail</Cmd>
+<Cmd means="글자 찾기">grep 낱말 파일</Cmd>
+<Cmd means="파일 찾기">{"find . -name \"*.c\""}</Cmd>
+<Cmd means="권한 바꾸기">chmod</Cmd>
+<Cmd means="프로세스 보기 / 신호 보내기">ps, kill</Cmd>
+<Cmd means="글 고치기·뽑기">sed, awk</Cmd>
+<Cmd means="설명서">man 명령어</Cmd>
+
+## 리눅스(와 GNU) 쪽 명령어
+
+<Cmd means="서비스 켜고 끄기 (systemd)">systemctl status 이름</Cmd>
+<Cmd means="시스템 로그">journalctl -b</Cmd>
+<Cmd means="디스크·파티션 보기">lsblk</Cmd>
+<Cmd means="네트워크 주소">ip addr</Cmd>
+<Cmd means="열린 포트">ss -tlnp</Cmd>
+<Cmd means="메모리">free -h</Cmd>
+<Cmd means="커널 메시지">sudo dmesg</Cmd>
+<Cmd means="패키지 (데비안 계열만)">apt</Cmd>
+
+<Note>
+같은 이름이라도 **옵션**이 다를 수 있습니다. 리눅스의 `ls`, `sed`는 GNU 판이라 `ls --color`, `sed -i` 같은 확장이 있고, 맥의 BSD 판은 쓰는 법이 조금 다릅니다. 이식성이 중요하면 `man`에서 POSIX 옵션만 쓰세요.
+</Note>
+
+## 권한과 chmod +x
+
+`ls -l`의 맨 앞 열 글자는 **종류 + 주인·그룹·나머지의 권한**입니다.
+
+```text
+-rwxr-xr--  1 nefty nefty  120  run.sh
+│└┬┘└┬┘└┬┘
+│ │  │  └ 나머지: 읽기만
+│ │  └ 그룹: 읽기·실행
+│ └ 주인: 읽기·쓰기·실행
+└ 종류: - 파일, d 폴더, l 링크
+```
+
+| 글자 | 파일에서 | 폴더에서 |
+| --- | --- | --- |
+| r | 읽기 | 목록 보기 |
+| w | 고치기 | 안에 만들기·지우기 |
+| x | **실행** | 들어가기(`cd`) |
+
+```sh
+chmod +x run.sh     # 모두에게 실행 권한 더하기
+chmod u+x run.sh    # 주인에게만
+chmod 755 run.sh    # 숫자로: 주인 rwx(7), 그룹 r-x(5), 나머지 r-x(5)
+```
+
+## 스크립트 실행하기
+
+```sh
+#!/bin/sh
+echo "hello"
+```
+
+첫 줄 `#!`(셔뱅)은 "이 파일은 `/bin/sh`로 읽어라"는 뜻입니다. 실행 권한을 주고 `./run.sh`로 실행합니다. 앞에 `./`가 필요한 이유는, 셸은 명령을 **`PATH`에 적힌 폴더에서만** 찾고 지금 폴더는 보안상 거기 없기 때문입니다.

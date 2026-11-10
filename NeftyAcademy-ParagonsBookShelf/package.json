@@ -1,0 +1,38 @@
+{
+  "name": "neftyacademy-paragons-bookshelf",
+  "version": "0.1.0",
+  "description": "React로 만드는 웹 책장: 책·챕터·하위 챕터 지도(거미줄·목록·갤러리), 읽기 화면, 스크롤 레일, 북마크, 줄치기",
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./style.css": "./src/style.css"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "dev": "vite demo --host 127.0.0.1",
+    "build:demo": "vite build demo",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.2.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "typescript": "^5.9.0",
+    "vite": "^8.3.6",
+    "vite-plugin-singlefile": "^2.3.4"
+  },
+  "engines": {
+    "node": ">=22.12"
+  }
+}
