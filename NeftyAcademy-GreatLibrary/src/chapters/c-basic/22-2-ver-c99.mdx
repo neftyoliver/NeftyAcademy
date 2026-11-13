@@ -1,0 +1,83 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+C99는 C의 역사에서 가장 큰 개정입니다. 우리가 "평범한 C"라고 생각하는 문법 대부분이 여기서 들어왔습니다.
+
+## 들어온 것
+
+| 기능 | 예 |
+| --- | --- |
+| `//` 주석 | `// 한 줄 주석` |
+| 어디서나 선언 | `for (int i = 0; i < n; i++)` |
+| `long long` | 64비트 이상 정수 |
+| `<stdint.h>`, `<inttypes.h>` | `int32_t`, `uint8_t`, `PRIu64` |
+| `<stdbool.h>` | `bool`, `true`, `false` (진짜 타입은 `_Bool`) |
+| 지정 초기화 | `struct point p = { .x = 1, .y = 2 };`, `int a[8] = { [3] = 1 };` |
+| 복합 리터럴 | `(struct point){ 1, 2 }` |
+| 가변 길이 배열 | `int a[n];` |
+| 유연한 배열 멤버 | `struct msg { size_t len; char data[]; };` |
+| `inline` | `static inline int max(int a, int b)` |
+| `restrict` | "이 포인터들은 겹치지 않는다"는 최적화 힌트 |
+| 가변 인자 매크로 | `#define LOG(...) printf(__VA_ARGS__)` |
+| `__func__` | 지금 함수의 이름 |
+| `snprintf`, `vsnprintf` | 길이를 확인하는 서식 출력 |
+| `<complex.h>`, `<tgmath.h>` | 복소수, 타입에 맞는 수학 함수 고르기 |
+| 16진 실수 표기 | `0x1.8p3` (= 12.0) |
+
+## 없어진 것
+
+- 암시적 `int` (`main() { … }`)
+- 선언 없이 함수 부르기
+
+그리고 `main`에서만은 `return 0;`을 생략할 수 있게 되었습니다. 끝까지 가면 0을 돌려준 것으로 칩니다.
+
+## C99의 모양
+
+```c std=c99
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+
+struct reading {
+    int id;
+    double value;
+    bool valid;
+};
+
+static inline double average(size_t n, const double v[n])   // 가변 길이 배열 타입
+{
+    double sum = 0.0;
+    for (size_t i = 0; i < n; i++)      // for 안에서 선언
+        sum += v[i];
+    return n ? sum / (double)n : 0.0;
+}
+
+int main(void)
+{
+    struct reading r = { .id = 3, .value = 21.5, .valid = true };   // 지정 초기화
+    int64_t big = 9000000000LL;                                     // long long
+    double v[] = { 1.0, 2.0, 3.0, 6.0 };
+
+    printf("%d %.1f %d\n", r.id, r.value, r.valid);
+    printf("%lld\n", (long long)big);
+    printf("%s: %.1f\n", __func__, average(4, v));      // main: 3.0
+}
+```
+
+## 알아 둘 것
+
+| 기능 | 주의 |
+| --- | --- |
+| 가변 길이 배열 | 스택에 잡히므로 크면 위험하다. C11에서 선택 기능으로 물러났고, 지역 배열로는 쓰지 않는 편이 낫다 |
+| `inline` | C의 `inline`은 C++과 규칙이 다르다. `static inline`으로 쓰면 헷갈릴 일이 없다 |
+| `restrict` | 약속을 어기면 정의되지 않은 동작이다. `memcpy`의 원형에 붙어 있다 |
+| `_Bool` | 0이 아닌 값을 넣으면 모두 1이 된다 |
+
+<Note>
+임베디드 쪽에서는 지금도 "C99"가 기준선인 경우가 많습니다. `<stdint.h>`와 지정 초기화가 C99의 것이므로, 장치 프로그래밍에 필요한 것은 대부분 C99에서 갖춰진 셈입니다.
+</Note>
+
+## 정리
+
+- `//`, 중간 선언, `bool`, `long long`, `<stdint.h>`가 C99에서 왔다
+- 지정 초기화와 복합 리터럴로 구조체 다루기가 편해졌다
+- 암시적 `int`와 선언 없는 호출이 없어졌다

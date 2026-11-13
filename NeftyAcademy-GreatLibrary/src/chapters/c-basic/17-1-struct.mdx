@@ -1,0 +1,163 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+`struct`는 **서로 다른 타입의 값 여러 개를 하나로 묶어** 새 타입을 만듭니다. 관련된 값들을 따로따로 들고 다니지 않고 한 덩어리로 다룰 수 있습니다.
+
+## 만들고 쓰기
+
+```c
+#include <stdio.h>
+
+struct reading {
+    int sensor_id;
+    double celsius;
+    bool valid;
+};
+
+int main(void)
+{
+    struct reading a = { 3, 21.5, true };                       // 순서대로
+    struct reading b = { .sensor_id = 4, .celsius = 19.0 };     // 이름으로. 안 적은 valid 는 false
+    struct reading c = { 0 };                                   // 전부 0
+
+    b.valid = true;
+    c = a;                              // 통째로 복사된다
+    c.celsius += 1.0;
+
+    printf("%d %.1f %d\n", a.sensor_id, a.celsius, a.valid);    // 3 21.5 1
+    printf("%d %.1f %d\n", c.sensor_id, c.celsius, c.valid);    // 3 22.5 1
+    printf("%zu\n", sizeof(struct reading));                    // 24
+    return 0;
+}
+```
+
+- 멤버는 점(`.`)으로 고릅니다
+- `.이름 = 값`으로 초기화하면(지정 초기화) 순서를 외울 필요가 없고, 멤버가 늘어도 깨지지 않습니다
+- 배열과 달리 구조체는 `=`로 **통째로 복사**됩니다
+- `==`로 비교할 수는 없습니다. 멤버를 하나씩 비교합니다
+
+## 함수와 주고받기
+
+```c
+#include <stdio.h>
+
+struct point {
+    int x;
+    int y;
+};
+
+// 값으로 받고 값으로 돌려준다: 복사된다
+struct point moved(struct point p, int dx, int dy)
+{
+    p.x += dx;
+    p.y += dy;
+    return p;
+}
+
+// 포인터로 받는다: 원본을 고친다
+void move(struct point *p, int dx, int dy)
+{
+    p->x += dx;
+    p->y += dy;
+}
+
+// 읽기만 할 때: 복사를 피하면서 고치지 않는다는 약속
+void print_point(const struct point *p)
+{
+    printf("(%d, %d)\n", p->x, p->y);
+}
+
+int main(void)
+{
+    struct point a = { 1, 2 };
+    struct point b = moved(a, 10, 0);
+    move(&a, 0, 5);
+
+    print_point(&a);    // (1, 7)
+    print_point(&b);    // (11, 2)
+    return 0;
+}
+```
+
+| 넘기는 법 | 쓸 때 |
+| --- | --- |
+| 값 (`struct point p`) | 작고(16바이트쯤까지), 원본을 건드리지 않을 때 |
+| 포인터 (`struct point *p`) | 함수가 원본을 고칠 때 |
+| 읽기 전용 포인터 (`const struct point *p`) | 크지만 읽기만 할 때 |
+
+변수에는 점, 포인터에는 화살표(`->`)를 씁니다.
+
+## 구조체 안의 구조체와 배열
+
+```c
+struct device {
+    char name[16];              // 배열도 멤버가 될 수 있다
+    struct point position;      // 구조체도
+    struct reading last;
+    struct device *next;        // 자기 자신을 가리키는 포인터
+};
+```
+
+```c nocheck
+struct device d = { .name = "kitchen", .position = { 2, 3 } };
+d.position.x = 5;
+d.last.celsius = 22.0;
+```
+
+구조체 안에 든 배열은 구조체를 복사할 때 **함께 복사**됩니다. 포인터 멤버는 주소만 복사되므로 두 구조체가 같은 곳을 가리키게 됩니다.
+
+자기 자신을 멤버로 넣을 수는 없지만(크기가 무한해집니다) 자기 자신을 가리키는 포인터는 넣을 수 있습니다. 연결 리스트와 트리가 이렇게 만들어집니다.
+
+## 구조체의 배열
+
+```c
+#include <stdio.h>
+
+struct pin {
+    const char *name;
+    int number;
+};
+
+int main(void)
+{
+    const struct pin pins[] = {
+        { "led", 17 },
+        { "button", 27 },
+        { "buzzer", 22 },
+    };
+
+    for (size_t i = 0; i < sizeof pins / sizeof pins[0]; i++)
+        printf("%-8s GPIO %d\n", pins[i].name, pins[i].number);
+    return 0;
+}
+```
+
+표 모양의 데이터를 코드에 적어 둘 때 가장 많이 쓰는 형태입니다.
+
+## 크기와 빈칸
+
+`struct reading`은 `int`(4) + `double`(8) + `bool`(1) = 13바이트가 아니라 24바이트입니다. 각 멤버가 자기 크기의 배수 주소에 놓이도록 사이사이에 빈칸(패딩)이 들어가기 때문입니다. 「ABI」 챕터에서 본 내용입니다.
+
+| 알아 둘 것 | 이유 |
+| --- | --- |
+| 큰 멤버부터 적으면 작아진다 | 빈칸이 줄어든다 |
+| 구조체를 통째로 파일이나 네트워크에 쓰지 않는다 | 빈칸과 바이트 순서가 플랫폼마다 다르다. 멤버를 하나씩 바이트로 옮긴다 |
+| `memcmp`로 비교하지 않는다 | 빈칸에는 쓰레기 값이 있을 수 있다 |
+
+## 그 자리에서 만들기
+
+```c nocheck
+print_point(&(struct point){ 3, 4 });           // 복합 리터럴
+p = (struct point){ .x = 0, .y = 0 };           // 한 번에 다시 채우기
+```
+
+`(타입){ … }`는 이름 없는 구조체 값을 그 자리에서 만듭니다.
+
+<Note>
+비트 단위로 멤버 크기를 정하는 비트 필드(`unsigned ready : 1;`)도 있습니다. 메모리를 아낄 때는 좋지만 비트가 놓이는 순서를 구현이 정하므로, 하드웨어 레지스터나 프로토콜의 비트를 맞출 때는 시프트와 마스크를 쓰는 편이 안전합니다.
+</Note>
+
+## 정리
+
+- `struct`는 여러 값을 묶은 새 타입, 대입하면 통째로 복사된다
+- 변수는 `.`, 포인터는 `->`
+- 고치거나 큰 것은 포인터로, 읽기만 하면 `const` 포인터로 넘긴다

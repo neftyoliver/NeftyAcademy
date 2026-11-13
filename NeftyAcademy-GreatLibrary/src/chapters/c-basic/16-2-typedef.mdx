@@ -1,0 +1,117 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+`typedef`는 이미 있는 타입에 **새 이름**을 붙입니다. 새 타입을 만드는 것이 아니라 별명을 만드는 것입니다.
+
+## 쓰는 법
+
+```c
+typedef unsigned char byte;
+typedef int celsius;
+
+byte b = 0xff;
+celsius t = 23;
+```
+
+변수 선언 앞에 `typedef`를 붙이면, 변수 이름이 들어갈 자리의 이름이 타입 이름이 됩니다. `unsigned char byte;`가 변수 선언이니 `typedef unsigned char byte;`는 `byte`를 타입 이름으로 만듭니다.
+
+표준 라이브러리의 `size_t`, `uint32_t`, `FILE`도 모두 `typedef`입니다.
+
+## 구조체와 함께
+
+```c
+#include <stdio.h>
+
+struct point {
+    int x;
+    int y;
+};
+typedef struct point point;     // 이제 struct 를 안 써도 된다
+
+// 한 번에 쓰기도 한다
+typedef struct {
+    point top_left;
+    point bottom_right;
+} rect;
+
+int main(void)
+{
+    point p = { 3, 4 };
+    rect r = { { 0, 0 }, { 10, 5 } };
+    printf("%d %d %d\n", p.x, r.bottom_right.x, r.bottom_right.y);     // 3 10 5
+    return 0;
+}
+```
+
+C에서는 `struct point`라고 `struct`를 매번 붙여야 합니다. `typedef`로 짧은 이름을 만들 수 있습니다. 다만 붙일지 말지는 취향이 갈립니다. 리눅스 커널은 "구조체임이 보이는 편이 낫다"며 `struct`를 그대로 씁니다.
+
+## 함수 포인터
+
+`typedef`가 가장 큰 도움이 되는 곳입니다.
+
+```c
+#include <stdio.h>
+
+typedef void handler(int value);        // 함수 타입
+
+void print_value(int value)
+{
+    printf("값 %d\n", value);
+}
+
+void each(const int *v, size_t n, handler *h)
+{
+    for (size_t i = 0; i < n; i++)
+        h(v[i]);
+}
+
+int main(void)
+{
+    int v[] = { 1, 2, 3 };
+    each(v, 3, print_value);
+    return 0;
+}
+```
+
+`typedef` 없이 쓰면 `each`의 셋째 인자는 `void (*h)(int value)`입니다. 함수 포인터를 돌려주는 함수처럼 더 복잡한 선언에서는 `typedef` 없이는 읽기가 어렵습니다.
+
+## typedef와 #define
+
+```c nocheck
+typedef char *string_t;
+#define STRING char *
+
+string_t a, b;      // 둘 다 char *
+STRING c, d;        // char *c, d;  → d는 char
+```
+
+`#define`은 글자를 바꿔 넣을 뿐이고, `typedef`는 컴파일러가 타입으로 이해합니다. 타입에 이름을 붙일 때는 `typedef`를 씁니다.
+
+## 크기를 한 곳에서 바꾸기
+
+```c
+#include <stdint.h>
+
+typedef int32_t sample_t;       // 나중에 int16_t 로 바꾸려면 이 줄만 고친다
+
+sample_t buffer[1024];
+```
+
+코드 전체에 쓰이는 타입에 이름을 붙여 두면, 타입을 바꿀 일이 생겼을 때 한 줄만 고치면 됩니다. 플랫폼마다 크기가 다른 타입을 감출 때도 씁니다.
+
+## 조심할 것
+
+| 조심할 것 | 이유 |
+| --- | --- |
+| 별명은 같은 타입이다 | `celsius`와 `int`는 서로 그냥 대입된다. 단위를 섞는 실수를 막아 주지 않는다 |
+| 포인터를 감추지 않는다 | `typedef struct node *node_ptr;`처럼 하면 `const node_ptr`이 생각과 다르게 붙고(포인터가 고정된다), 포인터인지 눈에 안 보인다 |
+| `_t`로 끝나는 이름 | POSIX가 자기 몫으로 맡아 둔 이름이다. 흔히들 쓰지만 겹칠 수 있다 |
+
+<Note>
+단위를 섞는 실수까지 컴파일러가 잡게 하려면 별명이 아니라 진짜 새 타입이 필요합니다. 멤버 하나짜리 구조체로 감싸는 방법을 씁니다: `struct celsius { double value; };`
+</Note>
+
+## 정리
+
+- `typedef`는 별명이다. 새 타입이 아니다
+- 구조체, 그리고 특히 함수 포인터를 읽기 쉽게 만든다
+- 포인터는 감추지 말고 별을 드러낸다

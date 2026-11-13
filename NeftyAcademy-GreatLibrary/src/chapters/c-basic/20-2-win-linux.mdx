@@ -1,0 +1,209 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+리눅스에서 창을 띄우는 가장 낮은 층인 <strong>X11(Xlib)</strong>으로 직접 만들어 봅니다. 이 층에는 단추도 글 칸도 없습니다. 네모를 그리고, 마우스가 그 네모 안을 눌렀는지 우리가 직접 따집니다. GTK나 Qt 같은 도구가 안에서 해 주는 일이 무엇인지 볼 수 있습니다.
+
+## 준비
+
+```sh
+sudo apt install libx11-dev
+clang -std=c23 -Wall -Wextra xwin.c -o xwin -lX11
+./xwin
+```
+
+`libx11-dev`는 Xlib의 헤더와 링크용 파일입니다. `-lX11`은 "`libX11` 라이브러리를 붙여 달라"는 뜻입니다.
+
+## 만들 것
+
+글 칸에 글자를 치고 `Add` 단추(또는 엔터)를 누르면 아래 목록에 한 줄이 더해집니다. 목록이 넘치면 오른쪽 스크롤바나 마우스 휠로 움직입니다. 상단 바의 제목과 닫기 단추는 창 관리자가 그려 줍니다.
+
+## 전체 코드
+
+```c nocheck
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+#include <X11/keysym.h>
+#include <stdio.h>
+#include <string.h>
+
+enum { WIDTH = 360, HEIGHT = 260, LINE_HEIGHT = 18, VISIBLE = 10, MAX_LINES = 64, TEXT_MAX = 40 };
+
+// 화면에 놓을 것들의 자리: x, y, 너비, 높이
+static const XRectangle field = { 16, 16, 220, 28 };
+static const XRectangle button = { 248, 16, 96, 28 };
+static const XRectangle list = { 16, 56, 312, 188 };
+static const XRectangle track = { 332, 56, 12, 188 };
+
+static char input[TEXT_MAX];
+static char lines[MAX_LINES][TEXT_MAX];
+static int count;   // 목록의 줄 수
+static int top;     // 맨 위에 보이는 줄 번호
+
+static bool inside(const XRectangle *r, int x, int y)
+{
+    return x >= r->x && x < r->x + r->width && y >= r->y && y < r->y + r->height;
+}
+
+static int max_top(void)
+{
+    return count > VISIBLE ? count - VISIBLE : 0;
+}
+
+static void scroll_to(int line)
+{
+    top = line < 0 ? 0 : line > max_top() ? max_top() : line;
+}
+
+static void add_line(void)
+{
+    if (input[0] == '\0')
+        return;
+    if (count == MAX_LINES) {           // 꽉 차면 가장 오래된 줄을 버린다
+        memmove(lines[0], lines[1], sizeof lines - sizeof lines[0]);
+        count--;
+    }
+    strcpy(lines[count++], input);
+    input[0] = '\0';
+    scroll_to(max_top());
+}
+
+static void draw(Display *d, Window w, GC gc)
+{
+    XClearWindow(d, w);
+
+    // 글 칸
+    XDrawRectangle(d, w, gc, field.x, field.y, field.width, field.height);
+    XDrawString(d, w, gc, field.x + 6, field.y + 19, input, (int)strlen(input));
+
+    // 단추
+    XDrawRectangle(d, w, gc, button.x, button.y, button.width, button.height);
+    XDrawString(d, w, gc, button.x + 38, button.y + 19, "Add", 3);
+
+    // 목록
+    XDrawRectangle(d, w, gc, list.x, list.y, list.width, list.height);
+    for (int i = 0; i < VISIBLE && top + i < count; i++)
+        XDrawString(d, w, gc, list.x + 6, list.y + 16 + i * LINE_HEIGHT,
+                    lines[top + i], (int)strlen(lines[top + i]));
+
+    // 스크롤바: 길과 손잡이
+    int thumb_height = count > VISIBLE ? track.height * VISIBLE / count : track.height;
+    int thumb_y = track.y + (max_top() ? (track.height - thumb_height) * top / max_top() : 0);
+    XDrawRectangle(d, w, gc, track.x, track.y, track.width, track.height);
+    XFillRectangle(d, w, gc, track.x, thumb_y, track.width, (unsigned)thumb_height);
+}
+
+int main(void)
+{
+    Display *d = XOpenDisplay(nullptr);
+    if (d == nullptr) {
+        fputs("X 서버에 연결할 수 없습니다\n", stderr);
+        return 1;
+    }
+    int screen = DefaultScreen(d);
+    Window w = XCreateSimpleWindow(d, RootWindow(d, screen), 0, 0, WIDTH, HEIGHT, 1,
+                                   BlackPixel(d, screen), WhitePixel(d, screen));
+    XStoreName(d, w, "Hello X11");                                  // 상단 바의 제목
+    XSelectInput(d, w, ExposureMask | KeyPressMask | ButtonPressMask | Button1MotionMask);
+
+    Atom wm_delete = XInternAtom(d, "WM_DELETE_WINDOW", False);     // 닫기 단추를 알려 달라고 부탁
+    XSetWMProtocols(d, w, &wm_delete, 1);
+
+    GC gc = XCreateGC(d, w, 0, nullptr);
+    XMapWindow(d, w);
+
+    for (bool running = true; running;) {
+        XEvent e;
+        XNextEvent(d, &e);          // 일이 생길 때까지 기다린다
+
+        switch (e.type) {
+        case KeyPress: {
+            char text[8];
+            KeySym key;
+            int n = XLookupString(&e.xkey, text, sizeof text, &key, nullptr);
+            size_t len = strlen(input);
+            if (key == XK_Return)
+                add_line();
+            else if (key == XK_BackSpace && len > 0)
+                input[len - 1] = '\0';
+            else if (n == 1 && text[0] >= ' ' && text[0] <= '~' && len < TEXT_MAX - 1) {
+                input[len] = text[0];
+                input[len + 1] = '\0';
+            }
+            break;
+        }
+        case ButtonPress:
+            if (e.xbutton.button == Button4)            // 휠 위로
+                scroll_to(top - 1);
+            else if (e.xbutton.button == Button5)       // 휠 아래로
+                scroll_to(top + 1);
+            else if (inside(&button, e.xbutton.x, e.xbutton.y))
+                add_line();
+            else if (inside(&track, e.xbutton.x, e.xbutton.y))
+                scroll_to((e.xbutton.y - track.y) * count / track.height - VISIBLE / 2);
+            break;
+        case MotionNotify:                              // 스크롤바를 누른 채 끌기
+            if (inside(&track, e.xmotion.x, e.xmotion.y))
+                scroll_to((e.xmotion.y - track.y) * count / track.height - VISIBLE / 2);
+            break;
+        case ClientMessage:
+            if ((Atom)e.xclient.data.l[0] == wm_delete)
+                running = false;
+            break;
+        }
+        draw(d, w, gc);             // 무슨 일이든 생기면 다시 그린다
+    }
+
+    XFreeGC(d, gc);
+    XCloseDisplay(d);
+    return 0;
+}
+```
+
+## 뼈대는 세 부분
+
+| 부분 | 코드 | 하는 일 |
+| --- | --- | --- |
+| 창 만들기 | `XOpenDisplay` → `XCreateSimpleWindow` → `XMapWindow` | X 서버에 연결하고, 창을 만들고, 화면에 올린다 |
+| 이벤트 루프 | `for (…) { XNextEvent(…); switch (e.type) … }` | 일이 생길 때까지 자다가, 생기면 종류에 따라 처리한다 |
+| 그리기 | `draw()` | 지금 상태(변수들)를 보고 화면 전체를 다시 그린다 |
+
+이 세 부분은 어느 운영체제의 어느 GUI 도구에서나 똑같이 나옵니다. 이름과 겉모습만 다릅니다.
+
+## X 서버와 클라이언트
+
+X11에서 화면과 키보드, 마우스를 가진 프로그램은 <strong>X 서버</strong>이고, 우리 프로그램은 거기에 접속하는 클라이언트입니다. `XDrawRectangle`은 화면을 직접 건드리지 않고 "여기에 네모를 그려 달라"는 요청을 서버에 보냅니다. `Display *`가 그 연결입니다. 그래서 다른 컴퓨터의 화면에 창을 띄우는 것도 가능합니다.
+
+## 이벤트
+
+`XSelectInput`으로 받고 싶은 일의 종류를 미리 알려 둡니다.
+
+| 이벤트 | 언제 | 이 프로그램이 하는 일 |
+| --- | --- | --- |
+| `Expose` | 창이 처음 보이거나 가려졌다 드러날 때 | 다시 그린다 |
+| `KeyPress` | 키를 누를 때 | 글 칸에 글자를 더하거나 지운다 |
+| `ButtonPress` | 마우스 단추를 누를 때. 휠은 4번과 5번 단추 | 어느 네모 안인지 따져서 처리한다 |
+| `MotionNotify` | 마우스를 움직일 때 (여기서는 누른 채 끌 때만) | 스크롤바를 끈다 |
+| `ClientMessage` | 창 관리자가 보내는 알림 | 닫기 단추면 끝낸다 |
+
+X 서버는 창의 내용을 기억해 주지 않습니다. 가려졌던 부분이 드러나면 `Expose`를 보내고, 다시 그리는 것은 우리 몫입니다.
+
+## 직접 만든 위젯
+
+단추는 네모와 글자 세 개(`Add`)이고, "눌렸다"는 판정은 `inside(&button, x, y)` 한 줄입니다. 스크롤바는 네모 둘(길과 손잡이)이고, 손잡이의 길이와 위치는 "전체 줄 수 가운데 보이는 줄의 비율"로 계산합니다.
+
+진짜 위젯 도구는 여기에 눌린 모양, 키보드 포커스, 글자 선택, 복사와 붙여넣기, 접근성 같은 것들을 더합니다. 그 양이 많아서 도구를 쓰는 것입니다.
+
+<Note kind="warn">
+이 예제는 한글을 그리거나 입력하지 못합니다. `XDrawString`은 옛 방식의 글꼴만 쓰고, `XLookupString`은 한글 입력기와 연결되지 않습니다. 글자를 제대로 다루려면 글꼴 라이브러리(FreeType, Pango)와 입력기 연결이 필요하고, 이것이 위젯 도구를 쓰는 가장 큰 이유입니다.
+</Note>
+
+## Wayland
+
+요즘 리눅스 데스크톱은 X11의 뒤를 잇는 <strong>Wayland</strong>로 옮겨 가고 있습니다. X11 프로그램은 Wayland 데스크톱에서도 XWayland라는 호환 층을 통해 그대로 돕니다.
+
+Wayland는 그리기 명령이 아예 없습니다. 프로그램이 메모리에 픽셀을 직접 채운 뒤 "이 그림을 화면에 올려 달라"고 넘깁니다. 상단 바까지 직접 그려야 하는 경우도 있어서, 같은 예제가 몇 배로 길어집니다. 그래서 낮은 층을 구경하기에는 X11이 낫습니다.
+
+## 정리
+
+- 창 프로그램의 뼈대: 창 만들기, 이벤트 루프, 그리기
+- 가장 낮은 층에는 위젯이 없다. 네모를 그리고 좌표를 따진다
+- 실제 프로그램은 이 위에 놓인 도구(GTK, Qt 등)를 쓴다

@@ -1,0 +1,133 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+프로그램은 위에서 아래로 한 줄씩 실행됩니다. `if`와 `switch`는 조건에 따라 **어느 줄로 갈지**를 고릅니다. 기계어로는 「우리 프로그램이 작동하는 방식」에서 본 점프가 됩니다.
+
+## if
+
+```c
+#include <stdio.h>
+
+int main(void)
+{
+    int temp = 31;
+
+    if (temp >= 30) {
+        puts("덥다");
+    } else if (temp >= 15) {
+        puts("적당하다");
+    } else {
+        puts("춥다");
+    }
+    return 0;
+}
+```
+
+괄호 안의 식이 0이 아니면 참입니다. 그래서 아래 둘은 같은 뜻입니다.
+
+```c
+if (p != nullptr) …
+if (p) …
+```
+
+## 중괄호는 늘 쓴다
+
+```c nocheck
+if (error)
+    log_error();
+    cleanup();      // 들여쓰기와 달리 언제나 실행된다
+```
+
+중괄호가 없으면 `if`에 딸린 문장은 **하나뿐**입니다. 한 줄짜리라도 중괄호를 쓰면 나중에 줄을 더할 때 실수하지 않습니다. `else`는 가장 가까운 `if`에 붙는다는 규칙도 중괄호를 쓰면 신경 쓸 일이 없습니다.
+
+## 조건 연산자
+
+```c
+int abs_x = x < 0 ? -x : x;
+const char *label = on ? "켜짐" : "꺼짐";
+```
+
+값 하나를 고를 때는 `? :`가 간결합니다. 여러 줄의 일을 해야 하면 `if`를 씁니다.
+
+## switch
+
+값 하나를 여러 상수와 비교할 때 씁니다.
+
+```c
+#include <stdio.h>
+
+enum state { IDLE, RUNNING, ERROR };
+
+const char *state_name(enum state s)
+{
+    switch (s) {
+    case IDLE:
+        return "대기";
+    case RUNNING:
+        return "동작";
+    case ERROR:
+        return "오류";
+    }
+    return "?";
+}
+
+int main(void)
+{
+    int key = 'q';
+
+    switch (key) {
+    case 'h':
+    case '?':                   // 두 경우를 묶었다
+        puts("도움말");
+        break;
+    case 'q':
+        puts("종료");
+        break;
+    default:
+        puts("모르는 키");
+        break;
+    }
+
+    puts(state_name(RUNNING));
+    return 0;
+}
+```
+
+| 규칙 | 설명 |
+| --- | --- |
+| 정수만 | `int`, `char`, `enum`. 글자열과 실수는 안 된다 |
+| `case` 뒤는 상수 | 변수는 올 수 없다 |
+| `break`가 없으면 아래로 흘러간다 | 다음 `case`의 코드까지 실행한다 |
+| `default` | 어느 것에도 안 맞을 때 |
+
+## 흘러내림
+
+```c nocheck
+switch (level) {
+case 2:
+    enable_extra();
+    [[fallthrough]];        // 일부러 흘려보낸다는 표시 (C23)
+case 1:
+    enable_basic();
+    break;
+}
+```
+
+`break`를 빠뜨리는 것은 C에서 가장 유명한 실수 가운데 하나입니다. 일부러 흘려보낼 때는 `[[fallthrough]];`를 적어 의도를 밝히고, `-Wimplicit-fallthrough`를 켜면 표시 없는 흘러내림을 컴파일러가 알려 줍니다.
+
+<Note kind="tip">
+`enum`을 `switch`로 나눌 때 `default`를 빼 두면, 나중에 `enum`에 값을 더했을 때 `-Wall`이 "이 `case`가 빠졌다"고 알려 줍니다. 위의 `state_name`이 그렇게 생겼습니다.
+</Note>
+
+## if와 switch 고르기
+
+| | `if` | `switch` |
+| --- | --- | --- |
+| 조건 | 무엇이든 (범위, 여러 변수) | 정수 하나가 어떤 상수와 같은가 |
+| 읽기 | 조건이 서너 개 넘으면 길어진다 | 경우가 많아도 한눈에 들어온다 |
+| 기계어 | 비교와 점프를 차례로 | 경우가 많으면 점프 표 하나로 바로 간다 |
+
+## 정리
+
+- 0이 아니면 참, 중괄호는 늘 쓴다
+- `switch`는 정수와 상수의 비교, `case`마다 `break`
+- 일부러 흘려보낼 때는 `[[fallthrough]]`

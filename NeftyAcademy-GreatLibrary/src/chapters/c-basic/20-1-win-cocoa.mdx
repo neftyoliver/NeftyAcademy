@@ -1,0 +1,129 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+맥의 창은 <strong>Cocoa</strong>(AppKit)라는 프레임워크로 만듭니다. Cocoa는 C가 아니라 **Objective-C**로 되어 있습니다. Objective-C는 C에 객체와 메시지를 더한 언어라서, C 코드는 그대로 쓸 수 있고 Clang이 함께 컴파일해 줍니다.
+
+<Note kind="warn">
+이 챕터의 코드는 맥에서 빌드하고 실행해 보지 못했습니다. 이 책의 실습 환경(리눅스와 윈도우)에 맥이 없기 때문입니다. 구경하는 용도로 읽어 주세요.
+</Note>
+
+## Objective-C를 읽는 법
+
+| Objective-C | 뜻 | C로 치면 |
+| --- | --- | --- |
+| `[window center]` | window에게 `center` 메시지를 보낸다 | `center(window)` |
+| `[a setTitle:@"Hi"]` | 인자가 있는 메시지 | `set_title(a, "Hi")` |
+| `a.title = @"Hi"` | 위와 같은 뜻의 줄임 | |
+| `@"글자"` | `NSString` 객체 (C 글자열이 아니다) | |
+| `@interface … @end` | 클래스의 선언 | 구조체 정의 + 함수 선언 |
+| `@implementation … @end` | 클래스의 정의 | 함수 정의 |
+| `- (void)clicked:(id)sender` | 메서드 | `void clicked(self, sender)` |
+| `@selector(clicked:)` | 메서드의 이름표 | 함수 포인터와 비슷한 것 |
+
+대괄호는 실제로 `objc_msgSend`라는 C 함수 호출로 컴파일됩니다. "어느 함수를 부를지"를 실행 중에 이름으로 찾는다는 점이 C의 함수 호출과 다릅니다.
+
+## 전체 코드
+
+```objc
+// hello_mac.m
+#import <Cocoa/Cocoa.h>
+
+@interface AppDelegate : NSObject <NSApplicationDelegate>
+@property (strong) NSWindow *window;
+@property (strong) NSTextField *field;
+@property (strong) NSTextView *log;
+@end
+
+@implementation AppDelegate
+
+- (void)applicationDidFinishLaunching:(NSNotification *)note
+{
+    self.window = [[NSWindow alloc]
+        initWithContentRect:NSMakeRect(0, 0, 360, 260)
+                  styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+                            NSWindowStyleMaskResizable
+                    backing:NSBackingStoreBuffered
+                      defer:NO];
+    self.window.title = @"Hello Cocoa";             // 상단 바의 제목
+    NSView *content = self.window.contentView;
+
+    // 글 칸
+    self.field = [[NSTextField alloc] initWithFrame:NSMakeRect(16, 216, 220, 28)];
+    [content addSubview:self.field];
+
+    // 단추: 눌리면 self 의 clicked: 를 부른다
+    NSButton *button = [NSButton buttonWithTitle:@"Add" target:self action:@selector(clicked:)];
+    button.frame = NSMakeRect(248, 214, 96, 32);
+    [content addSubview:button];
+
+    // 스크롤바가 달린 글 영역
+    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(16, 16, 328, 188)];
+    scroll.hasVerticalScroller = YES;
+    self.log = [[NSTextView alloc] initWithFrame:scroll.bounds];
+    self.log.editable = NO;
+    self.log.autoresizingMask = NSViewWidthSizable;
+    scroll.documentView = self.log;
+    [content addSubview:scroll];
+
+    [self.window center];
+    [self.window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+}
+
+- (void)clicked:(id)sender
+{
+    NSString *text = self.field.stringValue;
+    if (text.length == 0)
+        return;
+    self.log.string = [self.log.string stringByAppendingFormat:@"%@\n", text];
+    [self.log scrollToEndOfDocument:nil];
+    self.field.stringValue = @"";
+}
+
+- (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)app
+{
+    return YES;
+}
+
+@end
+
+int main(void)
+{
+    @autoreleasepool {
+        NSApplication *app = [NSApplication sharedApplication];
+        [app setActivationPolicy:NSApplicationActivationPolicyRegular];
+        AppDelegate *delegate = [[AppDelegate alloc] init];
+        app.delegate = delegate;
+        [app run];                  // 이벤트 루프
+    }
+    return 0;
+}
+```
+
+```sh
+clang -fobjc-arc hello_mac.m -framework Cocoa -o hello_mac
+./hello_mac
+```
+
+`-framework Cocoa`는 리눅스의 `-lX11`처럼 라이브러리를 붙이는 옵션이고, `-fobjc-arc`는 객체의 메모리를 컴파일러가 자동으로 관리하게 합니다.
+
+## 다른 플랫폼과 견주기
+
+| | Cocoa | Win32 | Xlib |
+| --- | --- | --- | --- |
+| 언어 | Objective-C | C | C |
+| 이벤트 루프 | `[app run]` 안에 숨어 있다 | `GetMessageW` 루프를 직접 쓴다 | `XNextEvent` 루프를 직접 쓴다 |
+| 위젯 | 객체 (`NSButton`, `NSTextField`) | 자식 창 (`L"BUTTON"`) | 없다 |
+| 단추가 눌리면 | 지정한 객체의 메서드를 부른다 (target-action) | 부모 창에 `WM_COMMAND`를 보낸다 | 좌표를 직접 따진다 |
+| 좌표의 원점 | 왼쪽 **아래** | 왼쪽 위 | 왼쪽 위 |
+
+뼈대(창 만들기, 이벤트 루프, 이벤트에 반응하기)는 같고, 층이 높아질수록 루프와 그리기가 프레임워크 안으로 숨습니다.
+
+## C만으로도 되는가
+
+Objective-C의 메시지는 결국 C 함수(`objc_msgSend`, `objc_getClass`, `sel_registerName`) 호출이라서, 원한다면 순수 C로도 같은 프로그램을 짤 수 있습니다. 하지만 모든 줄이 형 변환투성이가 되어 읽기 어렵습니다. 맥에서는 화면 부분만 Objective-C(`.m` 파일)나 Swift로 쓰고, 나머지 로직을 C로 써서 함께 링크하는 방식이 보통입니다.
+
+## 정리
+
+- 맥의 창은 Cocoa, 언어는 C를 품은 Objective-C
+- `[객체 메시지]`는 실행 중에 이름으로 찾는 함수 호출이다
+- 화면은 플랫폼의 언어로, 로직은 C로 나누어 쓸 수 있다

@@ -23,8 +23,9 @@ npm run build    # dist/index.html 한 파일 (수강생에게 그대로 보내�
 ```
 src/
 ├─ library.tsx          차례 전체 (책·챕터 목록)
-├─ chapters/basics/     기초 코스 MDX
-├─ components/          본문에 넣는 그림·상호작용 (Pipeline, PcStepper, Layers)
+├─ chapters/basics/     컴퓨터의 입문 MDX
+├─ chapters/c-basic/    컴퓨터 프로그래밍 초급 MDX (파일 이름 앞 숫자가 차례)
+├─ components/          본문에 넣는 그림·상호작용 (Pipeline, PcStepper, Layers, Memory)
 └─ style.css            Great Library만의 모양
 ```
 
@@ -34,6 +35,8 @@ src/
 2. `library.tsx`에 import 하고 chapters 배열에 `{ id, title, summary, Content }` 추가
 3. 아직 덜 썼으면 `draft: true`
 
+코드 블록을 ` ```c nocheck `로 열면 "일부러 틀렸거나 조각이라 컴파일해 보지 않는 예제"라는 표시다(화면에는 영향 없음).
+
 MDX 주의: 본문 글에 `{`, `<`를 그냥 쓰면 코드로 읽힌다 → 백틱으로 감싸기.
 `**굵게(괄호)**` 바로 뒤에 조사가 붙으면 굵게가 안 먹는다 → `<strong>…</strong>`로 쓰기.
 
@@ -42,7 +45,7 @@ MDX 주의: 본문 글에 `{`, `<`를 그냥 쓰면 코드로 읽힌다 → 백�
 | 책 | 챕터 | 쓴 것 |
 | --- | --- | --- |
 | 컴퓨터의 입문 | 10 (하위 37) | 커널의 종류, 설치 도구와 부팅, 루분투 설치, apt와 저장소, 여러 패키지 매니저, Git 기초, 리눅스 명령어와 POSIX, 우리 프로그램이 작동하는 방식 |
-| 컴퓨터 프로그래밍 초급 | 22 (하위 29) | — |
+| 컴퓨터 프로그래밍 초급 | 22 (하위 29) | 전부 (2026-11-13 초안. 맥·WinUI 예제는 실행해 보지 못함) |
 | 컴퓨터 프로그래밍 중급 | 19 (하위 35) | C 생태계의 네 층 |
 | 전자공학 입문 | 7 (하위 13) | — |
 

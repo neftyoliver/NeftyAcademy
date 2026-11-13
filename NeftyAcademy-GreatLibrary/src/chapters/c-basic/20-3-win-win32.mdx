@@ -1,0 +1,162 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+<strong>Win32</strong>는 윈도우의 가장 기본이 되는 C API입니다. 1990년대부터 있었고 지금도 모든 윈도우 프로그램의 바닥에 깔려 있습니다. 리눅스의 Xlib과 달리 단추, 글 칸, 목록 같은 위젯을 운영체제가 기본으로 갖고 있습니다.
+
+## 준비와 빌드
+
+윈도우에 LLVM을 설치했다면(`winget install LLVM.LLVM`, Visual Studio의 빌드 도구도 필요):
+
+```sh
+clang hello_win.c -o hello_win.exe -luser32
+```
+
+Visual Studio의 컴파일러로는 "x64 Native Tools Command Prompt"에서:
+
+```sh
+cl hello_win.c user32.lib
+```
+
+`user32`는 창과 메시지를 다루는 라이브러리입니다.
+
+## 전체 코드
+
+```c nocheck
+#define UNICODE
+#include <windows.h>
+
+enum { ID_EDIT = 1, ID_BUTTON, ID_LIST };
+
+static HWND edit;
+static HWND list;
+
+static void add_line(void)
+{
+    wchar_t text[64];
+    if (GetWindowTextW(edit, text, 64) == 0)
+        return;
+    SendMessageW(list, LB_ADDSTRING, 0, (LPARAM)text);
+    LRESULT count = SendMessageW(list, LB_GETCOUNT, 0, 0);
+    SendMessageW(list, LB_SETTOPINDEX, (WPARAM)(count - 1), 0);     // 맨 아래로 스크롤
+    SetWindowTextW(edit, L"");
+    SetFocus(edit);
+}
+
+// 창에 일이 생길 때마다 윈도우가 이 함수를 부른다
+static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    switch (message) {
+    case WM_CREATE:
+        edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                               WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                               16, 16, 220, 28, window, (HMENU)(INT_PTR)ID_EDIT, NULL, NULL);
+        CreateWindowExW(0, L"BUTTON", L"Add",
+                        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                        248, 16, 96, 28, window, (HMENU)(INT_PTR)ID_BUTTON, NULL, NULL);
+        list = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+                               WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOINTEGRALHEIGHT,
+                               16, 56, 328, 188, window, (HMENU)(INT_PTR)ID_LIST, NULL, NULL);
+        return 0;
+    case WM_COMMAND:
+        if (LOWORD(wparam) == ID_BUTTON && HIWORD(wparam) == BN_CLICKED)
+            add_line();
+        return 0;
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProcW(window, message, wparam, lparam);     // 나머지는 기본 처리에 맡긴다
+}
+
+int main(void)
+{
+    HINSTANCE instance = GetModuleHandleW(NULL);
+
+    WNDCLASSEXW wc = {
+        .cbSize = sizeof wc,
+        .lpfnWndProc = window_proc,
+        .hInstance = instance,
+        .hCursor = LoadCursorW(NULL, IDC_ARROW),
+        .hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1),
+        .lpszClassName = L"HelloWindow",
+    };
+    if (!RegisterClassExW(&wc))
+        return 1;
+
+    HWND window = CreateWindowExW(0, L"HelloWindow", L"Hello Win32", WS_OVERLAPPEDWINDOW,
+                                  CW_USEDEFAULT, CW_USEDEFAULT, 380, 300,
+                                  NULL, NULL, instance, NULL);
+    if (window == NULL)
+        return 1;
+    ShowWindow(window, SW_SHOWDEFAULT);
+
+    MSG message;
+    while (GetMessageW(&message, NULL, 0, 0) > 0) {     // 일이 생길 때까지 기다린다
+        TranslateMessage(&message);                     // 키 입력을 글자로
+        DispatchMessageW(&message);                     // window_proc 을 부른다
+    }
+    return (int)message.wParam;
+}
+```
+
+실행하면 글 칸, `Add` 단추, 스크롤바가 달린 목록이 있는 창이 뜹니다. 글 칸에 글을 쓰고 단추를 누르면 목록에 더해집니다.
+
+## 세 부분
+
+| 부분 | 코드 | 하는 일 |
+| --- | --- | --- |
+| 창 종류 등록 | `RegisterClassExW` | "이런 창은 이 함수(`window_proc`)가 맡는다"고 알린다 |
+| 창 만들기 | `CreateWindowExW` → `ShowWindow` | 등록한 종류의 창을 만들고 보인다 |
+| 메시지 루프 | `while (GetMessageW(…))` | 메시지를 꺼내 `window_proc`에 넘긴다 |
+
+Xlib 예제와 뼈대가 같습니다. 다른 점은 이벤트를 `switch`로 직접 받는 대신, 윈도우가 **우리 함수를 불러 준다**는 것입니다. `window_proc`의 주소를 등록해 두면 윈도우가 필요할 때 부릅니다. 함수 포인터 챕터에서 본 콜백입니다.
+
+## 위젯도 창이다
+
+Win32에서는 단추도 글 칸도 목록도 모두 **자식 창**입니다. `CreateWindowExW`에 미리 등록된 종류 이름을 넘기면 됩니다.
+
+| 종류 이름 | 위젯 |
+| --- | --- |
+| `L"BUTTON"` | 단추, 체크 상자 |
+| `L"EDIT"` | 글 칸 |
+| `L"LISTBOX"` | 목록 |
+| `L"STATIC"` | 글자 딱지 |
+| `L"SCROLLBAR"` | 따로 떨어진 스크롤바 |
+
+목록에는 `WS_VSCROLL`을 붙여서 세로 스크롤바를 달았습니다. 내용이 넘치면 윈도우가 알아서 스크롤합니다.
+
+## 메시지
+
+| 메시지 | 언제 | 여기서 하는 일 |
+| --- | --- | --- |
+| `WM_CREATE` | 창이 만들어진 직후 | 자식 창(위젯)을 만든다 |
+| `WM_COMMAND` | 단추가 눌리는 등 위젯이 알릴 때 | `wparam`으로 어느 위젯인지 확인한다 |
+| `WM_DESTROY` | 창이 없어질 때 | `PostQuitMessage`로 루프를 끝낸다 |
+| 나머지 수백 가지 | | `DefWindowProcW`에 맡긴다 |
+
+위젯에게 일을 시킬 때도 메시지를 보냅니다. `SendMessageW(list, LB_ADDSTRING, 0, (LPARAM)text)`는 "목록아, 이 글자열을 더해라"입니다. 글자열의 주소를 정수 `LPARAM`으로 바꿔 넘기는 것이 Win32의 방식입니다.
+
+## 낯선 이름들
+
+| 이름 | 정체 |
+| --- | --- |
+| `HWND`, `HINSTANCE`, `HMENU` | <strong>핸들</strong>. 윈도우가 관리하는 물건의 번호표. 내용은 볼 수 없다 |
+| `WPARAM`, `LPARAM`, `LRESULT` | 포인터 크기의 정수. 메시지마다 뜻이 다르다 |
+| `L"…"`, `wchar_t` | 글자 하나가 16비트인 글자열 (UTF-16) |
+| 함수 이름 끝의 `W` | 16비트 글자를 받는 판. `A`로 끝나는 옛 판도 있다 |
+| `CALLBACK` | 호출 규약 표시. 64비트에서는 아무 뜻이 없다 |
+
+핸들은 「전방 선언」에서 본 "내용을 숨긴 타입"과 같은 생각입니다.
+
+<Note>
+이 예제는 `main`으로 시작해서 검은 콘솔 창이 함께 뜹니다. 콘솔 없이 띄우려면 시작 함수를 `wWinMain`으로 바꾸고 GUI 프로그램으로 링크합니다. 그리고 다른 예제와 달리 `nullptr` 대신 `NULL`을 썼습니다. Visual Studio의 C 컴파일러가 C23을 아직 다 지원하지 않기 때문입니다.
+</Note>
+
+<Note kind="warn">
+이 코드는 리눅스에서 MinGW로 교차 컴파일해 오류와 경고가 없는 것까지만 확인했고, 윈도우에서 실행해 보지는 못했습니다.
+</Note>
+
+## 정리
+
+- Win32는 창 종류 등록, 창 만들기, 메시지 루프로 이루어진다
+- 위젯은 자식 창이고, 모든 일은 메시지로 오간다
+- 윈도우가 우리 함수(`window_proc`)를 불러 준다

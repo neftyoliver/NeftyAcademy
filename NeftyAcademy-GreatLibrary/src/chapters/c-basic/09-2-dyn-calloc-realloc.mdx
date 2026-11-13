@@ -1,0 +1,115 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+`malloc` 말고도 메모리를 빌리는 함수가 둘 더 있습니다. 0으로 채워 주는 `calloc`과, 이미 빌린 메모리의 크기를 바꾸는 `realloc`입니다.
+
+## calloc: 0으로 채워서
+
+```c
+int *v = calloc(n, sizeof *v);      // 개수, 하나의 크기
+```
+
+| | `malloc(n * size)` | `calloc(n, size)` |
+| --- | --- | --- |
+| 내용 | 쓰레기 값 | 모든 바이트가 0 |
+| 곱셈이 넘칠 때 | 작은 메모리를 주고 모른 척한다 | 실패(널)를 돌려준다 |
+
+`n * size`가 너무 커서 넘치면 `malloc`은 엉뚱하게 작은 메모리를 줍니다. `calloc`은 곱셈을 안에서 하면서 넘침을 확인합니다. 개수가 바깥에서 들어온 값(파일, 네트워크)일 때는 `calloc`이 안전합니다.
+
+## realloc: 크기 바꾸기
+
+```c
+void *realloc(void *p, size_t new_size);
+```
+
+`realloc`은 이렇게 동작합니다.
+
+1. 지금 자리 뒤에 여유가 있으면 그 자리에서 늘리고 **같은 주소**를 돌려준다
+2. 여유가 없으면 새 자리를 빌려 내용을 복사하고, 옛 자리를 해제한 뒤 **새 주소**를 돌려준다
+3. 실패하면 널을 돌려주고, **옛 메모리는 그대로 둔다**
+
+3번 때문에 아래처럼 쓰면 안 됩니다.
+
+```c nocheck
+v = realloc(v, new_size);   // 실패하면 v가 널이 되어 옛 메모리를 잃는다 (누수)
+```
+
+임시 변수에 받아서 확인한 뒤에 옮깁니다.
+
+```c nocheck
+int *t = realloc(v, new_size);
+if (t == nullptr) {
+    // v는 아직 살아 있다. 정리하고 빠져나간다
+} else {
+    v = t;
+}
+```
+
+<Note kind="warn">
+`realloc`이 성공하면 **옛 주소는 더 쓰면 안 됩니다**. 자리를 옮겼을 수 있기 때문입니다. 옛 주소를 다른 변수에 담아 둔 것이 있으면 그것도 죽은 포인터가 됩니다.
+</Note>
+
+## 늘어나는 배열
+
+입력이 몇 개 올지 모를 때는 꽉 찰 때마다 두 배로 늘립니다.
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+struct vec {
+    int *data;
+    size_t len;     // 지금 들어 있는 개수
+    size_t cap;     // 빌려 둔 칸 수
+};
+
+bool vec_push(struct vec *v, int x)
+{
+    if (v->len == v->cap) {
+        size_t cap = v->cap ? v->cap * 2 : 4;
+        int *t = realloc(v->data, cap * sizeof *t);
+        if (t == nullptr)
+            return false;
+        v->data = t;
+        v->cap = cap;
+    }
+    v->data[v->len++] = x;
+    return true;
+}
+
+int main(void)
+{
+    struct vec v = { 0 };       // data는 널, len과 cap은 0
+
+    for (int i = 1; i <= 10; i++)
+        if (!vec_push(&v, i * i))
+            return 1;
+
+    for (size_t i = 0; i < v.len; i++)
+        printf("%d ", v.data[i]);
+    printf("\n(len %zu, cap %zu)\n", v.len, v.cap);    // len 10, cap 16
+
+    free(v.data);
+    return 0;
+}
+```
+
+`realloc(nullptr, 크기)`는 `malloc(크기)`와 같습니다. 그래서 처음(`data`가 널)과 그다음을 같은 코드로 처리할 수 있습니다. 한 칸씩 늘리지 않고 두 배씩 늘리는 이유는, `realloc`이 자리를 옮길 때마다 전체를 복사하기 때문입니다. 두 배씩이면 복사 횟수가 크게 줄어듭니다.
+
+## 세 함수 견주기
+
+| 함수 | 하는 일 | 처음 내용 |
+| --- | --- | --- |
+| `malloc(size)` | `size`바이트 빌리기 | 쓰레기 |
+| `calloc(n, size)` | `n * size`바이트 빌리기 | 0 |
+| `realloc(p, size)` | `p`의 크기를 `size`로 | 앞부분은 유지, 늘어난 부분은 쓰레기 |
+| `free(p)` | 돌려주기 (`p`가 널이면 아무 일도 안 함) | |
+
+<Note>
+`realloc(p, 0)`은 쓰지 마세요. 구현마다 동작이 달랐고, C23에서 정의되지 않은 동작이 되었습니다. 해제하려면 `free`를 부릅니다.
+</Note>
+
+## 정리
+
+- 0으로 시작해야 하거나 개수를 믿을 수 없으면 `calloc`
+- `realloc`의 결과는 임시 변수로 받아 확인한다
+- 늘어나는 배열은 길이와 용량을 따로 들고, 꽉 차면 두 배로

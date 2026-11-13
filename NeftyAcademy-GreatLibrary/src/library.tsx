@@ -17,6 +17,48 @@ import PackageManagers from './chapters/basics/05-package-managers.mdx';
 import Git from './chapters/basics/06-git.mdx';
 import Commands from './chapters/basics/07-commands.mdx';
 import CEcosystem from './chapters/basics/08-c-ecosystem.mdx';
+import FirstCompile from './chapters/c-basic/01-first-compile.mdx';
+import Headers from './chapters/c-basic/02-headers.mdx';
+import Symbols from './chapters/c-basic/03-symbols.mdx';
+import Asm from './chapters/c-basic/04-asm.mdx';
+import Debugger from './chapters/c-basic/05-debugger.mdx';
+import Abi from './chapters/c-basic/06-abi.mdx';
+import PtrWhat from './chapters/c-basic/07-1-ptr-what.mdx';
+import PtrDeclaration from './chapters/c-basic/07-2-ptr-declaration.mdx';
+import PtrUsage from './chapters/c-basic/07-3-ptr-usage.mdx';
+import PtrArrays from './chapters/c-basic/07-4-ptr-arrays.mdx';
+import PtrPointer from './chapters/c-basic/07-5-ptr-pointer.mdx';
+import PtrFunction from './chapters/c-basic/07-6-ptr-function.mdx';
+import PtrMistakes from './chapters/c-basic/07-7-ptr-mistakes.mdx';
+import StdlibFirst from './chapters/c-basic/08-stdlib-first.mdx';
+import DynMalloc from './chapters/c-basic/09-1-dyn-malloc.mdx';
+import DynCallocRealloc from './chapters/c-basic/09-2-dyn-calloc-realloc.mdx';
+import HeapStructure from './chapters/c-basic/10-heap-structure.mdx';
+import TypesIntegers from './chapters/c-basic/11-1-types-integers.mdx';
+import TypesFloats from './chapters/c-basic/11-2-types-floats.mdx';
+import TypesConversion from './chapters/c-basic/11-3-types-conversion.mdx';
+import Arrays from './chapters/c-basic/12-arrays.mdx';
+import Operators from './chapters/c-basic/13-operators.mdx';
+import FlowIf from './chapters/c-basic/14-1-flow-if.mdx';
+import FlowLoops from './chapters/c-basic/14-2-flow-loops.mdx';
+import ForwardDeclaration from './chapters/c-basic/15-forward-declaration.mdx';
+import Const from './chapters/c-basic/16-1-const.mdx';
+import Typedef from './chapters/c-basic/16-2-typedef.mdx';
+import Struct from './chapters/c-basic/17-1-struct.mdx';
+import Union from './chapters/c-basic/17-2-union.mdx';
+import Macros from './chapters/c-basic/18-macros.mdx';
+import ArraysAdvanced from './chapters/c-basic/19-arrays-advanced.mdx';
+import WinCocoa from './chapters/c-basic/20-1-win-cocoa.mdx';
+import WinLinux from './chapters/c-basic/20-2-win-linux.mdx';
+import WinWin32 from './chapters/c-basic/20-3-win-win32.mdx';
+import WinWinui from './chapters/c-basic/20-4-win-winui.mdx';
+import UbWhat from './chapters/c-basic/21-1-ub-what.mdx';
+import UbExamples from './chapters/c-basic/21-2-ub-examples.mdx';
+import VerC89 from './chapters/c-basic/22-1-ver-c89.mdx';
+import VerC99 from './chapters/c-basic/22-2-ver-c99.mdx';
+import VerC11 from './chapters/c-basic/22-3-ver-c11.mdx';
+import VerC17 from './chapters/c-basic/22-4-ver-c17.mdx';
+import VerC23 from './chapters/c-basic/22-5-ver-c23.mdx';
 
 /** 아직 안 쓴 챕터 */
 const draft = (id: string, title: string, children?: Chapter[]): Chapter => ({ id, title, draft: true, children });
@@ -107,46 +149,46 @@ export const library: Library = {
       subtitle: 'C와 LLVM으로 첫 컴파일부터 창 띄우기까지',
       category: 'c',
       chapters: [
-        draft('first-compile', 'C와 LLVM으로 가장 가벼운 컴파일'),
-        draft('headers', '헤더를 포함한 C 파일'),
-        draft('symbols', '심볼이란'),
-        draft('asm', '어셈블리로 보는 아키텍처의 차이'),
-        draft('debugger', '디버거로 hello, world 열어 보기'),
-        draft('abi', 'ABI'),
-        draft('pointers', '포인터', [
-          draft('ptr-what', '주소라는 값'),
-          draft('ptr-declaration', '선언문에서의 *'),
-          draft('ptr-usage', '사용문에서의 * 와 &'),
-          draft('ptr-arrays', '포인터와 배열'),
-          draft('ptr-pointer', '포인터의 포인터'),
-          draft('ptr-function', '함수 포인터'),
-          draft('ptr-mistakes', '흔한 실수'),
+        written('first-compile', 'C와 LLVM으로 가장 가벼운 컴파일', FirstCompile, '가장 작은 프로그램, 옵션, LLVM IR'),
+        written('headers', '헤더를 포함한 C 파일', Headers, '#include, 선언과 정의, 인클루드 가드'),
+        written('symbols', '심볼이란', Symbols, 'nm, 링커, static과 extern'),
+        written('asm', '어셈블리로 보는 아키텍처의 차이', Asm, 'x86-64·ARM·RISC-V, 최적화, 두 표기법'),
+        written('debugger', '디버거로 hello, world 열어 보기', Debugger, '중단점, 한 줄씩, 레지스터, 호출 순서'),
+        written('abi', 'ABI', Abi, '호출 규약, 타입 크기, 구조체 배치'),
+        group('pointers', '포인터', [
+          written('ptr-what', '주소라는 값', PtrWhat, '메모리 칸, 주소, 따라가기, 널'),
+          written('ptr-declaration', '선언문에서의 *', PtrDeclaration, '선언문의 *, 선언 읽는 법, const'),
+          written('ptr-usage', '사용문에서의 * 와 &', PtrUsage, '& 와 *, 함수에 주소 넘기기, ->'),
+          written('ptr-arrays', '포인터와 배열', PtrArrays, '배열 이름, 포인터 덧셈, 길이, 글자열'),
+          written('ptr-pointer', '포인터의 포인터', PtrPointer, '**, 포인터를 바꾸는 함수, argv'),
+          written('ptr-function', '함수 포인터', PtrFunction, '함수 포인터, 콜백, 명령 표'),
+          written('ptr-mistakes', '흔한 실수', PtrMistakes, '죽은 포인터, 범위 밖, 새니타이저'),
         ]),
-        draft('stdlib-first', '먼저 알아 둘 표준 라이브러리'),
-        draft('dynamic-memory', '동적 메모리 써 보기', [draft('dyn-malloc', 'malloc과 free'), draft('dyn-calloc-realloc', 'calloc과 realloc')]),
-        draft('heap-structure', '동적 메모리의 진짜 구조'),
-        draft('types', '자료형', [draft('types-integers', '정수형'), draft('types-floats', 'float와 double'), draft('types-conversion', '형 변환')]),
-        draft('arrays', '배열'),
-        draft('operators', '연산자'),
-        draft('control-flow', '흐름을 바꾸는 문법', [draft('flow-if', 'if와 switch'), draft('flow-loops', 'for, while, do')]),
-        draft('forward-declaration', '전방 선언'),
-        draft('const-typedef', 'const와 typedef', [draft('const', 'const'), draft('typedef', 'typedef')]),
-        draft('compound-types', '여러 값을 묶는 타입', [draft('struct', 'struct'), draft('union', 'union')]),
-        draft('macros', '매크로'),
-        draft('arrays-advanced', '배열 심화'),
-        draft('windows', '아주 간단한 창 띄우기', [
-          draft('win-cocoa', '맥: Cocoa'),
-          draft('win-linux', '리눅스: 로우레벨로'),
-          draft('win-win32', '윈도우: Win32'),
-          draft('win-winui', '윈도우: WinUI'),
+        written('stdlib-first', '먼저 알아 둘 표준 라이브러리', StdlibFirst, 'printf 서식, 글자열, 입력, 파일'),
+        group('dynamic-memory', '동적 메모리 써 보기', [written('dyn-malloc', 'malloc과 free', DynMalloc, '세 가지 수명, malloc과 free, 소유권'), written('dyn-calloc-realloc', 'calloc과 realloc', DynCallocRealloc, '0으로 채우기, 크기 바꾸기, 늘어나는 배열')]),
+        written('heap-structure', '동적 메모리의 진짜 구조', HeapStructure, '메모리 지도, 조각과 머리표, 단편화'),
+        group('types', '자료형', [written('types-integers', '정수형', TypesIntegers, '크기, 부호, stdint, 넘침, 숫자 표기'), written('types-floats', 'float와 double', TypesFloats, '근삿값, 비교, inf와 nan'), written('types-conversion', '형 변환', TypesConversion, '승격, 부호 섞임, 형 변환')]),
+        written('arrays', '배열', Arrays, '만들기, 칸 수, 하지 않는 것들'),
+        written('operators', '연산자', Operators, '산술, 논리, 비트, 우선순위'),
+        group('control-flow', '흐름을 바꾸는 문법', [written('flow-if', 'if와 switch', FlowIf, 'if, 조건 연산자, switch, 흘러내림'), written('flow-loops', 'for, while, do', FlowLoops, 'for·while·do, break, goto 정리')]),
+        written('forward-declaration', '전방 선언', ForwardDeclaration, '원형, 불완전한 타입, 내용 숨기기'),
+        group('const-typedef', 'const와 typedef', [written('const', 'const', Const, '읽기 전용, 포인터와 const, 진짜 상수'), written('typedef', 'typedef', Typedef, '별명, 구조체, 함수 포인터')]),
+        group('compound-types', '여러 값을 묶는 타입', [written('struct', 'struct', Struct, '묶기, 복사, 포인터로 넘기기, 패딩'), written('union', 'union', Union, '같은 자리, 꼬리표, 바이트 순서')]),
+        written('macros', '매크로', Macros, '치환, 괄호, 조건부 컴파일, 대안'),
+        written('arrays-advanced', '배열 심화', ArraysAdvanced, '2차원, 함수에 넘기기, 유연한 배열 멤버'),
+        group('windows', '아주 간단한 창 띄우기', [
+          written('win-cocoa', '맥: Cocoa', WinCocoa, 'Objective-C 읽는 법, AppKit'),
+          written('win-linux', '리눅스: 로우레벨로', WinLinux, 'Xlib, 이벤트 루프, 직접 만든 위젯'),
+          written('win-win32', '윈도우: Win32', WinWin32, '창 종류, 메시지, 자식 창'),
+          written('win-winui', '윈도우: WinUI', WinWinui, 'XAML과 C++/WinRT, 층의 구조'),
         ]),
-        draft('ub', 'UB란 무엇인가', [draft('ub-what', '정의되지 않은 동작'), draft('ub-examples', '자주 나오는 UB')]),
-        draft('c-versions', 'C 버전별 기능과 문법', [
-          draft('ver-c89', 'C89'),
-          draft('ver-c99', 'C99'),
-          draft('ver-c11', 'C11'),
-          draft('ver-c17', 'C17'),
-          draft('ver-c23', 'C23'),
+        group('ub', 'UB란 무엇인가', [written('ub-what', '정의되지 않은 동작', UbWhat, '세 단계, 최적화와 UB, 막는 법'), written('ub-examples', '자주 나오는 UB', UbExamples, '정수, 메모리, 순서, 타입 속이기')]),
+        group('c-versions', 'C 버전별 기능과 문법', [
+          written('ver-c89', 'C89', VerC89, '첫 표준, 없는 것들'),
+          written('ver-c99', 'C99', VerC99, '중간 선언, stdint, 지정 초기화'),
+          written('ver-c11', 'C11', VerC11, 'static_assert, _Generic, 원자적 연산'),
+          written('ver-c17', 'C17', VerC17, '오류 수정판, 버전 확인'),
+          written('ver-c23', 'C23', VerC23, 'bool·nullptr, 새 문법, 지원 범위'),
         ]),
       ],
     },

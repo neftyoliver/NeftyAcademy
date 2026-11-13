@@ -1,0 +1,103 @@
+import { Figure, Note } from 'neftyacademy-paragons-bookshelf';
+import { Memory } from '../../components/Memory';
+
+포인터도 변수이므로 주소가 있습니다. 그 주소를 담는 변수가 포인터의 포인터입니다. 새로운 개념은 없고, 같은 규칙을 한 번 더 적용할 뿐입니다.
+
+## 별 두 개
+
+```c
+int x = 42;
+int *p = &x;
+int **pp = &p;
+```
+
+<Figure caption="pp는 p를, p는 x를 가리킵니다. 별 하나를 뗄 때마다 화살표 하나를 따라갑니다">
+  <Memory cells={[
+    { addr: '0x1000', name: 'x', value: '42', mark: true },
+    { addr: '0x1008', name: 'p', value: '0x1000', to: '0x1000' },
+    { addr: '0x1010', name: 'pp', value: '0x1008', to: '0x1008' },
+  ]} />
+</Figure>
+
+| 식 | 타입 | 값 |
+| --- | --- | --- |
+| `pp` | `int **` | `0x1008` (p의 주소) |
+| `*pp` | `int *` | `0x1000` (p의 내용 = x의 주소) |
+| `**pp` | `int` | `42` |
+
+## 쓰임 하나: 함수가 포인터를 바꿔 줄 때
+
+"함수가 내 변수를 바꾸려면 그 변수의 주소를 넘긴다"는 규칙은 그대로입니다. 바꿀 변수가 `int`이면 `int *`를, 바꿀 변수가 `int *`이면 `int **`를 넘깁니다.
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+// 성공하면 *out 이 새 배열을 가리키게 한다
+bool make_array(int **out, size_t n)
+{
+    int *v = malloc(n * sizeof *v);
+    if (v == nullptr)
+        return false;
+    for (size_t i = 0; i < n; i++)
+        v[i] = (int)i * 10;
+    *out = v;
+    return true;
+}
+
+int main(void)
+{
+    int *a = nullptr;
+    if (make_array(&a, 3)) {
+        printf("%d %d %d\n", a[0], a[1], a[2]);    // 0 10 20
+        free(a);
+    }
+    return 0;
+}
+```
+
+`main`의 `a`는 포인터 변수이고, `make_array`는 그 변수에 새 주소를 써 넣어야 합니다. 그래서 `&a`(타입 `int **`)를 받습니다. 반환값은 성공 여부에 쓰고 결과는 인자로 돌려주는 이 모양은 C 라이브러리에서 자주 봅니다.
+
+## 쓰임 둘: 글자열의 배열
+
+```c
+#include <stdio.h>
+
+int main(int argc, char **argv)
+{
+    for (int i = 0; i < argc; i++)
+        printf("%d: %s\n", i, argv[i]);
+    return 0;
+}
+```
+
+```sh
+./args hello 123
+```
+
+```text
+0: ./args
+1: hello
+2: 123
+```
+
+글자열 하나가 `char *`이므로 글자열 여러 개는 `char *`의 배열이고, 함수 인자로 넘어오면 `char **`가 됩니다. `argv[i]`는 i번째 글자열(`char *`), `argv[i][0]`은 그 글자열의 첫 글자(`char`)입니다. `main`은 이렇게 명령줄 인자를 받습니다.
+
+## 2차원 배열과는 다르다
+
+```c
+int grid[2][3];     // int 6개가 한 덩어리로 이어져 있다
+int *rows[2];       // 포인터 2개. 각각이 어딘가의 줄을 가리킨다
+```
+
+둘 다 `x[i][j]`로 쓸 수 있지만 메모리의 모양이 다릅니다. `grid`는 식 안에서 `int (*)[3]`(3칸 배열을 가리키는 포인터)이 되지 `int **`가 되지 않습니다. `int **`를 받는 함수에 `grid`를 넘기면 컴파일러가 경고하고, 무시하면 실행 중에 죽습니다. 「배열 심화」에서 다시 봅니다.
+
+<Note>
+별이 세 개 이상 필요한 경우는 드뭅니다. 그런 코드를 쓰게 되면 구조체로 묶거나 `typedef`로 이름을 붙일 수 없는지 먼저 보세요.
+</Note>
+
+## 정리
+
+- 포인터의 주소를 담으면 포인터의 포인터, 규칙은 같다
+- 함수가 호출한 쪽의 포인터를 바꿔야 할 때 `**`를 받는다
+- `char **argv`는 글자열 포인터들의 배열이다

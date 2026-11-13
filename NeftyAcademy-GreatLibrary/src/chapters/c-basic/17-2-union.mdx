@@ -1,0 +1,125 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+`union`은 `struct`와 생김새가 같지만, 멤버들이 **같은 자리를 함께 씁니다**. 한 번에 하나의 멤버만 뜻이 있습니다.
+
+## struct와 견주기
+
+```c
+#include <stdint.h>
+#include <stdio.h>
+
+struct s { uint32_t i; float f; };
+union  u { uint32_t i; float f; };
+
+int main(void)
+{
+    printf("%zu %zu\n", sizeof(struct s), sizeof(union u));     // 8 4
+
+    union u x;
+    x.f = 1.0f;
+    printf("0x%08x\n", x.i);        // 0x3f800000: 1.0f 의 비트를 정수로 읽은 것
+    return 0;
+}
+```
+
+| | `struct` | `union` |
+| --- | --- | --- |
+| 멤버의 자리 | 차례로 놓인다 | 모두 같은 주소에서 시작한다 |
+| 크기 | 멤버 크기의 합 (+ 빈칸) | 가장 큰 멤버의 크기 |
+| 한 번에 쓸 수 있는 멤버 | 전부 | 하나 |
+
+`x.f`에 값을 넣고 `x.i`로 읽으면 같은 4바이트를 다른 타입으로 해석한 것이 나옵니다. C에서는 이렇게 읽는 것이 허용됩니다(C++에서는 정의되지 않은 동작입니다).
+
+## 쓰임 하나: 여러 모양 가운데 하나
+
+"숫자일 수도, 글자열일 수도 있는 값"처럼 여러 형태 가운데 하나를 담을 때 씁니다. 지금 어느 멤버가 유효한지는 `union`이 알려 주지 않으므로 **꼬리표를 따로** 둡니다.
+
+```c
+#include <stdio.h>
+
+enum kind { KIND_INT, KIND_REAL, KIND_TEXT };
+
+struct value {
+    enum kind kind;         // 꼬리표: 아래 중 어느 것이 들어 있는가
+    union {
+        long i;
+        double real;
+        const char *text;
+    };                      // 이름 없는 union: 멤버를 바로 쓸 수 있다
+};
+
+void print_value(const struct value *v)
+{
+    switch (v->kind) {
+    case KIND_INT:
+        printf("%ld\n", v->i);
+        break;
+    case KIND_REAL:
+        printf("%g\n", v->real);
+        break;
+    case KIND_TEXT:
+        printf("%s\n", v->text);
+        break;
+    }
+}
+
+int main(void)
+{
+    struct value settings[] = {
+        { .kind = KIND_INT, .i = 115200 },
+        { .kind = KIND_REAL, .real = 0.5 },
+        { .kind = KIND_TEXT, .text = "/dev/ttyUSB0" },
+    };
+
+    for (size_t i = 0; i < sizeof settings / sizeof settings[0]; i++)
+        print_value(&settings[i]);
+    return 0;
+}
+```
+
+이 모양을 <strong>꼬리표 붙은 union</strong>(tagged union)이라고 합니다. JSON 값, 설정 항목, 장치에서 오는 여러 종류의 메시지를 담을 때 씁니다. 꼬리표와 다른 멤버를 읽으면 쓰레기 값이 나오므로, 읽기 전에 반드시 꼬리표를 확인합니다.
+
+## 쓰임 둘: 같은 바이트를 다르게 보기
+
+```c
+#include <stdint.h>
+#include <stdio.h>
+
+union word {
+    uint32_t value;
+    uint8_t bytes[4];
+};
+
+int main(void)
+{
+    union word w = { .value = 0x11223344 };
+
+    printf("%02x %02x %02x %02x\n", w.bytes[0], w.bytes[1], w.bytes[2], w.bytes[3]);
+    // x86, ARM(보통): 44 33 22 11
+    return 0;
+}
+```
+
+32비트 정수를 바이트 넷으로 들여다봤습니다. 가장 낮은 바이트(`0x44`)가 가장 낮은 주소에 있으면 <strong>리틀 엔디언</strong>, 반대면 빅 엔디언입니다. PC와 라즈베리파이는 리틀 엔디언이고, 네트워크 프로토콜은 대부분 빅 엔디언으로 보냅니다.
+
+<Note kind="warn">
+그래서 `union`이나 구조체를 그대로 네트워크에 보내면 안 됩니다. 받는 쪽의 바이트 순서가 다르면 값이 뒤집힙니다. 통신할 때는 시프트로 바이트를 직접 꺼내 정해진 순서로 보냅니다: `buf[0] = (uint8_t)(v >> 24);`
+</Note>
+
+## 쓰임 셋: 메모리 아끼기
+
+같은 시점에 하나만 필요한 큰 버퍼들을 `union`으로 겹쳐 두면 가장 큰 것만큼만 차지합니다. RAM이 몇 킬로바이트뿐인 장치에서 쓰는 방법입니다.
+
+## 주의할 것
+
+| 주의 | 설명 |
+| --- | --- |
+| 초기화 | `{ 값 }`은 **첫 멤버**를 채운다. 다른 멤버는 `.이름 = 값`으로 |
+| 크기가 다른 멤버 | 작은 멤버에 쓰면 나머지 바이트는 정해지지 않은 값이 된다 |
+| 포인터 멤버 | `union`은 무엇이 들어 있는지 모르므로, 해제도 꼬리표를 보고 직접 한다 |
+
+## 정리
+
+- `union`의 멤버는 같은 자리를 나눠 쓴다. 크기는 가장 큰 멤버만큼
+- 어느 멤버가 유효한지는 꼬리표로 직접 관리한다
+- 바이트를 들여다볼 수 있지만, 바이트 순서는 플랫폼마다 다르다

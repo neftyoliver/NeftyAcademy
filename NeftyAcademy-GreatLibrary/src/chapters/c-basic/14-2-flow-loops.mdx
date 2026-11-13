@@ -1,0 +1,153 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+반복문은 "조건이 참인 동안 위로 되돌아가는 점프"입니다. C에는 세 가지가 있습니다.
+
+## 세 가지 반복문
+
+```c
+#include <stdio.h>
+
+int main(void)
+{
+    // for: 횟수가 정해졌을 때
+    for (int i = 0; i < 3; i++)
+        printf("for %d\n", i);
+
+    // while: 조건이 깨질 때까지
+    int n = 100;
+    while (n > 1) {
+        n /= 2;
+    }
+    printf("while 끝 %d\n", n);
+
+    // do-while: 한 번은 반드시 실행
+    int tries = 0;
+    do {
+        tries++;
+    } while (tries < 3);
+    printf("do %d\n", tries);
+    return 0;
+}
+```
+
+| | 조건을 보는 때 | 어울리는 일 |
+| --- | --- | --- |
+| `for (시작; 조건; 한 바퀴 뒤)` | 돌기 전 | 배열 훑기, 정해진 횟수 |
+| `while (조건)` | 돌기 전 | 입력이 끝날 때까지, 상태가 바뀔 때까지 |
+| `do { } while (조건);` | 돈 뒤 | 일단 해 보고 다시 할지 정할 때 |
+
+`for (int i = 0; i < n; i++)`는 아래 `while`과 같습니다. 다만 `i`가 반복문 안에서만 보입니다.
+
+```c nocheck
+int i = 0;
+while (i < n) {
+    …
+    i++;
+}
+```
+
+## break와 continue
+
+```c
+#include <stdio.h>
+
+int main(void)
+{
+    int v[] = { 3, -1, 4, 0, 5 };
+
+    for (size_t i = 0; i < sizeof v / sizeof v[0]; i++) {
+        if (v[i] < 0)
+            continue;       // 이번 바퀴는 건너뛰고 다음으로
+        if (v[i] == 0)
+            break;          // 반복문을 끝낸다
+        printf("%d ", v[i]);    // 3 4
+    }
+    printf("\n");
+    return 0;
+}
+```
+
+둘 다 **가장 안쪽** 반복문에만 듣습니다. `switch` 안의 `break`는 `switch`를 빠져나갈 뿐 바깥 반복문은 끝내지 않습니다.
+
+## 끝나지 않는 반복문
+
+```c nocheck
+for (;;) {
+    read_sensor();
+    send();
+    sleep(1);
+}
+```
+
+`for (;;)`와 `while (true)`는 영원히 돕니다. 장치의 펌웨어나 서버의 본체는 대부분 이 모양입니다. 안에서 `break`나 `return`으로 나옵니다.
+
+## 흔한 실수
+
+| 실수 | 예 | 결과 |
+| --- | --- | --- |
+| 하나 차이 | `for (i = 0; i <= n; i++)` | 배열 밖을 한 칸 읽는다 |
+| 세미콜론 | `while (x > 0);` | 빈 문장을 영원히 반복한다 |
+| 부호 없는 변수로 거꾸로 | `for (size_t i = n - 1; i >= 0; i--)` | 끝나지 않는다 |
+| 조건 변수를 안 바꿈 | `while (n > 0) { sum += n; }` | 끝나지 않는다 |
+
+거꾸로 돌 때는 이렇게 씁니다.
+
+```c nocheck
+for (size_t i = n; i-- > 0; ) {
+    // i는 n-1 부터 0 까지
+}
+```
+
+## 여러 겹과 goto
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+int process(const char *path)
+{
+    int result = -1;
+    char *buf = nullptr;
+
+    FILE *f = fopen(path, "r");
+    if (f == nullptr)
+        goto out;
+
+    buf = malloc(256);
+    if (buf == nullptr)
+        goto close_file;
+
+    if (fgets(buf, 256, f) == nullptr)
+        goto free_buf;
+
+    printf("첫 줄: %s", buf);
+    result = 0;
+
+free_buf:
+    free(buf);
+close_file:
+    fclose(f);
+out:
+    return result;
+}
+
+int main(void)
+{
+    return process("/etc/hostname") == 0 ? 0 : 1;
+}
+```
+
+`goto`는 같은 함수 안의 이름표로 뛰는 문장입니다. 아무 데로나 뛰면 흐름을 따라가기 어려워서 꺼리지만, C에서는 두 군데에 관용적으로 씁니다.
+
+- **오류가 났을 때 정리하기**: 위처럼 "얻은 순서의 반대로 놓아주는" 이름표를 아래에 쌓아 둔다. 리눅스 커널이 이렇게 짠다
+- **여러 겹의 반복문을 한 번에 빠져나가기**: `break`는 한 겹만 나가기 때문
+
+<Note>
+위로 뛰어 반복을 만드는 `goto`는 쓰지 않습니다. 아래쪽의 정리 코드로 뛰는 용도로만 씁니다.
+</Note>
+
+## 정리
+
+- 횟수가 정해지면 `for`, 조건이면 `while`, 한 번은 꼭 하면 `do`
+- `break`는 끝내기, `continue`는 다음 바퀴
+- 끝 조건의 `<`와 `<=`, 부호 없는 변수의 0을 조심한다

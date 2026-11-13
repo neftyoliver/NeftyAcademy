@@ -39,3 +39,16 @@
   .pc-program li span { grid-column: 2; }
   .pc-regs { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* 메모리 칸 그림 (Memory.tsx) */
+.mem { display: block; width: 100%; height: auto; margin: 0 auto; }
+.mem-cell rect { fill: color-mix(in srgb, var(--node) 9%, transparent); stroke: var(--bf-line); stroke-width: 1.5; }
+.mem-cell.is-mark rect { fill: color-mix(in srgb, var(--node) 26%, transparent); stroke: var(--node); }
+.mem-cell.is-dim { opacity: 0.45; }
+.mem-cell.is-dim rect { stroke-dasharray: 4 4; }
+.mem text { text-anchor: middle; fill: currentColor; }
+.mem-name { font-size: 14px; font-weight: 700; }
+.mem-value { font-family: var(--bf-mono); font-size: 14px; }
+.mem-addr { font-family: var(--bf-mono); font-size: 11.5px; fill: var(--bf-muted) !important; }
+.mem-arrow { fill: none; stroke: var(--node); stroke-width: 2; }
+.mem-arrow-head { fill: var(--node); }

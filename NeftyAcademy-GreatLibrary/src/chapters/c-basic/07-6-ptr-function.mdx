@@ -1,0 +1,113 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+함수도 메모리 어딘가에 놓인 기계어이므로 주소가 있습니다. 그 주소를 변수에 담으면 <strong>어떤 함수를 부를지를 실행 중에 고를</strong> 수 있습니다.
+
+## 선언과 호출
+
+```c
+#include <stdio.h>
+
+int add(int a, int b) { return a + b; }
+int mul(int a, int b) { return a * b; }
+
+int main(void)
+{
+    int (*op)(int, int) = add;    // op는 함수 포인터
+    printf("%d\n", op(3, 4));     // 7
+
+    op = mul;
+    printf("%d\n", op(3, 4));     // 12
+    return 0;
+}
+```
+
+`int (*op)(int, int)`는 "op는 포인터, `int` 둘을 받아 `int`를 돌려주는 함수를 가리키는"이라고 읽습니다. `(*op)`의 괄호를 빼면 `int *op(int, int)`, 곧 `int *`를 돌려주는 함수의 선언이 되어 버립니다.
+
+함수 이름은 식 안에서 함수의 주소로 바뀌므로 `&add`라고 쓰지 않아도 됩니다. 부를 때도 `(*op)(3, 4)`와 `op(3, 4)`가 같습니다.
+
+## typedef로 읽기 쉽게
+
+```c
+typedef int binary_op(int, int);    // 함수 타입에 이름 붙이기
+
+binary_op *op = add;
+```
+
+별이 눈에 보여서 포인터임이 분명해집니다. 함수 포인터를 인자로 받거나 구조체에 넣을 때는 이렇게 이름을 붙여 둡니다.
+
+## 쓰임 하나: 콜백
+
+"정렬은 내가 할 테니, 두 원소를 비교하는 방법만 알려 달라"는 식으로 함수를 넘겨받는 것을 콜백이라고 합니다. 표준 라이브러리의 `qsort`가 그렇게 생겼습니다.
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+int by_value(const void *a, const void *b)
+{
+    int x = *(const int *)a;
+    int y = *(const int *)b;
+    return (x > y) - (x < y);     // 작으면 음수, 같으면 0, 크면 양수
+}
+
+int main(void)
+{
+    int v[] = { 30, 10, 40, 20 };
+    size_t n = sizeof v / sizeof v[0];
+
+    qsort(v, n, sizeof v[0], by_value);
+
+    for (size_t i = 0; i < n; i++)
+        printf("%d ", v[i]);      // 10 20 30 40
+    printf("\n");
+    return 0;
+}
+```
+
+`qsort`는 원소가 무슨 타입인지 모릅니다. 그래서 주소를 `void *`(타입 없는 포인터)로 넘겨주고, 비교 함수가 진짜 타입으로 바꿔서 읽습니다. `x - y`로 비교하지 않는 이유는 값이 크면 뺄셈이 넘칠 수 있기 때문입니다.
+
+## 쓰임 둘: 표에 넣어 두고 골라 부르기
+
+```c
+#include <stdio.h>
+#include <string.h>
+
+void cmd_on(void)  { puts("LED 켬"); }
+void cmd_off(void) { puts("LED 끔"); }
+
+struct command {
+    const char *name;
+    void (*run)(void);
+};
+
+const struct command commands[] = {
+    { "on", cmd_on },
+    { "off", cmd_off },
+};
+
+int main(int argc, char **argv)
+{
+    if (argc < 2)
+        return 1;
+    for (size_t i = 0; i < sizeof commands / sizeof commands[0]; i++) {
+        if (strcmp(argv[1], commands[i].name) == 0) {
+            commands[i].run();
+            return 0;
+        }
+    }
+    puts("모르는 명령");
+    return 1;
+}
+```
+
+`if`와 `else if`를 길게 잇는 대신 "이름 → 함수" 표를 만들어 둡니다. 명령이 늘어나면 표에 한 줄만 더하면 됩니다. 장치에서 온 메시지 종류에 따라 처리 함수를 고를 때 이 모양을 씁니다.
+
+<Note kind="warn">
+함수 포인터의 타입(인자와 반환 타입)은 실제 함수와 정확히 같아야 합니다. 억지로 타입을 바꿔서 다른 모양의 함수를 부르면, 인자를 주고받는 약속(ABI)이 어긋나 정의되지 않은 동작이 됩니다.
+</Note>
+
+## 정리
+
+- 함수 이름은 함수의 주소, 함수 포인터에 담아 나중에 부를 수 있다
+- `int (*fp)(int)`의 괄호는 꼭 필요하다. `typedef`로 이름을 붙이면 편하다
+- 콜백과 명령 표가 대표적인 쓰임이다

@@ -1,0 +1,85 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+C11은 멀티코어 시대에 맞춰 스레드와 원자적 연산을 표준에 넣고, 컴파일할 때 검사하는 도구를 더했습니다.
+
+## 들어온 것
+
+| 기능 | 예 | 쓰임 |
+| --- | --- | --- |
+| `_Static_assert` | `_Static_assert(sizeof(int) == 4, "int는 4바이트여야 함");` | 컴파일할 때 가정을 확인한다 |
+| `_Generic` | 아래 예 | 인자의 타입에 따라 다른 식을 고른다 |
+| 이름 없는 구조체와 `union` | `struct { int kind; union { int i; double d; }; };` | 멤버를 한 단계 줄여 쓴다 |
+| `_Alignas`, `_Alignof` | `_Alignas(16) float v[4];` | 정렬을 정하고 알아낸다 |
+| `_Noreturn` | `_Noreturn void fatal(const char *msg);` | 돌아오지 않는 함수 표시 |
+| `_Atomic`, `<stdatomic.h>` | `atomic_int counter;` | 잠금 없이 안전한 변수 |
+| `<threads.h>` | `thrd_create`, `mtx_lock` | 표준 스레드 (선택 기능) |
+| `_Thread_local` | `_Thread_local int errno_copy;` | 스레드마다 따로 있는 변수 |
+| 유니코드 | `u8"글"`, `char16_t`, `char32_t` | UTF-8, UTF-16, UTF-32 글자열 |
+| `aligned_alloc` | `aligned_alloc(64, 1024)` | 정렬된 메모리 빌리기 |
+| `timespec_get`, `quick_exit` | | 시각, 빠른 종료 |
+
+`<stdalign.h>`, `<stdnoreturn.h>`, `<assert.h>`를 포함하면 `alignas`, `noreturn`, `static_assert`라는 편한 이름으로 쓸 수 있습니다.
+
+## 빠진 것과 물러난 것
+
+- `gets`가 표준에서 **삭제**되었다. 길이를 확인할 방법이 없어 수많은 보안 사고의 원인이었다
+- 가변 길이 배열, 복소수, 스레드, 원자적 연산은 **선택 기능**이 되었다. 작은 장치의 컴파일러가 빼도 표준을 따르는 것으로 본다
+
+## C11의 모양
+
+```c std=c11
+#include <assert.h>
+#include <stdatomic.h>
+#include <stdint.h>
+#include <stdio.h>
+
+// 컴파일할 때 확인: 틀리면 빌드가 멈춘다
+static_assert(sizeof(uint32_t) == 4, "uint32_t는 4바이트");
+
+struct packet {
+    uint8_t kind;
+    union {                 // 이름 없는 union
+        uint32_t number;
+        float real;
+    };
+};
+static_assert(sizeof(struct packet) == 8, "패킷 크기가 바뀌었다");
+
+// 타입에 따라 다른 글자열을 고른다
+#define TYPE_NAME(x) _Generic((x), \
+    int: "int",                    \
+    double: "double",              \
+    char *: "글자열",              \
+    default: "기타")
+
+int main(void)
+{
+    atomic_int counter = 0;
+    atomic_fetch_add(&counter, 5);          // 여러 스레드가 동시에 해도 안전하다
+
+    struct packet p = { .kind = 1, .number = 42 };      // p.number 로 바로 쓴다
+
+    printf("%d %u\n", atomic_load(&counter), (unsigned)p.number);
+    printf("%s %s %s\n", TYPE_NAME(1), TYPE_NAME(2.0), TYPE_NAME("x"));
+    return 0;
+}
+```
+
+## 장치 프로그래밍에서 쓸모 있는 것
+
+| 기능 | 이유 |
+| --- | --- |
+| `static_assert` | 프로토콜 구조체의 크기, 표의 칸 수 같은 가정을 빌드할 때 잡는다. 실행해 보기 전에 알 수 있다 |
+| 이름 없는 `union` | 꼬리표 붙은 메시지 구조체가 깔끔해진다 |
+| `<stdatomic.h>` | 인터럽트 처리기나 다른 스레드와 나누는 깃발 변수 |
+| `alignas` | 하드웨어가 요구하는 정렬(DMA 버퍼 등)을 맞춘다 |
+
+<Note>
+`<threads.h>`는 지원하지 않는 플랫폼이 많았습니다(맥에는 지금도 없습니다). 그래서 실제로는 리눅스와 맥에서는 POSIX 스레드(`pthread`), 윈도우에서는 Win32 스레드를 쓰는 일이 더 흔합니다. `<stdatomic.h>`는 널리 지원됩니다.
+</Note>
+
+## 정리
+
+- C11은 스레드와 원자적 연산, 그리고 `static_assert`와 `_Generic`을 더했다
+- `gets`가 사라졌다
+- 일부 기능은 선택이라 플랫폼마다 있는지 확인해야 한다

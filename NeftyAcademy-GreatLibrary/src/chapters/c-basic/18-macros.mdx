@@ -1,0 +1,159 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+매크로는 컴파일하기 **전에** 소스의 글자를 바꿔 넣는 기능입니다. `#`으로 시작하는 줄은 모두 전처리기가 처리합니다. 전처리기는 C 문법을 모르고 글자만 다룬다는 점이 장점이자 함정입니다.
+
+## 값에 이름 붙이기
+
+```c
+#define BUF_SIZE 256
+#define PI 3.14159265358979
+#define GREETING "hello"
+
+char buf[BUF_SIZE];
+```
+
+전처리기는 `BUF_SIZE`라는 낱말을 만날 때마다 `256`으로 바꿉니다. 끝에 세미콜론을 붙이지 않습니다. 붙이면 세미콜론까지 함께 끼워 넣어집니다. 매크로 이름은 관례로 대문자로 적어서 변수와 구분합니다.
+
+## 함수처럼 생긴 매크로
+
+```c
+#define SQUARE(x) ((x) * (x))
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define COUNT_OF(a) (sizeof (a) / sizeof (a)[0])
+```
+
+인자를 받아 글자를 바꿔 넣습니다. 타입에 상관없이 쓸 수 있고 함수 호출이 생기지 않습니다. 대신 지켜야 할 것이 있습니다.
+
+## 괄호를 빠짐없이
+
+```c nocheck
+#define SQUARE(x) x * x
+
+SQUARE(1 + 2)       // 1 + 2 * 1 + 2  → 5 (9가 아니다)
+```
+
+```c nocheck
+#define DOUBLE(x) (x) + (x)
+
+10 * DOUBLE(3)      // 10 * (3) + (3) → 33 (60이 아니다)
+```
+
+글자를 그대로 끼우기 때문에 연산자 우선순위가 엉킵니다. **인자 하나하나에 괄호, 전체에도 괄호**를 칩니다.
+
+## 인자가 두 번 계산된다
+
+```c nocheck
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+
+int m = MAX(i++, j);    // ((i++) > (j) ? (i++) : (j))  → i가 두 번 늘 수 있다
+int n = MAX(slow(), 0); // slow() 를 두 번 부를 수 있다
+```
+
+괄호로도 막을 수 없는 문제입니다. 매크로 인자에는 `i++`나 함수 호출처럼 **부작용이 있는 식을 넣지 않습니다**. 이 문제가 없는 대안이 함수입니다.
+
+```c
+static inline int max_int(int a, int b)
+{
+    return a > b ? a : b;
+}
+```
+
+`static inline` 함수는 컴파일러가 호출 자리에 몸통을 끼워 넣어 주므로 매크로만큼 빠르고, 인자를 한 번만 계산하며, 타입 검사도 됩니다. 함수로 할 수 있는 일은 함수로 합니다.
+
+## 여러 문장짜리 매크로
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+#define CHECK(cond, msg)                                    \
+    do {                                                    \
+        if (!(cond)) {                                      \
+            fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, msg); \
+            exit(1);                                        \
+        }                                                   \
+    } while (0)
+
+int main(void)
+{
+    int n = 5;
+    if (n > 0)
+        CHECK(n < 10, "n이 너무 크다");
+    else
+        puts("음수");
+    puts("통과");
+    return 0;
+}
+```
+
+- 줄 끝의 `\`는 "매크로가 다음 줄로 이어진다"는 표시입니다
+- `do { … } while (0)`으로 감싸면 여러 문장이 **문장 하나**처럼 동작해서, 중괄호 없는 `if`와 `else` 사이에서도 안전합니다
+- `__FILE__`, `__LINE__`은 지금 파일 이름과 줄 번호로 바뀌는 미리 정해진 매크로입니다. `__func__`는 지금 함수의 이름입니다
+
+매크로만 할 수 있는 일이 이것입니다. 함수로 만들면 줄 번호가 함수 안의 줄이 되지만, 매크로는 **쓴 자리**의 줄 번호를 넣어 줍니다.
+
+## 글자로 만들기와 이어 붙이기
+
+```c
+#include <stdio.h>
+
+#define SHOW(x) printf(#x " = %d\n", (x))       // #x 는 인자를 글자열로
+#define REG(n) reg_##n                          // ## 는 두 낱말을 하나로
+
+int main(void)
+{
+    int reg_ctrl = 7;
+    SHOW(reg_ctrl + 1);         // reg_ctrl + 1 = 8
+    SHOW(REG(ctrl));            // REG(ctrl) = 7
+    return 0;
+}
+```
+
+## 조건부 컴파일
+
+```c nocheck
+#ifdef DEBUG
+#define LOG(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define LOG(...) ((void)0)
+#endif
+
+#if defined(_WIN32)
+#include <windows.h>
+#elif defined(__linux__)
+#include <unistd.h>
+#endif
+```
+
+조건에 맞지 않는 쪽은 **컴파일러에게 아예 전달되지 않습니다**. 플랫폼마다 다른 코드를 넣거나, 디버그용 출력을 켜고 끌 때 씁니다. `...`와 `__VA_ARGS__`는 인자를 몇 개든 받아 그대로 넘깁니다.
+
+매크로는 명령줄에서도 정의할 수 있습니다.
+
+```sh
+clang -DDEBUG -DBUF_SIZE=512 main.c
+```
+
+| 미리 정해진 매크로 | 뜻 |
+| --- | --- |
+| `__linux__`, `_WIN32`, `__APPLE__` | 운영체제 |
+| `__x86_64__`, `__aarch64__`, `__arm__` | CPU |
+| `__STDC_VERSION__` | C 표준 버전 (C23은 `202311L`) |
+| `NDEBUG` | 정의하면 `assert`가 사라진다 |
+
+## 매크로 대신 쓸 것
+
+| 하려는 일 | 매크로 | 더 나은 것 |
+| --- | --- | --- |
+| 정수 상수 | `#define N 8` | `enum { N = 8 };` 또는 `constexpr int n = 8;` (C23, Clang 19 이상) |
+| 작은 함수 | `#define MAX(a, b) …` | `static inline` 함수 |
+| 타입 별명 | `#define BYTE unsigned char` | `typedef` |
+
+<Note kind="tip">
+매크로가 이상하게 동작하면 `clang -E 파일.c`로 전처리 결과를 봅니다. 매크로가 실제로 어떤 글자로 바뀌었는지가 그대로 나옵니다.
+</Note>
+
+## 정리
+
+- 매크로는 컴파일 전의 글자 바꾸기다. 타입도 범위도 모른다
+- 인자와 전체에 괄호, 부작용 있는 인자는 금물
+- 상수·함수·타입은 `enum`·`inline`·`typedef`로, 매크로는 그것으로 안 되는 일에만

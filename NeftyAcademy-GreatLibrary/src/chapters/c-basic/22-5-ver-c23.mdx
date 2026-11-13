@@ -1,0 +1,107 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+C23은 이 책이 기준으로 삼는 버전입니다. 오랫동안 헤더나 매크로로 흉내 내던 것들이 언어에 정식으로 들어왔고, 낡은 규칙이 정리되었습니다.
+
+## 키워드가 된 것
+
+| C23 | 그 전 |
+| --- | --- |
+| `bool`, `true`, `false` | `<stdbool.h>`를 포함해야 했다 |
+| `nullptr` | `NULL` (정수 0인지 포인터인지 모호했다) |
+| `static_assert(조건)` | `_Static_assert(조건, "글")`, 글이 필수였다 |
+| `alignas`, `alignof`, `thread_local` | `_Alignas` 등과 헤더 |
+
+## 새 문법
+
+| 기능 | 예 |
+| --- | --- |
+| 2진수 표기 | `0b1010'0101` |
+| 자릿수 구분 | `1'000'000` |
+| `constexpr` | `constexpr int size = 256;` 컴파일할 때 정해지는 진짜 상수 |
+| `typeof` | `typeof(x) y = x;` 식의 타입을 그대로 가져온다 |
+| `auto` | `auto n = strlen(s);` 초깃값에서 타입을 추론한다 |
+| 빈 초기화 | `int a[8] = {};` `struct s v = {};` 전부 0 |
+| 바탕 타입을 정한 `enum` | `enum state : uint8_t { IDLE, RUN };` 크기가 1바이트로 정해진다 |
+| 속성 | `[[nodiscard]]`, `[[maybe_unused]]`, `[[deprecated]]`, `[[fallthrough]]`, `[[noreturn]]` |
+| `_BitInt(N)` | `_BitInt(12) adc;` 원하는 비트 수의 정수 |
+| `#embed` | `const unsigned char logo[] = {` 다음 줄에 `#embed "logo.png"`: 파일을 바이트 배열로 끼워 넣는다 |
+| `#elifdef`, `#elifndef`, `#warning` | 전처리기 편의 기능 |
+| `__VA_OPT__` | 가변 인자가 있을 때만 글자를 넣는다 |
+
+## 새 라이브러리
+
+| 헤더·함수 | 하는 일 |
+| --- | --- |
+| `<stdckdint.h>` | `ckd_add`, `ckd_sub`, `ckd_mul`: 넘침을 확인하는 산술 |
+| `<stdbit.h>` | `stdc_count_ones`, `stdc_leading_zeros` 등 비트 세기 |
+| `memset_explicit` | 최적화로 지워지지 않는 `memset` (비밀번호 지우기) |
+| `strdup`, `strndup` | 글자열 복사해서 새로 빌리기 (POSIX에 있던 것) |
+| `unreachable()` | "여기는 오지 않는다"는 표시 |
+| `printf`의 `%b` | 2진수로 찍기 |
+
+## 정리된 옛 규칙
+
+| 바뀐 것 | 설명 |
+| --- | --- |
+| `int f();` | 이제 `int f(void);`와 같다. 인자가 없다는 뜻 |
+| K&R 식 함수 정의 | 삭제되었다 (`int f(a, b) int a; int b; { … }`) |
+| 음수 표현 | 2의 보수만 허용한다. 다른 방식은 표준에서 빠졌다 |
+| `realloc(p, 0)` | 정의되지 않은 동작이 되었다 |
+
+## C23의 모양
+
+```c
+#include <stdckdint.h>
+#include <stdint.h>
+#include <stdio.h>
+
+enum state : uint8_t { IDLE, RUNNING, FAILED };     // 1바이트짜리 enum
+
+[[nodiscard]] bool read_sensor(int *out)            // 결과를 안 보면 경고
+{
+    *out = 0b0110'0100;                             // 100
+    return true;
+}
+
+int main(void)
+{
+    static_assert(sizeof(enum state) == 1);
+
+    int *p = nullptr;
+    int value = 0;
+    auto ok = read_sensor(&value);                  // ok 는 bool
+    typeof(value) copy = value;                     // copy 는 int
+    int zeros[4] = {};
+
+    int sum;
+    bool overflow = ckd_add(&sum, INT32_MAX, copy); // 넘치면 true
+
+    printf("%d %d %d %d %d\n", ok, p == nullptr, copy, zeros[3], overflow);     // 1 1 100 0 1
+    printf("%b\n", (unsigned)value);                // 1100100
+    return 0;
+}
+```
+
+## 컴파일러가 어디까지 지원하나
+
+C23은 새 표준이라 컴파일러마다 지원하는 범위가 다릅니다.
+
+| 컴파일러 | 옵션 | 알아 둘 것 |
+| --- | --- | --- |
+| Clang 18 | `-std=c23` (17까지는 `-std=c2x`) | 위 예제는 모두 된다. `constexpr`과 `#embed`는 아직 안 된다 |
+| Clang 19 이상 | `-std=c23` | `constexpr`, `#embed`가 더해졌다 |
+| GCC 13 | `-std=c2x` | `constexpr`, `auto`, `nullptr`, `typeof`가 된다 |
+| GCC 14 이상 | `-std=c23` | |
+| MSVC | `/std:clatest` | 일부만 지원한다 |
+
+`<stdbit.h>`와 `%b` 같은 라이브러리 기능은 컴파일러가 아니라 C 라이브러리가 지원해야 합니다. glibc에서는 `%b`가 2.35, `<stdbit.h>`가 2.39부터 들어 있습니다.
+
+<Note kind="tip">
+이 책의 예제는 Clang 18의 `-std=c23`에서 컴파일되는 것만 씁니다. `constexpr`은 본문에서 소개만 하고 예제에는 넣지 않았습니다. 오래된 컴파일러에서 `nullptr`이나 `bool`이 오류라면 `-std=c23`(또는 `-std=c2x`)을 빠뜨린 것입니다.
+</Note>
+
+## 정리
+
+- `bool`, `nullptr`, `static_assert`가 헤더 없이 쓰이는 키워드가 되었다
+- 2진수 표기, `constexpr`, `typeof`, `auto`, 속성, 크기를 정한 `enum`이 들어왔다
+- 컴파일러와 라이브러리의 지원 범위를 확인하고 쓴다

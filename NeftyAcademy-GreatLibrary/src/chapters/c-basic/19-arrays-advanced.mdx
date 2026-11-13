@@ -1,0 +1,172 @@
+import { Figure, Note } from 'neftyacademy-paragons-bookshelf';
+import { Memory } from '../../components/Memory';
+
+배열, 포인터, 구조체를 모두 배웠으니 배열의 나머지 이야기를 합니다. 다차원 배열이 메모리에 놓이는 모양과 그것을 함수에 넘기는 법이 중심입니다.
+
+## 2차원 배열의 진짜 모양
+
+```c
+int g[2][3] = {
+    { 1, 2, 3 },
+    { 4, 5, 6 },
+};
+```
+
+<Figure caption="2차원 배열은 '배열의 배열'이고, 메모리에는 줄 단위로 이어서 놓입니다">
+  <Memory cells={[
+    { addr: '0x1000', name: 'g[0][0]', value: '1', mark: true },
+    { addr: '0x1004', name: 'g[0][1]', value: '2', mark: true },
+    { addr: '0x1008', name: 'g[0][2]', value: '3', mark: true },
+    { addr: '0x100c', name: 'g[1][0]', value: '4' },
+    { addr: '0x1010', name: 'g[1][1]', value: '5' },
+    { addr: '0x1014', name: 'g[1][2]', value: '6' },
+  ]} />
+</Figure>
+
+`g`는 "`int` 3개짜리 배열"이 2개 있는 배열입니다. `g[1]`은 둘째 줄 전체(`int[3]`)이고, `g[1][2]`는 그 줄의 셋째 칸입니다. 컴파일러는 `g[i][j]`의 위치를 `i * 3 + j`로 계산합니다. 그래서 **줄의 길이(3)를 알아야** 합니다.
+
+## 함수에 넘기기
+
+```c
+#include <stdio.h>
+
+// 첫째 차원은 비워도 되지만 둘째 차원(3)은 꼭 적어야 한다
+int sum_fixed(int rows, const int m[][3])
+{
+    int total = 0;
+    for (int i = 0; i < rows; i++)
+        for (int j = 0; j < 3; j++)
+            total += m[i][j];
+    return total;
+}
+
+// 크기를 인자로 받는 방법 (가변 길이 배열 타입)
+int sum_any(int rows, int cols, const int m[rows][cols])
+{
+    int total = 0;
+    for (int i = 0; i < rows; i++)
+        for (int j = 0; j < cols; j++)
+            total += m[i][j];
+    return total;
+}
+
+int main(void)
+{
+    int g[2][3] = { { 1, 2, 3 }, { 4, 5, 6 } };
+    printf("%d %d\n", sum_fixed(2, g), sum_any(2, 3, g));   // 21 21
+    return 0;
+}
+```
+
+배열을 넘기면 첫 원소의 주소가 넘어갑니다. 2차원 배열의 "첫 원소"는 첫째 줄이므로, 인자의 진짜 타입은 `const int (*m)[3]`(3칸 배열을 가리키는 포인터)입니다. `m[][3]`은 같은 것을 읽기 쉽게 적은 것입니다.
+
+`sum_any`처럼 크기 인자를 **먼저** 적고 그것을 배열 선언에 쓰면 어떤 크기든 받을 수 있습니다.
+
+## 배열의 배열과 포인터의 배열
+
+```c
+int g[2][3];                    // int 6개가 한 덩어리
+int *rows[2];                   // 포인터 2개
+const char *names[] = { "led", "button", "buzzer" };    // 글자열 포인터 3개
+```
+
+| | `int g[2][3]` | `int *rows[2]` |
+| --- | --- | --- |
+| 메모리 | `int` 6개가 이어져 있다 | 포인터 2개. 각 줄은 다른 곳에 있다 |
+| 줄마다 길이가 다를 수 있나 | 없다 | 있다 |
+| `x[i][j]`의 계산 | 곱셈과 덧셈 한 번 | 포인터를 한 번 따라간 뒤 덧셈 |
+| 함수 인자의 타입 | `int (*)[3]` | `int **` |
+
+둘 다 `x[i][j]`로 쓸 수 있어서 헷갈리지만 서로 바꿔 넘길 수 없습니다. 글자열 목록은 길이가 제각각이라 포인터의 배열로 만듭니다.
+
+## 번호를 지정해 채우기
+
+```c
+#include <stdio.h>
+
+enum color { RED, GREEN, BLUE, COLOR_COUNT };
+
+const char *const color_name[COLOR_COUNT] = {
+    [RED] = "빨강",
+    [GREEN] = "초록",
+    [BLUE] = "파랑",
+};
+
+int main(void)
+{
+    int sparse[10] = { [2] = 20, [7] = 70 };    // 나머지는 0
+    printf("%d %d %s\n", sparse[2], sparse[3], color_name[BLUE]);   // 20 0 파랑
+    return 0;
+}
+```
+
+`[번호] = 값`으로 원하는 칸만 채울 수 있습니다. `enum` 값과 이름을 짝지은 표를 만들 때, 순서가 바뀌어도 어긋나지 않습니다.
+
+## 실행 중에 크기가 정해지는 배열
+
+```c nocheck
+void work(size_t n)
+{
+    int tmp[n];         // 가변 길이 배열(VLA): 스택에 n칸
+    …
+}
+```
+
+지역 배열의 크기에 변수를 쓸 수 있습니다. 편하지만 스택에 놓이므로 `n`이 크면 스택이 넘쳐 프로그램이 죽고, 실패를 확인할 방법도 없습니다. 크기가 바깥에서 오는 값이면 `malloc`을 씁니다. (위의 `sum_any`처럼 **인자의 타입**에만 쓰는 것은 메모리를 잡지 않으므로 괜찮습니다.)
+
+## 구조체 안의 배열
+
+```c
+struct packet {
+    unsigned char header[4];
+    unsigned char payload[60];
+};
+```
+
+배열은 대입할 수 없지만 구조체는 됩니다. 배열을 구조체로 감싸면 `=`로 복사하고, 함수에서 값으로 돌려줄 수 있습니다.
+
+## 길이가 정해지지 않은 마지막 멤버
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+struct message {
+    size_t len;
+    char text[];        // 유연한 배열 멤버: 반드시 맨 끝에
+};
+
+struct message *message_new(const char *s)
+{
+    size_t len = strlen(s);
+    struct message *m = malloc(sizeof *m + len + 1);
+    if (m == nullptr)
+        return nullptr;
+    m->len = len;
+    memcpy(m->text, s, len + 1);
+    return m;
+}
+
+int main(void)
+{
+    struct message *m = message_new("hello");
+    if (m == nullptr)
+        return 1;
+    printf("%zu %s\n", m->len, m->text);    // 5 hello
+    free(m);
+    return 0;
+}
+```
+
+머리표와 길이가 제각각인 데이터를 `malloc` 한 번으로 한 덩어리에 담습니다. 네트워크 패킷이나 가변 길이 레코드에서 자주 봅니다. `sizeof *m`에는 `text`의 크기가 들어 있지 않으므로 필요한 만큼 더해서 빌립니다.
+
+<Note>
+큰 2차원 데이터(이미지 등)는 `width * height` 크기의 1차원 배열로 빌려 `data[y * width + x]`로 쓰는 것이 흔합니다. 한 덩어리라 빠르고, 해제도 한 번입니다.
+</Note>
+
+## 정리
+
+- 2차원 배열은 줄 단위로 이어진 한 덩어리, 함수에 넘길 때 줄의 길이가 타입에 들어간다
+- 배열의 배열과 포인터의 배열은 메모리 모양도 타입도 다르다
+- 지정 초기화, 구조체로 감싸기, 유연한 배열 멤버를 알아 두면 표현이 넓어진다
