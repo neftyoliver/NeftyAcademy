@@ -60,10 +60,17 @@ import VerC11 from './chapters/c-basic/22-3-ver-c11.mdx';
 import VerC17 from './chapters/c-basic/22-4-ver-c17.mdx';
 import VerC23 from './chapters/c-basic/22-5-ver-c23.mdx';
 
+/**
+ * 본문에 적은 챕터 링크([글](#/read/책/챕터))를 빌드할 때 모아 둔 것. remark-chapter-links.mjs 가 만든다.
+ * 지도에서 그 두 챕터 사이에 줄이 생긴다.
+ */
+const modules = import.meta.glob<{ default: ComponentType; links?: string[] }>('./chapters/**/*.mdx', { eager: true });
+const linksOf = new Map(Object.values(modules).map((m) => [m.default, m.links ?? []]));
+
 /** 아직 안 쓴 챕터 */
 const draft = (id: string, title: string, children?: Chapter[]): Chapter => ({ id, title, draft: true, children });
 /** 다 쓴 챕터 */
-const written = (id: string, title: string, Content: ComponentType, summary?: string): Chapter => ({ id, title, Content, summary });
+const written = (id: string, title: string, Content: ComponentType, summary?: string): Chapter => ({ id, title, Content, summary, links: linksOf.get(Content) });
 /** 하위 챕터 중 쓴 것이 있어서, 묶음 자체는 "준비 중" 딱지 없이 보이게 할 때 */
 const group = (id: string, title: string, children: Chapter[]): Chapter => ({ id, title, children, draft: children.every((c) => c.draft) });
 
