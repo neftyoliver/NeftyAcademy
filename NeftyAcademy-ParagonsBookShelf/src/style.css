@@ -158,16 +158,16 @@ a { color: inherit; }
 .bf-node-sub circle { fill: color-mix(in srgb, var(--node) 30%, var(--bf-paper)); stroke: var(--node); stroke-width: 1.5; }
 .bf-node-sub.is-draft circle { fill: var(--bf-paper); stroke-dasharray: 2 2; }
 .bf-node-sub:hover circle, .bf-node-sub:focus-visible circle { transform: scale(1.5); }
-.bf-web-lines line { stroke: var(--bf-line); stroke-width: 1.5; }
+.bf-web-lines path { fill: none; stroke: var(--bf-line); stroke-width: 1.5; stroke-linejoin: round; pointer-events: none; }
 /* 읽는 순서 줄: 책 → 1 → 2 → … 연한 빨강, 가운데의 화살표가 방향 */
 .bf-web-order path { fill: none; stroke: #e39a9a; stroke-width: 1.6; stroke-linejoin: round; pointer-events: none; }
-.bf-web-order path.is-sub { stroke-width: 1; stroke: #efc4c4; }
-#bf-order-arrow path { fill: #d98383; stroke: none; }
-#bf-order-arrow-sub path { fill: #ecb6b6; stroke: none; }
+.bf-web-order .is-sub path { stroke-width: 1; stroke: #efc4c4; }
+.bf-web-order path.bf-web-arrow { fill: #d98383; stroke: none; }
+.bf-web-order .is-sub path.bf-web-arrow { fill: #ecb6b6; stroke: none; }
 /* 책 한 권의 영역: 그 책 색의 점선 테두리와 옅은 바탕 */
 .bf-web-regions polygon { fill: color-mix(in srgb, var(--node) 6%, transparent); stroke: color-mix(in srgb, var(--node) 65%, transparent); stroke-width: 1.4; stroke-dasharray: 7 6; stroke-linejoin: round; pointer-events: none; }
 /* 상호 참조 줄: 본문에서 서로 링크한 챕터끼리 잇는다 */
-.bf-web-links path { fill: none; stroke: var(--bf-accent, #c0842b); stroke-width: 1.3; stroke-dasharray: 5 4; opacity: 0.55; pointer-events: none; transition: opacity 0.15s ease, stroke-width 0.15s ease; }
+.bf-web-links path { fill: none; stroke-linejoin: round; stroke: var(--bf-accent, #c0842b); stroke-width: 1.3; stroke-dasharray: 5 4; opacity: 0.55; pointer-events: none; transition: opacity 0.15s ease, stroke-width 0.15s ease; }
 .bf-web-links path.is-on { opacity: 1; stroke-width: 2.4; stroke-dasharray: none; }
 .bf-web-hub circle { fill: var(--bf-bg); stroke: var(--bf-line); stroke-width: 1.5; }
 .bf-web-hub text { fill: var(--bf-muted); font-size: 13px; text-anchor: middle; }
@@ -179,6 +179,10 @@ a { color: inherit; }
 .bf-node-chapter circle { fill: var(--bf-paper); stroke: var(--node); stroke-width: 2; }
 .bf-node-chapter text { fill: var(--bf-ink); font-size: 12px; }
 .bf-node-chapter.is-draft circle { stroke-dasharray: 3 3; }
+/* 확대해서 제목이 들어간 노드 */
+.bf-node-sub text { fill: var(--bf-ink); }
+.bf-node text.bf-node-num { opacity: 0.6; }
+.bf-node.is-titled:hover circle, .bf-node.is-titled:focus-visible circle { transform: scale(1.05); }
 .bf-node:hover circle, .bf-node:focus-visible circle {
   transform: scale(1.14);
   filter: drop-shadow(0 0 6px var(--node)) drop-shadow(0 0 14px color-mix(in srgb, var(--node) 50%, transparent));
