@@ -26,6 +26,7 @@ const TIP_FONT = 13; // 노드 위에 뜨는 이름표. 배율의 제곱근만�
 const CHAPTER_TITLED_R = 30;
 const SUB_TITLED_R = 22;
 const ZOOM_MAX = 8;
+const MANY_LINKS = 40; // 상호 참조 줄이 이보다 많으면 흐리게 깔고, 노드에 올렸을 때만 또렷하게 그린다
 // 줄이 노드의 가운데에 이보다 가까이 오지 못하는 거리. 확대해서 노드가 커져도 줄이 노드에 닿지 않는 값이다
 const CLEAR = { book: BOOK_R + 2, hub: HUB_R + 2, chapter: 23, sub: 11.5 };
 
@@ -395,7 +396,8 @@ export function WebView({ books }: { books: Book[] }) {
           )}
         </g>
 
-        <g className="bf-web-links">
+        {/* 참조가 많은 책에서는 점선이 그물처럼 덮이므로 흐리게 깔아 두고, 노드에 올렸을 때만 또렷하게 보인다 */}
+        <g className={links.length > MANY_LINKS ? 'bf-web-links is-many' : 'bf-web-links'}>
           {links.map((l) => (
             <path key={l.key} d={path(l.line)} className={hover && (hover.key === l.from || hover.key === l.to) ? 'is-on' : undefined} />
           ))}
@@ -405,7 +407,7 @@ export function WebView({ books }: { books: Book[] }) {
           <g className="bf-web-hub">
             <circle cx={T(hub).x} cy={T(hub).y} r={radii.hub} />
             <text x={T(hub).x} y={T(hub).y} dy="0.35em" style={{ fontSize: HUB_FONT * k }}>
-              {library.books.length}권
+              {books.length}권
             </text>
           </g>
         )}

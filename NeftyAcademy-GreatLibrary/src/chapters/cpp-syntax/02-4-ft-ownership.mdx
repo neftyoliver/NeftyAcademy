@@ -1,0 +1,106 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '주인이 사라지면 자원도 사라진다, make_unique, 넘기는 법';
+
+C에서는 `malloc`마다 `free`를, `open`마다 `close`를 짝지어야 했고, 중간에 `return`하는 길마다 빠뜨리지 않았는지 살폈습니다([「malloc과 free」](#/read/c-basic/dyn-malloc)). C++은 이 일을 언어에 맡깁니다. 방법은 하나입니다. **자원에 주인을 정해 두고, 주인이 사라질 때 자원도 함께 정리되게 한다.**
+
+## 이미 쓰고 있었다
+
+`std::string`과 `std::vector`가 그렇게 움직입니다. 힙 메모리를 잡지만 `free`를 부른 적이 없습니다. 변수가 속한 중괄호가 끝나면 메모리가 돌아갑니다. 이 약속을 지키는 장치가 **소멸자**이고, 이런 방식을 RAII라고 부릅니다([「소멸자와 RAII」](#/read/cpp-syntax/class-dtor)).
+
+## 힙에 객체 하나: unique_ptr
+
+객체 하나를 힙에 두고 싶을 때는 `std::unique_ptr`가 주인 노릇을 합니다.
+
+```cpp
+#include <memory>
+#include <print>
+#include <string>
+
+struct Sensor {
+    std::string name;
+
+    explicit Sensor(std::string n) : name(std::move(n))
+    {
+        std::println("{} 열림", name);
+    }
+    ~Sensor() { std::println("{} 닫힘", name); }
+};
+
+std::unique_ptr<Sensor> open_sensor(bool ok)
+{
+    auto s = std::make_unique<Sensor>("bme280");
+    if (!ok)
+        return nullptr;         // 여기서 나가도 s가 알아서 닫힌다
+    return s;                   // 소유권을 부른 쪽으로 넘긴다
+}
+
+int main()
+{
+    auto a = open_sensor(false);
+    std::println("a는 {}", a ? "있음" : "없음");
+
+    auto b = open_sensor(true);
+    std::println("b는 {}", b->name);
+    auto c = std::move(b);      // 복사는 안 되고 옮기기만 된다
+    std::println("b는 {}", b ? "있음" : "없음");
+}                               // c가 사라지면서 닫힌다
+```
+
+```text
+bme280 열림
+bme280 닫힘
+a는 없음
+bme280 열림
+b는 bme280
+b는 없음
+bme280 닫힘
+```
+
+`Sensor(...)`는 만들어질 때, `~Sensor()`는 사라질 때 불리는 함수입니다(클래스 챕터에서 다룹니다). 볼 것은 흐름입니다.
+
+- `std::make_unique<Sensor>(...)`가 힙에 객체를 만들고 그 주인인 `unique_ptr`를 돌려준다
+- `unique_ptr`가 사라지면 객체도 지워진다. `delete`를 쓰지 않았다
+- 주인은 언제나 **하나**다. 복사는 컴파일 오류이고, `std::move`로 넘겨주면 원래 것은 비게 된다
+
+쓰는 법은 포인터와 같습니다(`b->name`, `*b`). 크기도 포인터 하나와 같고, 느려지지 않습니다.
+
+## 빌려 주기
+
+`unique_ptr`는 "누가 지울 책임을 지는가"를 나타냅니다. 객체를 잠깐 쓰기만 하는 함수는 책임을 넘겨받을 필요가 없으므로 참조로 받습니다.
+
+```cpp nocheck
+void print(const Sensor& s);                // 읽기만 한다
+void calibrate(Sensor& s);                  // 고친다
+void keep(std::unique_ptr<Sensor> s);       // 넘겨받아 내가 주인이 된다
+
+auto s = std::make_unique<Sensor>("bme280");
+print(*s);
+calibrate(*s);
+keep(std::move(s));                         // 이제 s는 비어 있다
+```
+
+함수의 인자 타입만 보고 소유권이 어디로 가는지 알 수 있습니다. C에서는 주석에 "부른 쪽이 free할 것"이라고 적던 내용입니다.
+
+## 소유를 나타내는 타입들
+
+| 타입 | 뜻 |
+| --- | --- |
+| 값 (`Sensor s;`, `std::vector<int> v;`) | 내가 주인. 가장 먼저 고른다 |
+| `std::unique_ptr<T>` | 힙에 있고 주인이 하나 |
+| `std::shared_ptr<T>` | 주인이 여럿. 마지막 주인이 사라질 때 지워진다. 꼭 필요할 때만 |
+| `T&`, `const T&` | 빌려 본다. 비어 있을 수 없다 |
+| `T*` | 빌려 본다. `nullptr`일 수 있다 |
+| `std::span<T>`, `std::string_view` | 여러 칸을 빌려 본다 |
+
+모던 C++에서 날 포인터 `T*`는 "소유하지 않는다"는 뜻으로만 씁니다. 지울 책임이 있는 포인터는 반드시 스마트 포인터에 넣습니다.
+
+<Note kind="tip">
+`new`와 `delete`를 직접 쓰지 않는 것이 요즘의 규칙입니다. 객체 하나는 `std::make_unique`, 여러 개는 `std::vector`로 충분합니다. `new`가 실제로 하는 일은 [「new, delete, placement new」](#/read/cpp-syntax/life-new)에서 봅니다.
+</Note>
+
+## 정리
+
+- 자원마다 주인을 정한다. 주인이 사라질 때 자원이 정리된다
+- 힙의 객체 하나는 `std::make_unique`로 만들고 `std::unique_ptr`가 소유한다
+- 쓰기만 하는 함수는 참조로 받는다. 소유권을 넘길 때만 `std::move`

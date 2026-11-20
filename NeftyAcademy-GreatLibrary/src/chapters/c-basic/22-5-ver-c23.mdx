@@ -76,7 +76,8 @@ int main(void)
     int sum;
     bool overflow = ckd_add(&sum, INT32_MAX, copy); // 넘치면 true
 
-    printf("%d %d %d %d %d\n", ok, p == nullptr, copy, zeros[3], overflow);     // 1 1 100 0 1
+    // 1 1 100 0 1
+    printf("%d %d %d %d %d\n", ok, p == nullptr, copy, zeros[3], overflow);
     printf("%b\n", (unsigned)value);                // 1100100
     return 0;
 }

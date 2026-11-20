@@ -1,4 +1,5 @@
-import { Cmd, Note } from 'neftyacademy-paragons-bookshelf';
+import { Cmd, Figure, Note } from 'neftyacademy-paragons-bookshelf';
+import { Permissions } from '../../components/Permissions';
 
 터미널 명령어 중에는 <strong>유닉스 계열이면 어디서나 되는 것(POSIX)</strong>과 **리눅스에서만 되는 것**이 섞여 있습니다. 구분해 두면 맥이나 BSD, 라즈베리파이에서 무엇이 그대로 통할지 미리 알 수 있습니다.
 
@@ -39,14 +40,9 @@ POSIX는 "유닉스처럼 생긴 OS라면 이 정도는 갖추자"는 IEEE 표�
 
 `ls -l`의 맨 앞 열 글자는 **종류 + 주인·그룹·나머지의 권한**입니다.
 
-```text
--rwxr-xr--  1 nefty nefty  120  run.sh
-│└┬┘└┬┘└┬┘
-│ │  │  └ 나머지: 읽기만
-│ │  └ 그룹: 읽기·실행
-│ └ 주인: 읽기·쓰기·실행
-└ 종류: - 파일, d 폴더, l 링크
-```
+<Figure caption="맨 앞 한 글자는 종류, 그 뒤로 세 글자씩 주인·그룹·나머지의 권한입니다">
+  <Permissions mode="-rwxr-xr--" rest="1 nefty nefty  120  run.sh" />
+</Figure>
 
 | 글자 | 파일에서 | 폴더에서 |
 | --- | --- | --- |

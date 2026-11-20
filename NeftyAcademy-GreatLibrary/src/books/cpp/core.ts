@@ -1,24 +1,34 @@
 /**
  * C++ 서가의 앞쪽 세 권: 문법, STL, 고급.
  * C를 아는 독자를 기준으로 한다(「컴퓨터 프로그래밍 초급」 다음에 읽는 책).
+ *
+ * 「C++ 문법」은 모던 C++(C++23)을 기본으로 가르친다: 출력은 std::println, 문자열은 std::string,
+ * 소유는 unique_ptr, 제약은 콘셉트. 요즘 쓰지 않는 기능은 마지막 챕터 「레거시 C++」에 짧게 모았다.
+ * 본문은 src/chapters/cpp-syntax/ 에 있고, 파일을 넣으면 저절로 열린다(../written.ts).
  */
 import { book } from '../outline';
+import { writtenIn } from '../written';
 
 export const cppSyntax = book(
   'cpp-syntax',
   'C++ 문법',
-  'C에서 건너와 클래스, 템플릿, 예외까지',
+  '모던 C++ 기준으로, C에서 건너와 클래스, 템플릿, 콘셉트까지',
   'cpp',
   `
 from-c            C에서 C++로
-  from-c-hello      첫 프로그램과 iostream
+  from-c-hello      첫 프로그램: std::println
   from-c-compile    컴파일러와 표준 버전 고르기
   from-c-diff       C와 달라지는 것들
   from-c-mangling   이름 맹글링과 extern "C"
+first-tools       먼저 쓰는 표준 도구
+  ft-string         string과 string_view
+  ft-vector         vector와 범위 기반 for
+  ft-array-span     array와 span
+  ft-ownership      unique_ptr로 보는 소유권
 types             타입과 초기화
   types-auto        auto와 decltype
-  types-init        초기화의 여러 모양과 중괄호 초기화
-  types-builtin     nullptr, bool, char8_t, 정수 타입
+  types-init        중괄호 초기화
+  types-builtin     nullptr, bool, 정수와 문자 타입
   types-enum        enum class
   types-binding     구조적 바인딩
   types-literal     사용자 정의 리터럴
@@ -28,23 +38,19 @@ references        참조
   ref-vs-pointer    포인터와 참조 고르기
   ref-return        참조를 돌려줄 때의 함정
 functions         함수
-  fn-overload       오버로딩과 오버로드 해소
-  fn-default        기본 인자
+  fn-overload       오버로딩과 기본 인자
   fn-inline         inline과 하나의 정의 규칙(ODR)
-  fn-constexpr      constexpr 함수
   fn-lambda         람다 기초
   fn-attributes     noexcept와 속성들
 namespaces        네임스페이스와 이름 찾기
   ns-basic          namespace와 using
-  ns-anonymous      이름 없는 네임스페이스
   ns-adl            인자 의존 이름 찾기(ADL)
 classes           클래스
   class-members     멤버와 접근 지정
   class-ctor        생성자와 멤버 초기화 리스트
   class-dtor        소멸자와 RAII
   class-const       this, const 멤버 함수, mutable
-  class-static      static 멤버
-  class-friend      friend
+  class-static      static 멤버와 friend
   class-explicit    explicit과 변환 생성자
 special-members   복사와 이동
   sm-copy           복사 생성과 복사 대입
@@ -52,18 +58,16 @@ special-members   복사와 이동
   sm-move           이동 생성과 이동 대입
   sm-elision        std::move와 복사 생략
   sm-rules          0, 3, 5의 규칙
-  sm-default        = default와 = delete
 operators         연산자 오버로딩
   op-arith          산술과 복합 대입
   op-compare        비교와 우주선 연산자
   op-call           첨자와 함수 호출
-  op-stream         스트림 입출력
+  op-stream         출력 붙이기: formatter와 operator<<
   op-conversion     변환 연산자
 inheritance       상속과 다형성
   inh-public        public 상속과 is-a
-  inh-virtual       virtual 함수와 가상 함수 표
+  inh-virtual       virtual, override, final
   inh-abstract      순수 가상 함수와 추상 클래스
-  inh-override      override와 final
   inh-dtor          가상 소멸자
   inh-multiple      다중 상속과 가상 상속
   inh-rtti          dynamic_cast와 typeid
@@ -81,29 +85,24 @@ concepts          콘셉트와 제약
   con-requires      requires 절과 requires 식
   con-standard      표준 콘셉트
   con-own           콘셉트 만들기
-  con-sfinae        옛 방식: SFINAE와 enable_if
-exceptions        예외
+exceptions        예외와 오류 처리
   exc-basic         throw, try, catch
   exc-unwind        스택 풀기와 RAII
   exc-safety        예외 안전성의 세 단계
   exc-noexcept      noexcept
-  exc-without       예외 없이 오류 알리기
+  exc-without       예외 없이 오류 알리기: optional과 expected
 casts             형 변환
-  cast-static       static_cast
-  cast-const        const_cast
+  cast-static       static_cast와 const_cast
   cast-reinterpret  reinterpret_cast와 std::bit_cast
-  cast-dynamic      dynamic_cast
   cast-implicit     암시적 변환의 규칙
 compile-time      컴파일 시간 계산
   ct-constexpr      constexpr 변수와 함수
   ct-if             if constexpr
   ct-consteval      consteval과 constinit
-  ct-assert         static_assert
-  ct-traits         타입 특성 맛보기
+  ct-assert         static_assert와 타입 특성
 lambdas           람다 깊이
   lam-capture       캡처의 종류와 수명
-  lam-generic       제네릭 람다
-  lam-closure       클로저 타입의 정체
+  lam-closure       클로저 타입과 제네릭 람다
   lam-function      std::function과 그 비용
   lam-recursive     재귀 람다와 명시적 this
 modules           헤더, 모듈, 빌드
@@ -121,17 +120,20 @@ ub-cpp            C++의 정의되지 않은 동작
   ubc-lifetime      수명이 끝난 객체 쓰기
   ubc-aliasing      엄격한 별칭과 union
   ubc-invalidation  반복자와 참조의 무효화
-  ubc-odr           ODR 위반
   ubc-tools         새니타이저와 경고
 versions          C++ 버전별 기능
-  ver-98            C++98과 C++03
-  ver-11            C++11
-  ver-14            C++14
+  ver-11            C++11과 C++14
   ver-17            C++17
   ver-20            C++20
   ver-23            C++23
   ver-26            C++26
+# 요즘은 쓰지 않지만 옛 코드를 읽으려면 알아야 하는 것들. 일부러 짧게 둔다.
+legacy            레거시 C++
+  leg-98            C++98과 C++03의 코드 읽기
+  leg-c-habits      C에서 온 습관들
+  leg-sfinae        SFINAE와 enable_if
 `,
+  writtenIn('cpp-syntax'),
 );
 
 export const cppStl = book(

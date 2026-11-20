@@ -1,0 +1,119 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'using으로 타입에 이름 붙이기, 템플릿인 별칭과 템플릿인 변수, _t와 _v';
+
+템플릿을 쓰다 보면 타입 이름이 길어집니다. 별칭은 긴 타입에 짧은 이름을 붙이고, 변수 템플릿은 타입마다 값이 다른 상수를 만듭니다.
+
+## using
+
+```cpp
+#include <map>
+#include <numbers>
+#include <print>
+#include <string>
+#include <type_traits>
+#include <vector>
+
+using Callback = void (*)(int);                         // 타입 별칭
+
+template <typename T>
+using Table = std::map<std::string, std::vector<T>>;    // 별칭 템플릿
+
+template <typename T>
+constexpr bool is_small = sizeof(T) <= sizeof(void*);   // 변수 템플릿
+
+template <typename T>
+constexpr T full_turn = T(2) * std::numbers::pi_v<T>;
+
+void on_edge(int pin) { std::println("edge {}", pin); }
+
+int main()
+{
+    Callback cb = on_edge;
+    cb(17);
+
+    Table<double> logs;
+    logs["temp"].push_back(23.5);
+    std::println("{}", logs["temp"].size());
+
+    std::println("{} {}", is_small<int>, is_small<std::string>);
+    std::println("{:.4f} {:.4f}", full_turn<float>, full_turn<double>);
+    std::println("{}", std::is_same_v<std::remove_const_t<const int>, int>);
+}
+```
+
+```text
+edge 17
+1
+true false
+6.2832 6.2832
+true
+```
+
+## 타입 별칭
+
+`using 새이름 = 타입;`은 C의 `typedef`와 하는 일이 같고, 읽는 방향이 자연스럽습니다.
+
+| `typedef` | `using` |
+| --- | --- |
+| `typedef void (*Callback)(int);` | `using Callback = void (*)(int);` |
+| `typedef unsigned char Byte;` | `using Byte = unsigned char;` |
+| 템플릿으로 만들 수 없다 | `template <typename T> using …`가 된다 |
+
+별칭은 **새 타입을 만들지 않습니다.** `Callback`과 `void (*)(int)`는 완전히 같은 타입이고 오버로딩에서도 구별되지 않습니다. 구별되는 타입이 필요하면 `struct`나 [`enum class`](#/read/cpp-syntax/types-enum)로 감쌉니다.
+
+## 별칭 템플릿
+
+`Table<double>`은 `std::map<std::string, std::vector<double>>`의 다른 이름입니다. 인자 일부를 고정하고 나머지만 빈칸으로 남기는 데 씁니다.
+
+```cpp nocheck
+template <typename T>
+using Ref = std::reference_wrapper<T>;
+
+template <typename T, std::size_t N>
+using Matrix = std::array<std::array<T, N>, N>;
+
+template <typename T>
+using Owned = std::unique_ptr<T, void (*)(T*)>;     // 지우는 함수를 직접 주는 꼴
+```
+
+별칭 템플릿은 [특수화](#/read/cpp-syntax/tpl-special)할 수 없습니다. 타입에 따라 다른 것을 가리키게 하려면 클래스 템플릿을 특수화하고, 그 안의 `type`을 별칭이 가리키게 합니다. 표준의 `_t`가 그 꼴입니다.
+
+## _t와 _v
+
+`<type_traits>`의 도구들은 원래 클래스 템플릿이어서 결과를 멤버로 꺼내야 했습니다. 별칭 템플릿과 변수 템플릿이 그 꼬리를 떼어 줍니다.
+
+| 원래 꼴 | 짧은 꼴 | 만든 방법 |
+| --- | --- | --- |
+| `typename std::remove_const<T>::type` | `std::remove_const_t<T>` | 별칭 템플릿 (C++14) |
+| `std::is_integral<T>::value` | `std::is_integral_v<T>` | 변수 템플릿 (C++17) |
+
+요즘 코드에서는 짧은 꼴만 씁니다.
+
+## 변수 템플릿
+
+`template <typename T> constexpr …`로 **타입마다 하나씩 있는 변수**를 만듭니다.
+
+- `is_small<int>`처럼 타입을 넣어 값을 얻는다. 컴파일할 때 계산되는 "타입에 대한 질문"을 적기에 좋다
+- `full_turn<float>`와 `full_turn<double>`은 각각 그 타입의 정밀도로 계산된 서로 다른 상수다
+- 헤더에 둘 때는 `inline constexpr`로 적는다 ([「inline과 하나의 정의 규칙(ODR)」](#/read/cpp-syntax/fn-inline))
+
+수학 상수는 직접 만들 필요가 없습니다. C++20의 `<numbers>`에 있습니다.
+
+| 이름 | 값 |
+| --- | --- |
+| `std::numbers::pi` | π (`double`) |
+| `std::numbers::pi_v<float>` | π (`float`) |
+| `std::numbers::e`, `sqrt2`, `ln2`, `inv_pi` 등 | 같은 방식 |
+
+C의 `M_PI`는 표준이 아니어서 컴파일러와 옵션에 따라 없을 수 있습니다. `std::numbers::pi`를 씁니다.
+
+<Note>
+클래스 안에서 `using value_type = T;`처럼 별칭을 멤버로 두는 것이 표준 컨테이너의 관례입니다. `std::vector<int>::value_type`은 `int`, `::iterator`는 그 반복자 타입입니다. 템플릿이 "이 컨테이너의 원소 타입"을 물을 수 있게 해 줍니다. 물을 때 `typename`이 왜 붙는지는 [다음 페이지](#/read/cpp-syntax/tpl-lookup)에서 봅니다.
+</Note>
+
+## 정리
+
+- `using 이름 = 타입;`은 `typedef`의 읽기 쉬운 꼴. 새 타입이 아니라 다른 이름이다
+- 별칭 템플릿은 템플릿 인자의 일부를 고정한다. `_t`가 그것
+- 변수 템플릿은 타입마다 값이 다른 상수. `_v`와 `std::numbers::pi_v<T>`가 그것

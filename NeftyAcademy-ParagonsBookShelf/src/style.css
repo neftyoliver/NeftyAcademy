@@ -168,6 +168,8 @@ a { color: inherit; }
 .bf-web-regions path { fill: color-mix(in srgb, var(--node) 6%, transparent); stroke: color-mix(in srgb, var(--node) 65%, transparent); stroke-width: 1.4; stroke-dasharray: 7 6; stroke-linejoin: round; pointer-events: none; }
 /* 상호 참조 줄: 본문에서 서로 링크한 챕터끼리 잇는다 */
 .bf-web-links path { fill: none; stroke-linejoin: round; stroke: var(--bf-accent, #c0842b); stroke-width: 1.3; stroke-dasharray: 5 4; opacity: 0.55; pointer-events: none; transition: opacity 0.15s ease, stroke-width 0.15s ease; }
+/* 참조가 많은 지도: 줄이 그물처럼 덮이지 않게 흐리게 깔아 둔다. 올렸을 때의 모양(is-on)은 그대로 */
+.bf-web-links.is-many path { opacity: 0.1; stroke-width: 1; stroke-dasharray: 2 5; }
 .bf-web-links path.is-on { opacity: 1; stroke-width: 2.4; stroke-dasharray: none; }
 .bf-web-hub circle { fill: var(--bf-bg); stroke: var(--bf-line); stroke-width: 1.5; }
 .bf-web-hub text { fill: var(--bf-muted); font-size: 13px; text-anchor: middle; }
@@ -283,6 +285,16 @@ a { color: inherit; }
 .bf-prose table { width: 100%; border-collapse: collapse; margin: 1em 0; font-size: 15px; display: block; overflow-x: auto; }
 .bf-prose th, .bf-prose td { padding: 7px 10px; border-bottom: 1px solid var(--bf-line); text-align: left; vertical-align: top; }
 .bf-prose th { font-size: 13px; color: var(--bf-muted); font-weight: 600; }
+/* 표의 칸에서 한글은 낱말 단위로 끊는다. 글자마다 끊기면 칸의 최소 폭이 한 글자가 되어,
+   긴 코드가 든 칸 옆에서 글자가 세로로 쌓인다 */
+.bf-prose th, .bf-prose td { word-break: keep-all; }
+/* 좁은 화면: 띄어쓰기 없는 긴 코드는 칸 안에서 접는다. 다만 코드가 든 칸은 12자쯤이 한 줄에 들어가는 폭을,
+   이름표 구실을 하는 첫 칸은 서너 글자가 들어가는 폭을 지킨다. 그래도 넘치면 표가 옆으로 밀린다(위의 overflow-x) */
+@media (max-width: 640px) {
+  .bf-prose th code, .bf-prose td code { overflow-wrap: anywhere; }
+  .bf-prose th:has(code), .bf-prose td:has(code) { min-width: 8em; }
+  .bf-prose th:where(:first-child), .bf-prose td:where(:first-child) { min-width: 5em; }
+}
 .bf-prose blockquote { margin: 1em 0; padding: 2px 16px; border-left: 3px solid var(--node); color: var(--bf-muted); }
 .bf-prose hr { border: 0; border-top: 1px solid var(--bf-line); margin: 2em 0; }
 .bf-prose kbd { font-family: var(--bf-mono); font-size: 0.85em; padding: 0 5px; border: 1px solid var(--bf-line); border-bottom-width: 2px; border-radius: 4px; }
@@ -352,8 +364,19 @@ a { color: inherit; }
 .bf-figure-body svg { display: block; max-width: 100%; height: auto; margin: 0 auto; }
 .bf-figure figcaption { margin-top: 8px; color: var(--bf-muted); font-size: 14px; text-align: center; }
 .bf-term { text-decoration: underline dotted; text-underline-offset: 3px; cursor: help; }
-.bf-cmd { display: grid; grid-template-columns: minmax(9em, auto) 1fr; gap: 4px 14px; padding: 6px 0; border-bottom: 1px solid var(--bf-line); align-items: baseline; }
-.bf-cmd code { white-space: nowrap; }
+/* 명령어와 뜻. 잇달아 놓인 줄들이 한 표가 되어(display: table-row) 명령어 칸의 폭이 가장 긴 것에 맞춰진다 */
+.bf-cmd { display: table-row; }
+.bf-cmd > div { display: table-cell; padding: 6px 0; border-bottom: 1px solid var(--bf-line); vertical-align: baseline; }
+.bf-cmd > .bf-cmd-code { white-space: nowrap; }
+.bf-cmd > .bf-cmd-code code { display: block; min-width: 7em; }
+.bf-cmd > .bf-cmd-means { width: 100%; padding-left: 14px; }
+@media (max-width: 560px) {
+  .bf-cmd { display: block; padding: 6px 0; border-bottom: 1px solid var(--bf-line); }
+  .bf-cmd > div { display: block; padding: 0; border-bottom: 0; }
+  .bf-cmd > .bf-cmd-code { white-space: normal; }
+  .bf-cmd > .bf-cmd-code code { display: inline-block; min-width: 0; }
+  .bf-cmd > .bf-cmd-means { width: auto; padding: 3px 0 0; }
+}
 
 /* ---------- 스크롤 레일 ---------- */
 .bf-rail { position: fixed; top: 112px; right: 10px; bottom: 24px; z-index: 15; width: 22px; cursor: pointer; }

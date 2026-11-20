@@ -1,0 +1,123 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '객체를 쓸 수 있는 상태로 만들기, 초기화 리스트, 위임, = default';
+
+C에서는 구조체를 만든 뒤 `sensor_init(&s)`를 부르는 것을 잊으면 쓰레기 값으로 일하게 됐습니다. 생성자는 **객체가 만들어질 때 반드시 불리는 함수**입니다. 생성자가 끝났다면 그 객체는 쓸 수 있는 상태입니다.
+
+## 생성자와 초기화 리스트
+
+```cpp
+#include <print>
+#include <string>
+#include <utility>
+
+class Pin {
+public:
+    Pin(int number, std::string label) : number_(number), label_(std::move(label))
+    {
+        std::println("Pin({}, {})", number_, label_);
+    }
+    // 다른 생성자에게 일을 넘긴다 (위임)
+    explicit Pin(int number) : Pin(number, "gpio" + std::to_string(number)) {}
+
+    int number() const { return number_; }
+    const std::string& label() const { return label_; }
+
+private:
+    const int number_;      // const 멤버는 초기화 리스트에서만 정할 수 있다
+    std::string label_;
+    bool active_ = false;   // 기본 멤버 초기화
+};
+
+int main()
+{
+    Pin led(17, "led");
+    Pin spare(27);
+    std::println("{} {} {}", spare.number(), spare.label(), led.label());
+}
+```
+
+```text
+Pin(17, led)
+Pin(27, gpio27)
+27 gpio27 led
+```
+
+생성자는 이름이 클래스와 같고 반환 타입이 없습니다. `:` 뒤의 `number_(number), label_(std::move(label))`가 **멤버 초기화 리스트**입니다. 멤버를 무엇으로 만들지를 여기서 정합니다.
+
+## 왜 본문에서 대입하지 않나
+
+```cpp nocheck
+Pin(int number, std::string label)
+{
+    number_ = number;       // 오류: const 멤버에는 대입할 수 없다
+    label_ = label;         // 빈 문자열로 먼저 만들어진 뒤에 다시 대입된다
+}
+```
+
+생성자의 본문 `{`에 들어섰을 때 멤버들은 **이미 만들어져 있습니다.** 본문에서 하는 것은 초기화가 아니라 대입입니다. 그래서
+
+- `const` 멤버와 참조 멤버는 초기화 리스트에서만 정할 수 있고
+- 기본 생성자가 없는 타입의 멤버도 리스트에서 인자를 줘야 하며
+- 그 밖의 멤버도 리스트를 써야 "만들고 나서 덮어쓰는" 헛일이 없습니다
+
+## 초기화되는 순서
+
+멤버는 초기화 리스트에 적은 순서가 아니라 **클래스에 선언한 순서**로 초기화됩니다.
+
+```cpp nocheck
+class Range {
+    int size_;
+    int end_;
+public:
+    // 적은 순서와 달리 size_가 먼저 초기화된다
+    Range(int begin, int end) : end_(end), size_(end_ - begin) {}
+};
+```
+
+`size_`가 `end_`보다 먼저 선언됐으므로 `size_(end_ - begin)`이 먼저 실행되고, 그때 `end_`는 쓰레기 값입니다. 컴파일러가 `-Wreorder`로 경고합니다. 리스트는 늘 선언 순서대로 적으세요.
+
+## 기본값을 정하는 세 군데
+
+| 방법 | 예 | 쓰는 때 |
+| --- | --- | --- |
+| 기본 멤버 초기화 | `bool active_ = false;` | 생성자와 상관없이 늘 같은 시작값 |
+| 초기화 리스트 | `: number_(number)` | 인자에 따라 달라지는 값 |
+| 위임 생성자 | `: Pin(number, "…")` | 생성자끼리 겹치는 일을 한곳에 |
+
+리스트에 적지 않은 멤버는 기본 멤버 초기화의 값을 쓰고, 그것도 없으면 그 타입의 기본 방식으로 초기화됩니다(`int`는 쓰레기 값, `std::string`은 빈 문자열).
+
+## 기본 생성자
+
+인자 없이 부를 수 있는 생성자가 기본 생성자입니다. `Pin p;`, `std::vector<Pin> v(3);`, 배열이 이것을 씁니다.
+
+```cpp nocheck
+struct A { int x = 0; };            // 생성자를 안 적었다 → 컴파일러가 만들어 준다
+
+struct B {
+    B(int x) : x(x) {}              // 하나라도 적으면 기본 생성자는 사라진다
+    int x;
+};
+
+struct C {
+    C() = default;                  // "그래도 만들어 달라"
+    C(int x) : x(x) {}
+    int x = 0;
+};
+```
+
+위의 `Pin`에는 기본 생성자가 없습니다. 번호 없는 핀은 뜻이 없으므로 일부러 그렇게 둔 것입니다. 뜻 있는 기본 상태가 없다면 기본 생성자를 만들지 않는 것이 맞습니다.
+
+## 인자를 값으로 받고 옮긴다
+
+`Pin(int number, std::string label)`은 문자열을 `const std::string&`가 아니라 값으로 받았습니다. 받아서 **보관할** 인자는 이렇게 값으로 받고 `std::move`로 멤버에 옮기는 것이 요즘의 관용구입니다. 부르는 쪽이 임시 객체를 넘기면 복사가 한 번도 일어나지 않습니다([「이동 생성과 이동 대입」](#/read/cpp-syntax/sm-move)).
+
+<Note kind="warn">
+생성자를 적으면 그 타입은 더 이상 "값의 묶음"이 아니어서 `Pin{.number = 17}` 같은 지정 초기화를 쓸 수 없습니다. 단순한 설정 구조체에는 생성자를 적지 않고 기본 멤버 초기화만 두는 편이 편합니다.
+</Note>
+
+## 정리
+
+- 생성자가 끝나면 객체는 쓸 수 있는 상태여야 한다
+- 멤버는 초기화 리스트에서, 선언한 순서대로 초기화한다
+- 늘 같은 시작값은 기본 멤버 초기화로, 겹치는 일은 위임 생성자로

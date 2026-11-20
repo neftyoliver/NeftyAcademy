@@ -15,9 +15,12 @@ struct reading {
 
 int main(void)
 {
-    struct reading a = { 3, 21.5, true };                       // 순서대로
-    struct reading b = { .sensor_id = 4, .celsius = 19.0 };     // 이름으로. 안 적은 valid 는 false
-    struct reading c = { 0 };                                   // 전부 0
+    // 순서대로
+    struct reading a = { 3, 21.5, true };
+    // 이름으로. 안 적은 valid 는 false
+    struct reading b = { .sensor_id = 4, .celsius = 19.0 };
+    // 전부 0
+    struct reading c = { 0 };
 
     b.valid = true;
     c = a;                              // 통째로 복사된다

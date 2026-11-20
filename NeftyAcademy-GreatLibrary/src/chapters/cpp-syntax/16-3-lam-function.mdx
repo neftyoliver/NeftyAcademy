@@ -1,0 +1,147 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '타입이 다른 호출 가능한 것들을 한 타입에 담기, 치르는 값, 다른 선택지';
+
+[람다마다 타입이 다릅니다](#/read/cpp-syntax/lam-closure). 그러면 "버튼이 눌리면 부를 것들"을 한 벡터에 담을 수 없습니다. `std::function`은 **서명만 같으면 무엇이든** 담는 상자입니다.
+
+## 담기
+
+```cpp
+#include <functional>
+#include <print>
+#include <string>
+#include <utility>
+#include <vector>
+
+struct Button {
+    std::vector<std::function<void(int)>> handlers;
+
+    void on_press(std::function<void(int)> handler)
+    {
+        handlers.push_back(std::move(handler));
+    }
+    void press(int pin) const
+    {
+        for (const auto& handler : handlers)
+            handler(pin);
+    }
+};
+
+void log_press(int pin) { std::println("함수: {}", pin); }
+
+struct Counter {
+    int count = 0;
+    void hit(int) { ++count; }
+};
+
+int main()
+{
+    Button button;
+    Counter counter;
+    std::string label = "LED";
+
+    button.on_press(log_press);                         // 보통 함수
+    button.on_press([label](int pin) {                  // 캡처가 있는 람다
+        std::println("{}: {}", label, pin);
+    });
+    button.on_press([&counter](int pin) { counter.hit(pin); });
+
+    button.press(17);
+    button.press(17);
+    std::println("{}", counter.count);
+    std::println("{}", sizeof(std::function<void(int)>));
+}
+```
+
+```text
+함수: 17
+LED: 17
+함수: 17
+LED: 17
+2
+32
+```
+
+`std::function<void(int)>`는 "`int` 하나를 받고 아무것도 돌려주지 않는, 부를 수 있는 것"입니다. 함수 포인터, 람다, [`operator()`가 있는 객체](#/read/cpp-syntax/op-call)가 모두 들어갑니다. 안에 든 것의 원래 타입은 지워지고 서명만 남습니다. 이 기법을 타입 지우기(type erasure)라고 합니다.
+
+- 비어 있을 수 있다. `if (f)`로 확인한다. 빈 것을 부르면 `std::bad_function_call` 예외
+- 복사하면 안에 든 것도 복사된다
+
+## 치르는 값
+
+| 항목 | 내용 |
+| --- | --- |
+| 크기 | 포인터 몇 개 분량. libstdc++에서 32바이트 (위 출력) |
+| 호출 | 함수 포인터를 거치는 간접 호출. **인라인되지 않는다** |
+| 힙 할당 | 담는 것이 작으면 상자 안에 넣고, 아니면 힙에 둔다. libstdc++는 16바이트 이하이고 `memcpy`로 복사해도 되는 것만 안에 넣는다 |
+| 복사 | 담는 것이 복사할 수 있어야 한다. `unique_ptr`을 캡처한 람다는 **담기지 않는다** |
+
+위 예제에서 `[label]` 람다는 `std::string`을 품어서 힙에 놓입니다. `[&counter]` 람다는 포인터 하나라 상자 안에 들어갑니다.
+
+버튼 처리기처럼 가끔 불리는 것에는 문제가 되지 않습니다. 샘플마다 불리는 필터 함수, 픽셀마다 불리는 콜백이라면 간접 호출과 인라인 실패가 눈에 띕니다.
+
+## 고르기
+
+"부를 수 있는 것"을 받는 방법은 넷입니다.
+
+| 방법 | 성질 | 맞는 곳 |
+| --- | --- | --- |
+| 템플릿 `template <std::invocable<int> F>` | 직접 부른다. 인라인된다. 캡처 있는 람다도 받는다 | 받아서 **바로 부르는** 함수 (알고리즘) |
+| 함수 포인터 `void (*)(int)` | 간접 호출. 캡처 있는 람다는 **못 받는다** | C API, 캡처가 필요 없는 표 |
+| `std::function<void(int)>` | 간접 호출. 무엇이든 받아 **소유한다** | 멤버나 컨테이너에 **보관하는** 콜백 |
+| `std::function_ref<void(int)>` (C++26) | 간접 호출. 무엇이든 받지만 빌려 볼 뿐이다. 보관하면 안 된다 | 받아서 바로 부르되 템플릿으로 만들기 싫은 함수 |
+
+기준은 "보관하는가"입니다. 받아서 그 자리에서 부르고 끝이면 템플릿, 나중에 부르려고 넣어 두면 `std::function`입니다.
+
+```cpp nocheck
+template <std::invocable<int> F>
+void for_each_pin(F action);                        // 바로 부른다 → 템플릿
+
+class Button {
+    std::function<void(int)> on_press_;             // 보관한다 → std::function
+};
+```
+
+## 복사할 수 없는 것 담기
+
+C++23의 `std::move_only_function`은 복사를 요구하지 않습니다. 그래서 `unique_ptr`을 [옮겨 담은 람다](#/read/cpp-syntax/lam-capture)도 들어갑니다. 대신 상자 자체도 복사할 수 없고 옮기기만 됩니다.
+
+```cpp nocheck
+std::move_only_function<int()> task =
+    [p = std::make_unique<int>(7)] { return *p; };
+
+std::function<int()> bad = std::move(task);         // 오류
+```
+
+서명에 `const`, `noexcept`도 적을 수 있습니다(`std::move_only_function<int() const noexcept>`). 작업 큐처럼 "한 번 넘기고 한 번 부르는" 것을 담기에 `std::function`보다 맞습니다.
+
+| 타입 | 표준 | 담는 것 | 상자의 복사 |
+| --- | --- | --- | --- |
+| `std::function` | C++11 | 복사할 수 있는 것 | 된다 |
+| `std::move_only_function` | C++23 | 옮길 수 있는 것 | 안 된다 |
+| `std::copyable_function` | C++26 | 복사할 수 있는 것. `const`, `noexcept`를 서명에 적는다 | 된다 |
+| `std::function_ref` | C++26 | 아무것도 담지 않는다. 가리키기만 한다 | 된다 (포인터 둘) |
+
+<Note kind="warn">
+지원이 고르지 않습니다. `std::move_only_function`은 GCC 12(libstdc++)부터 있고, Clang의 libc++에는 LLVM 22에야 `-fexperimental-library` 옵션 뒤에 들어왔습니다. `std::copyable_function`과 `std::function_ref`는 GCC 16에 들어왔습니다(2026년 11월 기준). 라즈베리 파이 OS의 GCC 14에서 쓸 수 있는 것은 위 넷 가운데 앞의 둘입니다.
+</Note>
+
+## 멤버 함수를 담을 때
+
+멤버 함수는 객체가 있어야 부를 수 있습니다. 람다로 감싸는 것이 가장 읽기 쉽습니다.
+
+```cpp nocheck
+using namespace std::placeholders;
+
+button.on_press([&counter](int pin) { counter.hit(pin); });     // 권장
+button.on_press(std::bind_front(&Counter::hit, &counter));      // C++20
+button.on_press(std::bind(&Counter::hit, &counter, _1));        // 옛 방식
+```
+
+`std::bind`는 람다가 없던 시절의 도구입니다. 새 코드에서는 쓸 일이 없습니다. 어느 방식이든 `counter`가 버튼보다 [오래 살아야](#/read/cpp-syntax/lam-capture) 한다는 것은 같습니다.
+
+## 정리
+
+- `std::function<서명>`은 서명이 같은 호출 가능한 것을 무엇이든 담는다. 간접 호출과 (때로) 힙 할당이 값이다
+- 받아서 바로 부르면 템플릿, 보관하면 `std::function`
+- 복사할 수 없는 람다는 `std::move_only_function`에 담는다

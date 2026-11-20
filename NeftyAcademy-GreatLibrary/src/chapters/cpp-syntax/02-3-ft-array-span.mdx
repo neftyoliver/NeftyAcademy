@@ -1,0 +1,138 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '길이를 잃지 않는 배열, 포인터와 길이를 묶은 span';
+
+C의 배열은 함수에 넘기는 순간 포인터가 되어 길이를 잃었습니다([「포인터와 배열」](#/read/c-basic/ptr-arrays)). 그래서 늘 길이를 인자로 하나 더 넘겼습니다. C++에는 이 문제를 푸는 타입이 둘 있습니다.
+
+## std::array
+
+```cpp
+#include <array>
+#include <print>
+
+int main()
+{
+    std::array<int, 4> a = {1, 2, 3, 4};
+    std::array<int, 4> b = a;           // 배열인데 통째로 복사된다
+    b[0] = 99;
+
+    std::println("{} {} {}", a[0], b[0], a.size());
+    std::println("{}", a == b);         // 비교도 된다
+}
+```
+
+```text
+1 99 4
+false
+```
+
+`std::array<int, 4>`는 `int[4]`와 메모리 배치가 똑같습니다. 힙을 쓰지 않고, 크기도 `4 * sizeof(int)` 그대로입니다. 달라지는 것은 "값처럼 다룰 수 있다"는 점입니다. 복사되고, 비교되고, 함수가 돌려줄 수 있고, 자기 길이를 압니다.
+
+## std::span
+
+`std::span`은 "연달아 놓인 칸들"을 가리키는 뷰입니다. 포인터 하나와 길이 하나를 묶은 것으로, `std::string_view`의 배열판입니다.
+
+```cpp
+#include <array>
+#include <print>
+#include <span>
+#include <vector>
+
+int sum(std::span<const int> values)    // 포인터 + 길이를 한 덩어리로 받는다
+{
+    int total = 0;
+    for (int v : values)
+        total += v;
+    return total;
+}
+
+int main()
+{
+    std::array<int, 4> fixed = {1, 2, 3, 4};
+    std::vector<int> grown = {10, 20, 30};
+    int raw[] = {100, 200};
+
+    std::println("{} {} {}", sum(fixed), sum(grown), sum(raw));
+    std::println("{}", sum(std::span(grown).first(2)));     // 앞의 두 칸만
+}
+```
+
+```text
+10 60 300
+30
+```
+
+`sum`은 하나인데 `std::array`, `std::vector`, C 배열을 모두 받습니다. C였다면 `int sum(const int *values, size_t n)`으로 쓰고 부르는 쪽이 길이를 맞게 넘기기를 믿어야 했습니다.
+
+`std::span<const int>`는 읽기만, `std::span<int>`는 칸을 고칠 수도 있습니다.
+
+```cpp
+#include <print>
+#include <span>
+#include <vector>
+
+void scale(std::span<int> values, int k)
+{
+    for (int& v : values)
+        v *= k;
+}
+
+int main()
+{
+    std::vector<int> v = {1, 2, 3, 4};
+    scale(std::span(v).subspan(1, 2), 10);      // 1번부터 두 칸만
+    for (int x : v)
+        std::print("{} ", x);
+    std::println("");
+}
+```
+
+```text
+1 20 30 4
+```
+
+## 네 가지를 나란히
+
+| | 메모리의 주인 | 길이 | 놓이는 곳 |
+| --- | --- | --- | --- |
+| `int a[4]` | 자기 | 고정. 함수에 넘기면 잃는다 | 스택이나 전역 |
+| `std::array<int, 4>` | 자기 | 고정. 늘 안다 | 스택이나 전역 |
+| `std::vector<int>` | 자기 | 변한다. 늘 안다 | 힙 |
+| `std::span<int>` | **남의 것** | 볼 때 정해진다 | (가리키기만 한다) |
+
+고르는 기준은 단순합니다.
+
+- 길이가 컴파일할 때 정해져 있다 → `std::array`
+- 실행 중에 정해지거나 변한다 → `std::vector`
+- 함수가 배열을 받는다 → `std::span`
+
+<Note kind="warn">
+`std::span`도 뷰입니다. 가리키던 `std::vector`가 사라지거나 `push_back`으로 메모리를 옮기면 죽은 곳을 가리킵니다. 함수 인자로 받아 그 안에서만 쓰세요.
+</Note>
+
+## C 함수와 주고받기
+
+```cpp
+#include <array>
+#include <cstring>
+#include <print>
+
+int main()
+{
+    std::array<unsigned char, 4> buf = {};
+    std::memset(buf.data(), 0xff, buf.size());      // 포인터와 길이를 꺼내 준다
+    std::println("{:#x}", buf[3]);
+}
+```
+
+```text
+0xff
+```
+
+`data()`는 첫 칸의 포인터, `size()`는 칸 수입니다. `std::vector`와 `std::span`에도 똑같이 있습니다. 장치에서 바이트를 읽는 `read(fd, buf.data(), buf.size())` 같은 호출에 그대로 씁니다.
+
+## 정리
+
+- `std::array`는 값처럼 복사·비교되는 고정 길이 배열. 비용은 C 배열과 같다
+- `std::span`은 포인터와 길이의 묶음. 배열을 받는 함수 인자로 쓴다
+- C API에는 `data()`와 `size()`로 넘긴다

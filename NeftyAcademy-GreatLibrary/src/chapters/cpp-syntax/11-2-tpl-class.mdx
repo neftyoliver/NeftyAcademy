@@ -1,0 +1,126 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '타입을 빈칸으로 둔 클래스, 클래스 밖의 멤버 정의, 쓰는 멤버만 만들어진다';
+
+`std::vector<int>`의 꺾쇠가 클래스 템플릿입니다. 원소의 타입을 빈칸으로 두고 클래스를 한 번만 쓴 것입니다. 직접 만들어 봅니다.
+
+## 클래스 템플릿
+
+```cpp
+#include <cstddef>
+#include <print>
+#include <string>
+#include <vector>
+
+template <typename T>
+class History {
+public:
+    void add(const T& value) { items_.push_back(value); }
+    const T& latest() const { return items_.back(); }
+    std::size_t size() const { return items_.size(); }
+    T sum() const;                      // 정의는 아래에
+
+private:
+    std::vector<T> items_;
+};
+
+template <typename T>
+T History<T>::sum() const               // 클래스 밖에서 정의할 때의 꼴
+{
+    T total{};
+    for (const T& item : items_)
+        total += item;
+    return total;
+}
+
+struct Point {
+    int x;
+    int y;
+};
+
+int main()
+{
+    History<double> temps;
+    temps.add(23.5);
+    temps.add(24.0);
+    std::println("{} {}", temps.latest(), temps.sum());
+
+    History<std::string> names;
+    names.add("pi");
+    names.add("zero");
+    std::println("{}", names.sum());
+
+    History<Point> points;              // Point에는 +=가 없다
+    points.add({1, 2});
+    std::println("{}", points.size());  // 그래도 된다. sum()을 부르지 않았다
+}
+```
+
+```text
+24 47.5
+pizero
+1
+```
+
+- 함수 템플릿과 달리 타입을 **적어야** 한다: `History<double>`. (생성자 인자에서 추론되는 경우는 [CTAD](#/read/cpp-syntax/tpl-deduction)에서 본다)
+- `History<double>`과 `History<std::string>`은 이름만 닮은 **서로 다른 타입**이다. 서로 대입되지 않고, [`static` 멤버](#/read/cpp-syntax/class-static)도 따로 가진다
+- 클래스 안에서는 `History`라고만 써도 `History<T>`를 뜻한다
+
+## 클래스 밖에서 멤버 정의하기
+
+`sum()`처럼 본문을 클래스 밖에 쓰려면 `template <typename T>`를 다시 적고 이름을 `History<T>::`로 한정합니다. 길어지므로 짧은 함수는 클래스 안에 쓰는 것이 보통입니다. 어느 쪽이든 [헤더에](#/read/cpp-syntax/tpl-function) 있어야 합니다.
+
+## 쓰는 멤버만 만들어진다
+
+`History<Point>`가 컴파일된 것이 이 페이지의 핵심입니다. 클래스 템플릿의 멤버 함수는 **불릴 때에야** 인스턴스화됩니다. `points.sum()`을 부르는 순간에 `total += item`이 `Point`에 대해 컴파일되고, 그때 오류가 납니다.
+
+| 뜻 | 예 |
+| --- | --- |
+| 타입이 클래스의 **모든** 기능을 받쳐 줄 필요가 없다 | 복사할 수 없는 `std::unique_ptr`도 `std::vector`에 담긴다. 복사하는 멤버를 부르지만 않으면 된다 |
+| 쓰지 않는 멤버는 실행 파일에 들어가지 않는다 | 멤버가 백 개인 클래스 템플릿도 쓴 것만 값을 치른다 |
+| 오류가 늦게 드러난다 | 아무도 부르지 않은 멤버의 버그는 컴파일러도 모른다 |
+
+## 기본 인자
+
+템플릿 인자에도 기본값을 줄 수 있습니다.
+
+```cpp nocheck
+template <typename T, typename Container = std::vector<T>>
+class History {
+    Container items_;
+};
+
+History<int> a;                         // Container = std::vector<int>
+History<int, std::deque<int>> b;        // 바꿔 끼운다
+```
+
+`std::vector<T>`도 실제로는 `std::vector<T, Allocator = std::allocator<T>>`입니다. 메모리를 어디서 얻을지를 둘째 인자로 바꿔 끼울 수 있게 되어 있습니다.
+
+## 멤버 템플릿
+
+클래스의 멤버 함수가 **또** 템플릿일 수 있습니다. 클래스가 템플릿이든 아니든 상관없습니다.
+
+```cpp nocheck
+template <typename T>
+class History {
+public:
+    template <typename Range>
+    void add_all(const Range& values)   // 어떤 컨테이너든 받는다
+    {
+        for (const auto& v : values)
+            items_.push_back(v);
+    }
+};
+```
+
+`std::vector`의 `emplace_back`, 반복자 두 개를 받는 생성자가 멤버 템플릿입니다. 단, 멤버 템플릿은 [`virtual`](#/read/cpp-syntax/inh-virtual)이 될 수 없습니다. 가상 함수 표의 칸 수를 컴파일할 때 정해야 하는데, 템플릿은 몇 개가 찍혀 나올지 알 수 없기 때문입니다.
+
+<Note>
+템플릿 클래스를 [상속](#/read/cpp-syntax/inh-public)할 수도, 템플릿이 부모를 인자로 받을 수도 있습니다. `class Derived : public Base<Derived>`처럼 자기 자신을 부모의 인자로 넘기는 꼴(CRTP)은 가상 함수 없이 다형성을 흉내 내는 오래된 기법입니다. C++23의 [명시적 `this`](#/read/cpp-syntax/lam-recursive)가 상당 부분을 대신합니다.
+</Note>
+
+## 정리
+
+- `template <typename T> class 이름`. 쓸 때는 `이름<타입>`이고, 인자가 다르면 다른 타입이다
+- 멤버 함수는 불릴 때에야 만들어진다. 타입은 쓰는 기능만 받쳐 주면 된다
+- 템플릿 인자에도 기본값이 있고, 멤버 함수가 다시 템플릿일 수 있다

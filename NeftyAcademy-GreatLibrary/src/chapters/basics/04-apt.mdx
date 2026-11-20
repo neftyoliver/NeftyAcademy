@@ -69,9 +69,12 @@ deb http://archive.ubuntu.com/ubuntu/ noble main restricted universe multiverse
 해외 서버가 느리면 가까운 미러로 `URIs`만 바꿉니다.
 
 ```sh
-sudo cp /etc/apt/sources.list.d/ubuntu.sources ~/ubuntu.sources.bak   # 백업 먼저
-sudo nano /etc/apt/sources.list.d/ubuntu.sources                       # URIs 줄 고치기
-sudo apt update                                                       # 새 주소에서 목록 받기
+# 백업 먼저
+sudo cp /etc/apt/sources.list.d/ubuntu.sources ~/ubuntu.sources.bak
+# URIs 줄 고치기
+sudo nano /etc/apt/sources.list.d/ubuntu.sources
+# 새 주소에서 목록 받기
+sudo apt update
 ```
 
 국내 미러 예: `http://mirror.kakao.com/ubuntu/`. 보안 갱신(`-security`) 줄은 공식 주소 그대로 두는 경우가 많습니다.

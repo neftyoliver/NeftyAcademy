@@ -4,7 +4,7 @@ Nefty Academy의 공개 교재와, 교재를 담는 책장.
 
 | 폴더 | 약칭 | 무엇 |
 | --- | --- | --- |
-| [NeftyAcademy-GreatLibrary](NeftyAcademy-GreatLibrary) | 대도서관 | 책 묶음. 컴퓨터의 입문, 컴퓨터 프로그래밍 초급·중급, 전자공학 입문 |
+| [NeftyAcademy-GreatLibrary](NeftyAcademy-GreatLibrary) | 대도서관 | 책 묶음. 컴퓨터의 입문, 컴퓨터 프로그래밍 초급·중급, 전자공학 입문, C++, 파이썬, 소형 기기(라즈베리파이 급), 네트워킹, OpenMP, MPI |
 | [NeftyAcademy-ParagonsBookShelf](NeftyAcademy-ParagonsBookShelf) | 파라곤 | 책장 라이브러리(React). 책·챕터·하위 챕터 지도, 읽기 화면, 스크롤 레일, 북마크, 줄치기 |
 
 대도서관이 파라곤에 의존한다(`file:../NeftyAcademy-ParagonsBookShelf`). 그래서 두 폴더는 이 저장소 안에 나란히 있어야 한다.

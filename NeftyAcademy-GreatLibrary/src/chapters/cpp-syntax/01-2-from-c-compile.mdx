@@ -1,0 +1,105 @@
+import { Cmd, Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '세 컴파일러, -std, 버전 확인, 늘 켜는 옵션';
+
+C++은 3년마다 새 표준이 나오고, 컴파일러마다 따라오는 속도가 다릅니다. "내 컴파일러가 어느 표준까지 아는가"를 확인하는 법부터 익힙니다.
+
+## 컴파일러와 표준 라이브러리
+
+| 컴파일러 | 명령 | 함께 오는 표준 라이브러리 | 주로 쓰는 곳 |
+| --- | --- | --- | --- |
+| GCC | `g++` | libstdc++ | 리눅스, 라즈베리파이 |
+| Clang | `clang++` | 리눅스에서는 libstdc++, 맥에서는 libc++ | 맥, 안드로이드, 리눅스 |
+| MSVC | `cl` | MSVC STL | 윈도우 |
+
+C++에서는 컴파일러와 표준 라이브러리가 따로 움직입니다. 리눅스의 Clang은 기본으로 GCC의 libstdc++를 빌려 쓰므로, "Clang은 최신인데 `<print>`가 없다"는 일이 생깁니다. 그때는 `-stdlib=libc++`로 Clang 자신의 라이브러리를 쓰거나 GCC를 올립니다.
+
+## 표준 버전 고르기
+
+```sh
+g++ -std=c++23 main.cpp -o main
+clang++ -std=c++23 main.cpp -o main
+cl /std:c++latest /EHsc main.cpp
+```
+
+옵션을 주지 않았을 때의 기본값은 컴파일러와 버전마다 다릅니다. GCC는 15까지 C++17, 16부터 C++20이고, MSVC는 C++14입니다. 그래서 **늘 직접 적습니다.** `-std=gnu++23`은 GNU 확장까지 켠 것이고, 이 책은 확장 없는 `-std=c++23`을 씁니다.
+
+## 지금 어느 표준인지 확인하기
+
+```cpp
+#include <print>
+#include <version>
+
+int main()
+{
+    std::println("__cplusplus = {}", __cplusplus);
+#ifdef __cpp_lib_print
+    std::println("<print> 있음 ({})", __cpp_lib_print);
+#endif
+}
+```
+
+```text
+__cplusplus = 202302
+<print> 있음 (202211)
+```
+
+`__cplusplus`는 컴파일러가 따르는 표준의 날짜입니다.
+
+| 값 | 표준 |
+| --- | --- |
+| `199711` | C++98 |
+| `201103` | C++11 |
+| `201402` | C++14 |
+| `201703` | C++17 |
+| `202002` | C++20 |
+| `202302` | C++23 |
+
+`__cpp_lib_print`처럼 `__cpp_`로 시작하는 것은 <strong>기능 시험 매크로</strong>입니다. 기능마다 하나씩 있고, `<version>` 헤더를 넣으면 라이브러리 쪽 매크로가 모두 정의됩니다. 버전 숫자로 짐작하는 것보다 정확합니다.
+
+## 이 책에 필요한 버전
+
+이 책의 예제는 C++23으로 쓰였고, GCC 14와 Clang 19로 실제로 컴파일해 확인했습니다.
+
+| 환경 | 기본 컴파일러 | 할 일 |
+| --- | --- | --- |
+| 라즈베리파이 OS (데비안 13 기반) | GCC 14 | 그대로 쓴다 |
+| 우분투 24.04 | GCC 13 | `sudo apt install g++-14` 뒤 `g++-14`로 컴파일 |
+| 윈도우 | 비주얼 스튜디오 2022 17.7 이상 | `/std:c++latest` |
+| 윈도우 (MSYS2) | 최신 GCC | 그대로 쓴다 |
+
+```sh
+g++ --version
+```
+
+C++26에 들어간 기능은 본문에서 따로 표시하고, [「C++26」](#/read/cpp-syntax/ver-26)에 모았습니다.
+
+## 늘 켜는 옵션
+
+<Cmd means="경고. C와 마찬가지로 늘 켠다">-Wall -Wextra -Wpedantic</Cmd>
+<Cmd means="디버거용 정보">-g</Cmd>
+<Cmd means="잘못된 메모리 접근과 정의되지 않은 동작을 실행 중에 잡는다">-fsanitize=address,undefined</Cmd>
+<Cmd means="최적화. 내보낼 때">-O2</Cmd>
+<Cmd means="표준 라이브러리의 범위 검사를 켠다 (libstdc++)">-D_GLIBCXX_ASSERTIONS</Cmd>
+
+배우는 동안에는 새니타이저를 켜 두는 것을 권합니다. C++의 실수는 C와 마찬가지로 조용히 지나가는 일이 많습니다.
+
+## C 파일과 섞기
+
+```sh
+gcc -std=c23 -c sensor.c -o sensor.o       # C는 C 컴파일러로
+g++ -std=c++23 -c main.cpp -o main.o       # C++은 C++ 컴파일러로
+g++ sensor.o main.o -o app                 # 링크는 g++로
+```
+
+링크를 `g++`로 하는 이유는 C++ 표준 라이브러리를 함께 이어 주기 때문입니다. C 함수를 C++에서 부르려면 헤더에 한 가지 처리가 필요합니다. [「이름 맹글링과 extern "C"」](#/read/cpp-syntax/from-c-mangling)에서 봅니다.
+
+<Note kind="tip">
+컴파일러마다 어떤 기능을 지원하는지는 cppreference의 "C++ compiler support" 표가 가장 잘 정리돼 있습니다. 설치 없이 여러 컴파일러로 돌려 보려면 Compiler Explorer(godbolt.org)를 씁니다.
+</Note>
+
+## 정리
+
+- 컴파일러(GCC, Clang, MSVC)와 표준 라이브러리(libstdc++, libc++, MSVC STL)는 따로 본다
+- 표준 버전은 기본값에 맡기지 말고 `-std=c++23`으로 적는다
+- 기능이 있는지는 `__cplusplus`보다 기능 시험 매크로로 확인한다

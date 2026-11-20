@@ -51,12 +51,15 @@ import { Note } from 'neftyacademy-paragons-bookshelf';
     [content addSubview:self.field];
 
     // 단추: 눌리면 self 의 clicked: 를 부른다
-    NSButton *button = [NSButton buttonWithTitle:@"Add" target:self action:@selector(clicked:)];
+    NSButton *button = [NSButton buttonWithTitle:@"Add"
+                                          target:self
+                                          action:@selector(clicked:)];
     button.frame = NSMakeRect(248, 214, 96, 32);
     [content addSubview:button];
 
     // 스크롤바가 달린 글 영역
-    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(16, 16, 328, 188)];
+    NSScrollView *scroll =
+        [[NSScrollView alloc] initWithFrame:NSMakeRect(16, 16, 328, 188)];
     scroll.hasVerticalScroller = YES;
     self.log = [[NSTextView alloc] initWithFrame:scroll.bounds];
     self.log.editable = NO;

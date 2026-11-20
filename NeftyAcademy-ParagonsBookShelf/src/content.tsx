@@ -35,12 +35,17 @@ export function Term({ children, tip }: { children: ReactNode; tip: string }) {
   );
 }
 
-/** 명령어 한 줄과 그 뜻을 나란히. */
+/**
+ * 명령어 한 줄과 그 뜻을 나란히. 여러 줄을 잇달아 쓰면 표처럼 맞춰진다:
+ * 명령어 칸의 폭은 그 묶음에서 가장 긴 명령어에 맞고, 뜻은 모두 같은 자리에서 시작한다.
+ */
 export function Cmd({ children, means }: { children: ReactNode; means: ReactNode }) {
   return (
     <div className="bf-cmd">
-      <code>{children}</code>
-      <span>{means}</span>
+      <div className="bf-cmd-code">
+        <code>{children}</code>
+      </div>
+      <div className="bf-cmd-means">{means}</div>
     </div>
   );
 }

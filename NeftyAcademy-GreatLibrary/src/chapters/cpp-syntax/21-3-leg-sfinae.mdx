@@ -1,0 +1,157 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '콘셉트 이전에 템플릿을 제한하던 기법 읽기, enable_if와 void_t, 요즘 꼴로 옮기기';
+
+[콘셉트](#/read/cpp-syntax/con-requires)가 들어오기 전 20년 동안, 템플릿이 받을 타입을 제한하는 방법은 **SFINAE**라는 기법이었습니다. 표준 라이브러리의 구현과 C++17 이전의 템플릿 라이브러리에 가득합니다. 쓸 일은 없어졌지만 읽을 일은 남았습니다.
+
+## 치환 실패는 오류가 아니다
+
+SFINAE는 "Substitution Failure Is Not An Error"의 머리글자입니다. 컴파일러가 오버로드 후보를 추릴 때, 템플릿 인자를 **서명에** 넣어 보다가 말이 안 되는 타입이 나오면 오류를 내지 않고 **그 후보만 조용히 버린다**는 규칙입니다.
+
+이 규칙을 거꾸로 이용합니다. 조건이 거짓일 때 일부러 말이 안 되는 타입이 나오게 서명을 짜 두면, 그 템플릿은 조건이 참일 때만 후보로 남습니다.
+
+## 옛 코드
+
+```cpp
+#include <cstddef>
+#include <print>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+// 1. enable_if: 조건이 거짓이면 이 오버로드가 후보에서 빠진다
+template <typename T>
+typename std::enable_if<std::is_integral<T>::value, T>::type
+half(T value) { return value / 2; }
+
+template <typename T>
+typename std::enable_if<std::is_floating_point<T>::value, T>::type
+half(T value) { return value / 2; }
+
+// 2. void_t로 "size()가 있는가" 알아내기
+template <typename T, typename = void>
+struct has_size : std::false_type {};
+
+template <typename T>
+struct has_size<T, std::void_t<decltype(std::declval<const T&>().size())>>
+    : std::true_type {};
+
+// 3. 꼬리표로 갈라 보내기
+template <typename T>
+std::size_t length_impl(const T& value, std::true_type) { return value.size(); }
+template <typename T>
+std::size_t length_impl(const T&, std::false_type) { return 1; }
+
+template <typename T>
+std::size_t length(const T& value) { return length_impl(value, has_size<T>()); }
+
+int main()
+{
+    std::println("{} {}", half(7), half(7.0));
+    std::println("{} {}", has_size<std::string>::value, has_size<int>::value);
+    std::println("{} {}", length(std::vector<int>(3)), length(42));
+}
+```
+
+```text
+3 3.5
+true false
+3 1
+```
+
+## 읽는 법
+
+`std::enable_if<조건, T>`는 조건이 참일 때만 멤버 `type`(= `T`)을 가집니다. 거짓이면 `::type`이 **없습니다.** 없는 것을 서명에 썼으니 치환 실패이고, 그 오버로드는 버려집니다.
+
+옛 코드에서 `enable_if`는 네 군데에 나타납니다. 모두 같은 뜻입니다.
+
+| 자리 | 꼴 |
+| --- | --- |
+| 반환 타입 | `typename std::enable_if<조건, T>::type f(T v)` |
+| 덤으로 붙인 템플릿 인자 | `template <typename T, typename = std::enable_if_t<조건>>` |
+| 값 인자 | `template <typename T, std::enable_if_t<조건, int> = 0>` |
+| 덤으로 붙인 함수 인자 | `void f(T v, std::enable_if_t<조건>* = nullptr)` |
+
+눈에 익혀 둘 조각들입니다.
+
+| 조각 | 뜻 |
+| --- | --- |
+| `std::enable_if_t<조건>` | 조건이 참이면 `void`, 거짓이면 치환 실패 |
+| `std::declval<T>()` | "`T` 타입의 값이 있다고 치자." 생성자를 몰라도 식을 쓸 수 있다. 실행되지 않는 자리에서만 쓴다 |
+| `decltype(식)` | 그 식의 타입. 식이 말이 안 되면 치환 실패 |
+| `std::void_t<타입들…>` | 타입들이 모두 말이 되면 `void`. "이런 식이 컴파일되는가"를 묻는 도구 (C++17) |
+| `std::true_type`, `std::false_type` | `value`가 `true`/`false`인 빈 타입. 오버로드로 갈라 보내는 꼬리표 |
+| `decltype(식, void())` | C++11 시절의 `void_t`. 쉼표 앞의 식이 말이 되는지만 본다 |
+
+`has_size`는 [부분 특수화](#/read/cpp-syntax/tpl-special)와 SFINAE를 겹친 것입니다. `T`에 `size()`가 있으면 둘째 줄의 특수화가 말이 되어 뽑히고(`true_type`), 없으면 치환 실패로 버려져 기본 템플릿(`false_type`)이 남습니다.
+
+## 요즘 꼴
+
+같은 프로그램입니다.
+
+```cpp
+#include <concepts>
+#include <cstddef>
+#include <print>
+#include <string>
+#include <vector>
+
+template <std::integral T>
+T half(T value) { return value / 2; }
+
+template <std::floating_point T>
+T half(T value) { return value / 2; }
+
+template <typename T>
+concept HasSize = requires(const T& t) { t.size(); };
+
+template <typename T>
+std::size_t length(const T& value)
+{
+    if constexpr (HasSize<T>)
+        return value.size();
+    else
+        return 1;
+}
+
+int main()
+{
+    std::println("{} {}", half(7), half(7.0));
+    std::println("{} {}", HasSize<std::string>, HasSize<int>);
+    std::println("{} {}", length(std::vector<int>(3)), length(42));
+}
+```
+
+```text
+3 3.5
+true false
+3 1
+```
+
+| 옛 기법 | 요즘 | 본 곳 |
+| --- | --- | --- |
+| `enable_if`로 오버로드 가르기 | 콘셉트, `requires` 절 | [requires](#/read/cpp-syntax/con-requires) |
+| `void_t` 탐지 관용구 | `requires` 식 | [콘셉트 만들기](#/read/cpp-syntax/con-own) |
+| 꼬리표로 갈라 보내기 | `if constexpr` | [if constexpr](#/read/cpp-syntax/ct-if) |
+| `::value`, `::type` | `_v`, `_t` | [별칭 템플릿](#/read/cpp-syntax/tpl-alias) |
+| 재귀로 묶음 풀기 | 접기 식 | [가변 인자](#/read/cpp-syntax/tpl-variadic) |
+
+## 무엇이 나아졌나
+
+| | SFINAE | 콘셉트 |
+| --- | --- | --- |
+| 오류 메시지 | "맞는 함수가 없다"와 후보마다의 치환 실패 기록 | "이 제약을 만족하지 않는다" |
+| 서로 겹치는 조건 | 겹치면 모호하다. `조건 && !다른조건`으로 손수 갈라야 한다 | [더 좁은 제약이 이긴다](#/read/cpp-syntax/con-requires) |
+| 읽기 | 조건이 반환 타입이나 가짜 인자 속에 숨어 있다 | 조건이 제자리에 적혀 있다 |
+| 컴파일 시간 | 느리다 | 대체로 빠르다 |
+
+<Note>
+SFINAE는 **서명**(반환 타입, 인자 타입, 템플릿 인자)에서만 일어납니다. 함수 **본문** 안의 오류는 치환 실패가 아니라 진짜 오류입니다. "왜 이 오버로드가 조용히 빠지지 않고 컴파일이 멈추는가"의 답은 대개 이것입니다. 콘셉트에서도 같습니다. 제약은 서명에 있어야 하고, 본문이 쓰는 것을 [제약이 빠뜨리면](#/read/cpp-syntax/con-own) 본문에서 터집니다.
+</Note>
+
+## 정리
+
+- SFINAE: 서명에 인자를 넣다가 말이 안 되면 그 후보만 버려진다. 이것으로 템플릿을 제한했다
+- `enable_if`는 "조건이 참일 때만 존재하는 타입", `void_t`와 `declval`은 "이 식이 컴파일되는가"
+- 새 코드에서는 콘셉트, `requires`, `if constexpr`이 모두 대신한다

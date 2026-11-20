@@ -1,0 +1,112 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '데이터와 함수를 묶기, public과 private, struct와 class의 차이';
+
+C의 구조체는 데이터만 묶었고, 그것을 다루는 함수는 따로 있었습니다(`counter_increment(&c)`). C++의 클래스는 **데이터와 그것을 다루는 함수를 한 타입에 묶고, 바깥에서 건드려도 되는 부분을 정합니다.**
+
+## 멤버 함수와 접근 지정
+
+```cpp
+#include <print>
+
+class Counter {
+public:
+    void increment()
+    {
+        if (value_ < limit_)
+            ++value_;
+    }
+    void reset() { value_ = 0; }
+    int value() const { return value_; }
+
+private:
+    int value_ = 0;         // 바깥에서 직접 고칠 수 없다
+    int limit_ = 3;
+};
+
+int main()
+{
+    Counter c;
+    for (int i = 0; i < 5; ++i)
+        c.increment();
+    std::println("{} {}", c.value(), sizeof(c));
+    // c.value_ = 100;      // 오류: private 멤버
+}
+```
+
+```text
+3 8
+```
+
+| 지정 | 누가 쓸 수 있나 |
+| --- | --- |
+| `public:` | 누구나 |
+| `private:` | 이 클래스의 멤버 함수(와 `friend`)만 |
+| `protected:` | 이 클래스와 이것을 상속한 클래스 |
+
+`value_`를 숨긴 덕분에 "값은 0 이상 `limit_` 이하"라는 약속을 `Counter` 안의 코드만 보고 확인할 수 있습니다. 이런 약속을 **불변식**이라고 합니다. 멤버가 전부 공개돼 있으면 프로그램의 어느 줄이든 약속을 깰 수 있습니다.
+
+## struct와 class
+
+둘의 차이는 하나뿐입니다. 접근 지정을 적지 않았을 때 `struct`는 `public`, `class`는 `private`입니다. 그 밖에는 완전히 같습니다. `struct`에도 멤버 함수와 `private`을 쓸 수 있습니다.
+
+관습은 이렇습니다.
+
+| 쓰는 것 | 이럴 때 |
+| --- | --- |
+| `struct` | 그냥 값의 묶음. 멤버끼리 지켜야 할 약속이 없다 (`point`, `reading`, 설정) |
+| `class` | 지켜야 할 약속이 있다. 데이터를 숨기고 함수로만 다루게 한다 |
+
+## 멤버 함수의 정체
+
+멤버 함수는 객체 안에 들어 있지 않습니다. `sizeof(c)`가 `int` 두 개의 크기인 8인 것이 그 증거입니다. 멤버 함수는 보통 함수와 똑같이 코드 영역에 하나만 있고, **어느 객체에 대해 불렸는지**를 숨은 인자로 받습니다.
+
+| C++ | 속에서 일어나는 일 |
+| --- | --- |
+| `c.increment();` | `Counter::increment(&c);` |
+| 멤버 함수 안의 `value_` | `this->value_` |
+
+`this`는 그 숨은 인자의 이름이고 [「this, const 멤버 함수, mutable」](#/read/cpp-syntax/class-const)에서 다룹니다. C에서 `counter_increment(struct counter *self)`라고 쓰던 것과 기계어 수준에서 같습니다.
+
+## 선언과 정의 나누기
+
+클래스 정의는 헤더에 두고, 긴 멤버 함수의 본문은 `.cpp`에 둡니다.
+
+```cpp nocheck
+// counter.h
+#pragma once
+
+class Counter {
+public:
+    void increment();
+    int value() const { return value_; }    // 짧은 것은 여기에. 저절로 inline
+private:
+    int value_ = 0;
+};
+```
+
+```cpp nocheck
+// counter.cpp
+#include "counter.h"
+
+void Counter::increment()       // 어느 클래스의 것인지 Counter:: 로 밝힌다
+{
+    ++value_;
+}
+```
+
+`private` 멤버도 헤더에 보입니다. 컴파일러가 객체의 크기를 알아야 하기 때문입니다. 숨겨지는 것은 "접근"이지 "존재"가 아닙니다. 구현을 헤더에서 아예 감추는 방법은 [「전방 선언과 pimpl」](#/read/cpp-syntax/mod-pimpl)에서 봅니다.
+
+## 멤버 이름 짓기
+
+멤버 변수와 인자·지역 변수의 이름이 같으면 헷갈리므로 표시를 붙이는 관습이 있습니다. 이 책은 뒤에 밑줄을 붙입니다(`value_`). `m_value`로 쓰는 곳도 많습니다. 공개 멤버만 있는 `struct`에는 붙이지 않습니다.
+
+<Note>
+게터와 세터를 멤버마다 기계적으로 만들 필요는 없습니다. `set_value(int)`가 아무 검사 없이 대입만 한다면 `public` 멤버와 다를 것이 없습니다. 클래스의 함수는 "이 타입으로 할 수 있는 일"을 나타내야 합니다. `increment`, `reset`처럼요.
+</Note>
+
+## 정리
+
+- 클래스는 데이터와 함수를 묶고 `public`, `private`으로 드러낼 부분을 정한다
+- `struct`와 `class`는 기본 접근 지정만 다르다
+- 멤버 함수는 객체 밖에 하나만 있고, 객체의 주소를 숨은 인자 `this`로 받는다

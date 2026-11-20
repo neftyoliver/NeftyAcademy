@@ -1,0 +1,96 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'C 코드가 C++에서 달리 읽히는 곳, C의 습관을 대신하는 도구';
+
+C++은 C에서 출발했지만 C의 상위 집합은 아닙니다. 대부분의 C 코드는 C++ 컴파일러를 통과하지만, 뜻이 달라지거나 아예 오류가 되는 곳이 있습니다.
+
+## 같은 코드, 다른 결과
+
+```cpp
+#include <print>
+
+struct point { int x, y; };
+
+int main()
+{
+    std::println("{}", sizeof('a'));   // C에서는 4, C++에서는 1
+
+    point p = {1, 2};                  // struct를 다시 적지 않는다
+    const int n = 4;
+    int a[n] = {};                     // const 변수가 진짜 상수
+    std::println("{} {} {}", p.x, p.y, sizeof(a) / sizeof(a[0]));
+}
+```
+
+```text
+1
+1 2 4
+```
+
+## 달라지는 것들
+
+| | C | C++ |
+| --- | --- | --- |
+| `'a'`의 타입 | `int` | `char` |
+| `"abc"`의 타입 | `char[4]` | `const char[4]`. `char *p = "abc";`는 오류 |
+| `void *` | 아무 포인터로 저절로 바뀐다 | 바뀌지 않는다. `int *p = malloc(4);`는 오류 |
+| `struct point` | 쓸 때마다 `struct`를 붙인다 | `point`만으로 타입 이름 |
+| `const int n = 4;` | 읽기 전용 변수 | 컴파일 시점 상수. 배열 크기에 쓸 수 있다 |
+| 전역 `const` | 다른 파일에서 보인다 | 그 파일 안에서만 보인다 |
+| 정수를 `enum`에 대입 | 된다 | 오류 |
+| 가변 길이 배열 | 있다 | 없다. `std::vector`를 쓴다 |
+| `restrict` | 있다 | 없다 (컴파일러 확장 `__restrict`) |
+| 지정 초기화 | 순서 자유, 배열도 가능 | C++20부터. 선언 순서대로만, 배열은 안 됨 |
+| `goto` | 선언을 건너뛰어도 된다 | 초기화를 건너뛰면 오류 |
+| 헤더 | `<stdio.h>` | `<cstdio>` (이름이 `std::` 안에 들어간다) |
+
+`class`, `new`, `delete`, `this`, `template`, `namespace`, `try` 같은 낱말은 C++의 키워드라 변수 이름으로 쓸 수 없습니다. C 헤더에 `int class;` 같은 멤버가 있으면 C++에서 읽지 못합니다.
+
+## C의 습관을 대신하는 것
+
+C++ 컴파일러로 C처럼 쓸 수는 있지만, 그러면 C++의 이점을 하나도 얻지 못합니다. 이 책은 처음부터 오른쪽 열을 씁니다.
+
+| C에서 하던 일 | 모던 C++에서 | 다루는 곳 |
+| --- | --- | --- |
+| `char` 배열과 `strcpy` | `std::string`, `std::string_view` | [string과 string_view](#/read/cpp-syntax/ft-string) |
+| `malloc`으로 잡은 배열 | `std::vector` | [vector와 범위 기반 for](#/read/cpp-syntax/ft-vector) |
+| 배열 + 길이를 따로 넘기기 | `std::span` | [array와 span](#/read/cpp-syntax/ft-array-span) |
+| `malloc`과 `free` 짝 맞추기 | `std::unique_ptr`, 소멸자 | [unique_ptr로 보는 소유권](#/read/cpp-syntax/ft-ownership) |
+| `NULL` | `nullptr` | 타입과 초기화 |
+| `#define`으로 만든 상수와 함수 | `constexpr`, 템플릿 | 컴파일 시간 계산, 템플릿 |
+| 출력 인자(포인터로 결과 받기) | 값으로 돌려주기, 참조 | 참조 |
+| 함수 포인터 + `void *` 문맥 | 람다 | 함수 |
+| 오류 코드 | 예외, `std::expected` | 예외와 오류 처리 |
+| `(int)x` 형 변환 | `static_cast<int>(x)` | 형 변환 |
+| `typedef` | `using` | 템플릿 |
+
+<Note>
+그렇다고 C에서 배운 것이 쓸모없어지지는 않습니다. 포인터, 메모리 배치, ABI, 정의되지 않은 동작은 C++에서도 그대로이고, 위의 도구들은 모두 그 위에 지어져 있습니다. 다만 C++에서는 **날 포인터와 `new`를 직접 쓰는 코드가 드물수록 좋은 코드**입니다.
+</Note>
+
+## C 표준 라이브러리는 그대로 있다
+
+```cpp
+#include <cmath>
+#include <cstring>
+#include <print>
+
+int main()
+{
+    std::println("{}", std::sqrt(2.0));
+    std::println("{}", std::strlen("hello"));
+}
+```
+
+```text
+1.4142135623730951
+5
+```
+
+`<math.h>`는 `<cmath>`, `<string.h>`는 `<cstring>`이 됩니다. `std::println`은 `double`을 "다시 읽었을 때 같은 값이 되는 가장 짧은 자릿수"로 찍습니다. `printf("%f")`의 여섯 자리와 다릅니다.
+
+## 정리
+
+- C++은 C의 상위 집합이 아니다: `'a'`, 문자열 상수, `void *`, `const`의 뜻이 다르다
+- C 헤더는 `<c이름>`으로, 이름은 `std::` 안에
+- C의 습관마다 그것을 대신하는 표준 도구가 있고, 이 책은 그쪽을 기본으로 쓴다

@@ -1,0 +1,127 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '<concepts>, 반복자와 범위의 콘셉트, 부를 수 있는 것의 콘셉트';
+
+제약으로 쓸 조건의 대부분은 표준 라이브러리에 이미 이름이 붙어 있습니다. 직접 만들기 전에 여기서 찾습니다.
+
+## 써 보기
+
+```cpp
+#include <concepts>
+#include <list>
+#include <print>
+#include <ranges>
+#include <string>
+#include <vector>
+
+template <std::ranges::input_range R>
+    requires std::integral<std::ranges::range_value_t<R>>
+long long total(const R& range)                 // 정수가 든 범위라면 무엇이든
+{
+    long long sum = 0;
+    for (auto v : range)
+        sum += v;
+    return sum;
+}
+
+template <std::invocable<int> F>
+void repeat(int times, F action)                // int 하나로 부를 수 있는 것
+{
+    for (int i = 0; i < times; ++i)
+        action(i);
+}
+
+int main()
+{
+    std::println("{}", total(std::vector{1, 2, 3}));
+    std::println("{}", total(std::list<short>{10, 20}));
+    // total(std::vector{1.5});     // 오류: double은 integral이 아니다
+
+    repeat(2, [](int i) { std::println("{}번째", i); });
+
+    std::println("{} {}", std::integral<int>, std::integral<double>);
+    std::println("{}", std::totally_ordered<std::string>);
+    std::println("{}", std::ranges::contiguous_range<std::list<int>>);
+}
+```
+
+```text
+6
+30
+0번째
+1번째
+true false
+true
+false
+```
+
+콘셉트에 타입을 넣으면 `bool` 상수가 됩니다. 마지막 세 줄처럼 그대로 찍거나 `static_assert`에 넣을 수 있습니다.
+
+## 타입의 종류: `<concepts>`
+
+| 콘셉트 | 만족하는 타입 |
+| --- | --- |
+| `std::integral<T>` | `bool`, `char`, `int`, `unsigned long` 같은 정수 타입 |
+| `std::signed_integral<T>`, `std::unsigned_integral<T>` | 그 가운데 부호 있는 것, 없는 것 |
+| `std::floating_point<T>` | `float`, `double`, `long double` |
+| `std::same_as<T, U>` | 두 타입이 정확히 같다 |
+| `std::convertible_to<From, To>` | `From`이 `To`로 암시적으로 바뀐다 |
+| `std::derived_from<D, B>` | `D`가 `B`를 `public`으로 상속했다 (또는 같다) |
+
+정수와 실수를 함께 받으려면 `std::integral<T> || std::floating_point<T>`로 직접 잇습니다. "산술 타입"이라는 콘셉트는 표준에 없고, 타입 특성 `std::is_arithmetic_v<T>`가 있습니다.
+
+## 할 수 있는 일
+
+| 콘셉트 | 뜻 |
+| --- | --- |
+| `std::default_initializable<T>` | `T{}`로 만들 수 있다 |
+| `std::movable<T>`, `std::copyable<T>` | [이동](#/read/cpp-syntax/sm-move)할 수 있다, [복사](#/read/cpp-syntax/sm-copy)도 할 수 있다 |
+| `std::equality_comparable<T>` | `==`, `!=`가 된다 |
+| `std::totally_ordered<T>` | [`<`, `<=`, `>`, `>=`](#/read/cpp-syntax/op-compare)까지 된다 |
+| `std::semiregular<T>` | 복사할 수 있고 기본 생성이 된다 |
+| `std::regular<T>` | 거기에 `==`까지. "`int`처럼 구는 타입" |
+
+`std::regular`는 값 타입이 갖출 것을 한 단어로 묶은 것입니다. 내 타입이 값처럼 쓰이기를 바란다면 `static_assert(std::regular<Pin>);` 한 줄로 확인해 둘 수 있습니다.
+
+## 부를 수 있는 것
+
+| 콘셉트 | 뜻 |
+| --- | --- |
+| `std::invocable<F, Args...>` | `F`를 `Args...`로 부를 수 있다 |
+| `std::predicate<F, Args...>` | 부를 수 있고 결과가 `bool`로 쓰인다 |
+| `std::regular_invocable<F, Args...>` | 같은 인자에 같은 결과를 내고 인자를 바꾸지 않는다(는 약속) |
+
+함수, [람다](#/read/cpp-syntax/fn-lambda), [`operator()`가 있는 객체](#/read/cpp-syntax/op-call), 멤버 함수 포인터가 모두 `invocable`입니다. 반환 타입까지 정하려면 `std::invoke_result_t<F, Args...>`에 다시 제약을 겁니다.
+
+```cpp nocheck
+template <typename F>
+    requires std::invocable<F, int>
+          && std::same_as<std::invoke_result_t<F, int>, double>
+void sample(F convert);         // int를 받아 double을 돌려주는 것
+```
+
+## 반복자와 범위: `<iterator>`, `<ranges>`
+
+| 콘셉트 | 할 수 있는 일 | 예 |
+| --- | --- | --- |
+| `std::ranges::range<R>` | `begin`과 `end`가 있다 | 모든 컨테이너, 배열, `std::span` |
+| `std::ranges::input_range<R>` | 앞에서부터 한 번 읽는다 | 위 전부 + 입력 스트림 |
+| `std::ranges::forward_range<R>` | 여러 번 지나갈 수 있다 | `std::forward_list` |
+| `std::ranges::bidirectional_range<R>` | 뒤로도 간다 | `std::list`, `std::map` |
+| `std::ranges::random_access_range<R>` | `[i]`로 건너뛴다 | `std::deque` |
+| `std::ranges::contiguous_range<R>` | 메모리에 이어져 있다 | `std::vector`, `std::array`, `std::string` |
+| `std::ranges::sized_range<R>` | 크기를 바로 안다 | 대부분의 컨테이너 |
+
+아래로 갈수록 좁습니다. `contiguous_range`는 위의 것을 모두 만족합니다. 원소의 타입은 `std::ranges::range_value_t<R>`로 얻습니다. 반복자에 대해서도 같은 이름의 콘셉트(`std::input_iterator`, `std::random_access_iterator`, `std::contiguous_iterator`)가 있습니다.
+
+하드웨어에 바이트를 내보내는 함수라면 `std::ranges::contiguous_range`를 요구하는 것이 맞습니다. 포인터와 길이로 `write()`에 넘길 수 있어야 하기 때문입니다. 그런 경우는 [`std::span`](#/read/cpp-syntax/ft-array-span)을 받는 편이 더 간단합니다.
+
+<Note>
+C++23에는 `std::formattable<T, char>`가 있습니다(`<format>`). "`std::println`의 `{}`에 넣을 수 있는 타입"입니다. 로그 함수의 인자를 제약할 때 씁니다.
+</Note>
+
+## 정리
+
+- 타입의 종류는 `std::integral`, `std::floating_point`, `std::same_as`, `std::convertible_to`
+- 부를 수 있는 것은 `std::invocable<F, Args...>`, 참·거짓을 돌려주면 `std::predicate`
+- 범위는 `std::ranges::input_range`부터 `contiguous_range`까지 좁아진다

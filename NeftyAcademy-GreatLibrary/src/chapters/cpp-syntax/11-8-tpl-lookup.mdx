@@ -1,0 +1,130 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '템플릿이 두 번 검사되는 까닭, typename과 this->를 적어야 하는 자리';
+
+템플릿을 쓰다 보면 "여기에 `typename`을 붙이라"거나 "이 이름을 찾을 수 없다"는 오류를 만납니다. 컴파일러가 템플릿을 **두 번에 나눠** 읽기 때문입니다.
+
+## 두 단계
+
+| 단계 | 언제 | 무엇을 검사하나 |
+| --- | --- | --- |
+| 1. 정의 | 템플릿을 읽을 때 | 문법, 그리고 `T`와 **상관없는** 이름 |
+| 2. 인스턴스화 | `T`가 정해질 때 | `T`에 **달린** 이름(의존 이름) |
+
+`T`가 정해지기 전에는 `T::value_type`이 타입인지 변수인지, `t.read()`가 있는지 알 수 없습니다. 그런 이름은 둘째 단계로 미뤄집니다. 문제는 첫 단계에서도 문법은 읽어 내야 한다는 것이고, 그래서 컴파일러에게 힌트를 줘야 하는 자리가 생깁니다.
+
+## 예제
+
+```cpp
+#include <print>
+#include <vector>
+
+template <typename Container>
+auto first_or(const Container& c, typename Container::value_type fallback)
+{
+    typename Container::const_iterator it = c.begin();  // typename이 필요하다
+    return it != c.end() ? *it : fallback;
+}
+
+template <typename T>
+struct Base {
+    T value{};
+    void reset() { value = T{}; }
+};
+
+template <typename T>
+struct Counter : Base<T> {
+    void bump() { ++this->value; }      // this-> 가 없으면 value를 찾지 못한다
+    void clear() { Base<T>::reset(); }  // 이렇게 한정해도 된다
+};
+
+int main()
+{
+    std::vector<int> empty;
+    std::vector<int> pins{17, 27};
+    std::println("{} {}", first_or(empty, -1), first_or(pins, -1));
+
+    Counter<int> c;
+    c.bump();
+    c.bump();
+    std::println("{}", c.value);
+    c.clear();
+    std::println("{}", c.value);
+}
+```
+
+```text
+-1 17
+2
+0
+```
+
+## typename
+
+`Container::const_iterator`는 `Container`가 정해져야 무엇인지 알 수 있는 이름입니다. 컴파일러는 그런 이름을 **타입이 아니라고** 가정합니다. 그러면 `Container::const_iterator it`은 "값 두 개를 나란히 쓴" 문법 오류가 됩니다. `typename`이 "이것은 타입"이라고 알려 줍니다.
+
+```text
+error: need 'typename' before 'Container::const_iterator'
+       because 'Container' is a dependent scope
+```
+
+GCC는 이렇게 무엇을 붙일지까지 알려 줍니다.
+
+| 자리 | `typename` |
+| --- | --- |
+| 함수 본문 안의 선언 `typename C::iterator it;` | 필요하다 |
+| 클래스 밖 함수의 매개변수 `void f(typename C::value_type v)` | 필요하다 |
+| 반환 타입, `using X = C::value_type;`, `static_cast<C::value_type>(…)`, 클래스 안 멤버 함수의 매개변수 | C++20부터 생략할 수 있다 (타입만 올 수 있는 자리라서) |
+| `T`에 달리지 않은 이름 `std::vector<int>::iterator` | 필요 없다 |
+
+어디서 생략되는지 외울 필요는 없습니다. 붙여서 틀리는 자리는 없으니 헷갈리면 붙입니다. 더 쉬운 길은 <strong>`auto`</strong>입니다. `auto it = c.begin();`이라고 쓰면 이름을 적을 일 자체가 없습니다.
+
+## 부모가 템플릿일 때
+
+`Counter<T>`의 부모 `Base<T>`는 `T`가 정해져야 내용이 정해집니다. 누군가 `Base<int>`를 [특수화](#/read/cpp-syntax/tpl-special)해서 `value`가 없는 클래스로 만들어 두었을 수도 있습니다. 그래서 컴파일러는 첫 단계에서 **부모 안을 들여다보지 않습니다.**
+
+`++value;`라고만 쓰면 `value`는 `T`와 상관없는 이름으로 취급되어 첫 단계에서 찾게 되고, 부모를 보지 않으므로 "선언되지 않은 이름"이 됩니다.
+
+| 해결 | 뜻 |
+| --- | --- |
+| `this->value` | `this`의 타입이 `T`에 달려 있으므로 둘째 단계로 미뤄진다 |
+| `Base<T>::value` | 어디에 있는지를 직접 가리킨다 |
+| `using Base<T>::value;` | 클래스 안에 한 번 적어 두면 그 뒤로는 그냥 쓸 수 있다 |
+
+템플릿이 아닌 보통의 상속에서는 필요 없습니다. **부모가 템플릿 인자에 달려 있을 때만**입니다.
+
+## template 힌트
+
+드물게 하나가 더 있습니다. `T`에 달린 객체의 **멤버 템플릿**을 부를 때입니다.
+
+```cpp nocheck
+template <typename T>
+void f(T& storage)
+{
+    // template이 없으면 get 뒤의 < 를 "작다"로 읽는다
+    auto x = storage.template get<int>();
+}
+```
+
+`storage.get<int>()`의 `<`가 꺾쇠인지 비교 연산자인지를 첫 단계에서 알 수 없어서 붙이는 힌트입니다. 오류 메시지가 알려 주면 그때 붙이면 됩니다.
+
+## 오류가 늦게 나온다
+
+둘째 단계의 검사는 **쓸 때** 일어납니다. 아무도 부르지 않은 템플릿의 잘못은 드러나지 않고, 드러날 때는 "어디서 인스턴스화되었는가"의 사슬이 길게 따라옵니다.
+
+```text
+note: required from 'auto first_or(const Container&, …) [with Container = int]'
+note: required from here
+```
+
+읽는 요령은 **맨 위의 `error:` 줄과 맨 아래의 `required from here`** 를 먼저 보는 것입니다. 맨 아래가 내 코드에서 부른 자리이고, 맨 위가 실제로 안 된 일입니다. [콘셉트](#/read/cpp-syntax/con-requires)를 쓰면 이 사슬이 "제약을 만족하지 않는다" 한 줄로 줄어듭니다.
+
+<Note>
+MSVC는 오랫동안 두 단계를 지키지 않고 인스턴스화할 때 한꺼번에 검사했습니다. 그래서 MSVC에서만 컴파일되던 코드가 GCC와 Clang에서 `this->`와 `typename` 오류를 쏟아 내는 일이 흔했습니다. 지금의 MSVC는 `/permissive-`(C++20 이상에서는 기본)에서 표준대로 동작합니다.
+</Note>
+
+## 정리
+
+- 템플릿은 정의할 때 한 번, 인스턴스화할 때 한 번 검사된다
+- `T`에 달린 타입 이름에는 `typename`. `auto`를 쓰면 대부분 피할 수 있다
+- 템플릿인 부모의 멤버는 `this->`로 부른다

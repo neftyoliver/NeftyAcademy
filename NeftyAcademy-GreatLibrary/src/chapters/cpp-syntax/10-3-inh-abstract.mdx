@@ -1,0 +1,129 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '= 0으로 약속만 정하기, 인터페이스 클래스, 하드웨어를 가짜로 바꿔 끼우기';
+
+부모 클래스가 "이런 함수가 있어야 한다"는 것만 정하고 본문은 자식에게 맡길 수 있습니다. 그런 함수가 **순수 가상 함수**이고, 그것을 가진 클래스가 **추상 클래스**입니다.
+
+## 인터페이스
+
+```cpp
+#include <print>
+
+class Gpio {                            // 무엇을 할 수 있는지만 정한다
+public:
+    virtual ~Gpio() = default;
+    virtual void write(int pin, bool high) = 0;
+    virtual bool read(int pin) const = 0;
+};
+
+class FakeGpio : public Gpio {          // 시험용: 하드웨어 없이 기록만 한다
+public:
+    void write(int pin, bool high) override
+    {
+        std::println("pin {} <- {}", pin, high ? "H" : "L");
+        last_ = high;
+    }
+    bool read(int) const override { return last_; }
+
+private:
+    bool last_ = false;
+};
+
+void blink(Gpio& gpio, int pin, int times)      // 어떤 Gpio든 받는다
+{
+    for (int i = 0; i < times; ++i)
+        gpio.write(pin, !gpio.read(pin));
+}
+
+int main()
+{
+    // Gpio g;                  // 오류: 추상 클래스로는 객체를 만들 수 없다
+    FakeGpio fake;
+    blink(fake, 17, 3);
+}
+```
+
+```text
+pin 17 <- H
+pin 17 <- L
+pin 17 <- H
+```
+
+`= 0`이 붙은 함수가 순수 가상 함수입니다.
+
+- 순수 가상 함수가 하나라도 있으면 추상 클래스다. 그 타입의 객체는 만들 수 없다
+- 자식이 순수 가상 함수를 **전부** 다시 정의해야 객체를 만들 수 있다. 하나라도 빠뜨리면 자식도 추상 클래스다
+- 추상 클래스의 포인터와 참조는 얼마든지 쓸 수 있다 (`Gpio&`)
+
+`Gpio`처럼 데이터 없이 순수 가상 함수와 가상 소멸자만 있는 클래스를 **인터페이스**라고 부릅니다. C++에는 `interface`라는 키워드가 따로 없고 이렇게 씁니다.
+
+## 왜 이렇게 나누나
+
+`blink`는 `Gpio`만 압니다. 진짜 핀을 움직이는 `LibgpiodGpio`를 만들어 넘기면 LED가 깜빡이고, `FakeGpio`를 넘기면 책상 위의 PC에서 시험이 돕니다. `blink`는 한 글자도 바뀌지 않습니다.
+
+| 의존의 방향 | 뜻 |
+| --- | --- |
+| `blink` → `Gpio` ← `FakeGpio` | 쓰는 쪽도 구현하는 쪽도 인터페이스에만 기댄다 |
+| `blink` → `LibgpiodGpio` (직접) | 하드웨어 없이는 `blink`를 컴파일도 시험도 할 수 없다 |
+
+장치를 다루는 코드에서 특히 값집니다. 로직을 보드 없이 시험할 수 있고, 보드가 바뀌어도 구현 클래스 하나만 새로 쓰면 됩니다.
+
+## 일부만 맡기기
+
+추상 클래스가 꼭 텅 비어 있을 필요는 없습니다. 공통된 흐름은 부모가 갖고, 달라지는 한 단계만 순수 가상 함수로 남길 수 있습니다.
+
+```cpp
+#include <print>
+#include <string>
+
+class Report {
+public:
+    virtual ~Report() = default;
+    void print() const                  // 흐름은 여기서 정한다
+    {
+        std::println("== {} ==", title());
+        std::println("{}", body());
+    }
+
+private:
+    virtual std::string title() const = 0;      // 달라지는 부분만 자식에게
+    virtual std::string body() const = 0;
+};
+
+class TempReport : public Report {
+    std::string title() const override { return "온도"; }
+    std::string body() const override { return "23.5 C"; }
+};
+
+int main()
+{
+    TempReport r;
+    r.print();
+}
+```
+
+```text
+== 온도 ==
+23.5 C
+```
+
+가상 함수가 `private`이어도 자식은 다시 정의할 수 있습니다. 접근 지정은 "누가 **부를** 수 있는가"이고, 다시 정의하는 것은 그와 별개입니다. 바깥에는 `print()`만 보이고, 순서를 어기고 `body()`만 부르는 일은 일어날 수 없습니다.
+
+## 인터페이스를 잘 만드는 법
+
+| 지침 | 까닭 |
+| --- | --- |
+| 작게 만든다 | 함수가 열 개인 인터페이스는 가짜를 만들기도, 구현하기도 버겁다 |
+| 쓰는 쪽의 말로 짓는다 | `Gpio`보다 `Indicator::show(bool)`가 `blink`가 정말 필요로 하는 것일 수 있다 |
+| 가상 소멸자를 잊지 않는다 | [부모 포인터로 지울 때](#/read/cpp-syntax/inh-dtor) 필요하다 |
+| 구현이 하나뿐이면 만들지 않는다 | 바꿔 끼울 일이 생길 때 뽑아내도 늦지 않다 |
+
+<Note>
+순수 가상 함수에도 본문을 줄 수 있습니다(`virtual void f() = 0;`으로 선언하고 클래스 밖에서 `void Base::f() { … }`). 자식이 반드시 다시 정의하되, 원하면 `Base::f()`로 기본 동작을 빌려 쓰게 하는 용도입니다. 소멸자를 순수 가상으로 만들 때는 본문이 꼭 있어야 합니다.
+</Note>
+
+## 정리
+
+- `virtual 반환 이름(인자) = 0;`은 본문 없는 약속. 그것을 가진 클래스로는 객체를 만들 수 없다
+- 순수 가상 함수만 있는 클래스가 인터페이스. 쓰는 쪽과 구현을 떼어 놓는다
+- 인터페이스에 기대면 하드웨어를 가짜로 바꿔 끼워 시험할 수 있다

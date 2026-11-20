@@ -1,6 +1,7 @@
 /**
- * Great Library 전체 차례. IoT까지 닿는 것을 목표로 한 네 권과, C++·파이썬 서가.
- * 서가(책 속의 책)의 차례는 src/books/ 아래 파일에 있다.
+ * Great Library 전체 차례. IoT까지 닿는 것을 목표로 한 네 권, C++·파이썬 서가,
+ * 소형 기기 서가 여섯 개, 그리고 네트워킹·OpenMP·MPI.
+ * 서가(책 속의 책)와 뒤쪽 책들의 차례는 src/books/ 아래 파일에 글로 적혀 있다.
  *
  * 새 챕터를 쓰면 .mdx 파일을 만들고, 아래 해당 줄의 draft(...)를 written(..., Content)로 바꾼다.
  * 아직 안 쓴 챕터는 지도에 흐린 점선 노드로 보인다.
@@ -19,7 +20,10 @@ import Git from './chapters/basics/06-git.mdx';
 import Commands from './chapters/basics/07-commands.mdx';
 import CEcosystem from './chapters/basics/08-c-ecosystem.mdx';
 import { cpp } from './books/cpp';
+import { networking } from './books/networking';
+import { mpi, openmp } from './books/parallel';
 import { python } from './books/python';
+import { sbcShelves } from './books/sbc';
 import FirstCompile from './chapters/c-basic/01-first-compile.mdx';
 import Headers from './chapters/c-basic/02-headers.mdx';
 import Symbols from './chapters/c-basic/03-symbols.mdx';
@@ -79,7 +83,7 @@ const group = (id: string, title: string, children: Chapter[]): Chapter => ({ id
 
 export const library: Library = {
   title: 'Great Library',
-  subtitle: '컴퓨터 입문에서 C와 IoT, C++, 파이썬까지',
+  subtitle: '컴퓨터 입문에서 C와 C++, 파이썬, 소형 기기, 네트워크와 병렬 계산까지',
   storageKey: 'neftyacademy-great-library',
   categories: [
     { id: 'intro', name: '입문', color: '#4f7f78' },
@@ -87,6 +91,9 @@ export const library: Library = {
     { id: 'cpp', name: 'C++', color: '#7a5ea8' },
     { id: 'python', name: '파이썬', color: '#b08a2e' },
     { id: 'ee', name: '전자공학', color: '#a0674a' },
+    { id: 'sbc', name: '소형 기기', color: '#b24d6b' },
+    { id: 'net', name: '네트워크', color: '#2f8a9e' },
+    { id: 'parallel', name: '병렬 계산', color: '#5f8a3c' },
   ],
   books: [
     // =====================================================================
@@ -280,6 +287,16 @@ export const library: Library = {
     // 책 속에 책이 든 서가들. 차례는 src/books/ 아래에 글로 적혀 있다.
     cpp,
     python,
+
+    // =====================================================================
+    // 소형 기기(라즈베리파이 급) 서가 여섯 개. 라이브러리·API마다 책 한 권이다. src/books/sbc/
+    ...sbcShelves,
+
+    // =====================================================================
+    // 네트워킹, 그리고 병렬 계산 두 권. src/books/networking.ts, src/books/parallel.ts
+    networking,
+    openmp,
+    mpi,
   ],
   footer: 'Nefty Academy · Great Library · AGPL-3.0-or-later',
 };

@@ -1,11 +1,14 @@
 /** 층 쌓기 그림. C 생태계, 부팅 순서 같은 "아래에서 위로" 구조에 쓴다. */
 export function Layers({ items, label }: { items: { name: string; desc: string; eg?: string }[]; label: string }) {
   const H = 58;
+  const GAP = 8;
   const W = 560;
+  const EDGE = 2; // 테두리 선이 그림 가장자리에서 잘리지 않게 두는 여백
+  const height = items.length * (H + GAP) - GAP;
   return (
-    <svg viewBox={`0 0 ${W} ${items.length * (H + 8)}`} width={W} role="img" aria-label={label}>
+    <svg viewBox={`${-EDGE} ${-EDGE} ${W + EDGE * 2} ${height + EDGE * 2}`} width={W + EDGE * 2} role="img" aria-label={label}>
       {items.map((it, i) => {
-        const y = i * (H + 8);
+        const y = i * (H + GAP);
         const inset = (items.length - 1 - i) * 14; // 위층일수록 살짝 좁게
         return (
           <g key={it.name}>

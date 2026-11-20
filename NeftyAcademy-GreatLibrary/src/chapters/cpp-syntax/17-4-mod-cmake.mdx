@@ -1,0 +1,210 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '타깃으로 생각하기, 최소한의 CMakeLists.txt, 빌드와 테스트 명령, 프리셋, 외부 라이브러리';
+
+파일이 둘을 넘으면 `g++ a.cpp b.cpp …`를 손으로 칠 수 없습니다. C++에는 표준 빌드 도구가 없지만 사실상의 표준은 **CMake**입니다. CMake는 직접 컴파일하지 않고, Ninja나 Make가 읽을 빌드 파일을 **만들어 줍니다.**
+
+## 프로젝트의 모양
+
+```text
+blink/
+├── CMakeLists.txt
+├── include/blink/pattern.h      라이브러리의 공개 헤더
+├── src/pattern.cpp              라이브러리의 구현
+├── src/main.cpp                 실행 파일
+└── tests/test_pattern.cpp       테스트
+```
+
+로직을 **라이브러리**로 떼고, 실행 파일과 테스트가 그것을 함께 쓰게 합니다. `main.cpp`는 얇게 둡니다. 이렇게 해야 하드웨어 없이 로직을 시험할 수 있습니다.
+
+## CMakeLists.txt
+
+```cmake
+cmake_minimum_required(VERSION 3.28)
+project(blink VERSION 0.1 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)               # -std=gnu++23이 아니라 -std=c++23
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)       # 편집기가 읽을 compile_commands.json
+
+option(BLINK_SANITIZE "AddressSanitizer와 UBSan을 켠다" OFF)
+if(BLINK_SANITIZE)
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
+add_compile_options(-Wall -Wextra -Wpedantic)
+
+# 라이브러리: 로직은 여기에 둔다
+add_library(pattern src/pattern.cpp)
+target_include_directories(pattern PUBLIC include)
+
+# 실행 파일
+add_executable(blink src/main.cpp)
+target_link_libraries(blink PRIVATE pattern)
+
+# 테스트
+enable_testing()
+add_executable(test_pattern tests/test_pattern.cpp)
+target_link_libraries(test_pattern PRIVATE pattern)
+add_test(NAME pattern COMMAND test_pattern)
+```
+
+## 타깃
+
+CMake는 **타깃**(target)으로 생각합니다. `add_library`와 `add_executable`이 타깃을 만들고, `target_…` 명령이 그 타깃에 성질을 붙입니다.
+
+| 명령 | 뜻 |
+| --- | --- |
+| `add_library(pattern 소스…)` | 라이브러리 타깃 |
+| `add_executable(blink 소스…)` | 실행 파일 타깃 |
+| `target_include_directories(pattern PUBLIC include)` | 이 타깃의 헤더 경로 |
+| `target_link_libraries(blink PRIVATE pattern)` | `blink`는 `pattern`을 쓴다 |
+| `target_compile_definitions(…)`, `target_compile_options(…)` | 매크로와 컴파일 옵션 |
+
+핵심은 `PUBLIC`과 `PRIVATE`입니다.
+
+| 키워드 | 이 타깃을 빌드할 때 | 이 타깃을 **쓰는 쪽**에 |
+| --- | --- | --- |
+| `PRIVATE` | 적용된다 | 전해지지 않는다 |
+| `PUBLIC` | 적용된다 | 전해진다 |
+| `INTERFACE` | 적용되지 않는다 | 전해진다 (헤더만 있는 라이브러리) |
+
+`pattern`의 헤더 경로가 `PUBLIC`이므로, `blink`는 `target_link_libraries` 한 줄만으로 `#include "blink/pattern.h"`를 쓸 수 있습니다. 헤더 경로와 옵션을 타깃마다 다시 적지 않습니다. 필요한 것이 **의존 관계를 따라 흘러갑니다.**
+
+## 빌드하기
+
+```sh
+# 설정: 소스는 여기(.), 결과는 build 폴더에
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+
+cmake --build build                             # 빌드: 바뀐 파일만 다시 컴파일
+ctest --test-dir build --output-on-failure      # 테스트
+cmake --build build --target blink              # 타깃 하나만 빌드
+```
+
+```text
+$ ctest --test-dir build --output-on-failure
+    Start 1: pattern
+1/1 Test #1: pattern ..........................   Passed    0.00 sec
+
+100% tests passed, 0 tests failed out of 1
+```
+
+첫 줄(설정)은 한 번만 합니다. `CMakeLists.txt`를 고치면 다음 빌드 때 CMake가 알아서 다시 설정합니다. `-G Ninja`를 빼면 Make용 파일이 만들어집니다. Ninja가 더 빠르고, [모듈](#/read/cpp-syntax/mod-modules)을 쓰려면 Ninja여야 합니다.
+
+빌드 결과를 소스와 **다른 폴더**(`build`)에 둡니다. 지우고 싶으면 그 폴더만 지우면 되고, 디버그용과 릴리스용 폴더를 따로 둘 수 있습니다. `build/`는 `.gitignore`에 넣습니다.
+
+| `CMAKE_BUILD_TYPE` | GCC에 주는 옵션 | 쓰임 |
+| --- | --- | --- |
+| `Debug` | `-g` | 개발 중 |
+| `Release` | `-O3 -DNDEBUG` | 배포. `assert`가 사라진다 |
+| `RelWithDebInfo` | `-O2 -g -DNDEBUG` | 성능을 재거나 현장 문제를 추적할 때 |
+| `MinSizeRel` | `-Os -DNDEBUG` | 크기가 중요할 때 |
+
+**적지 않으면 아무 옵션도 붙지 않습니다.** 최적화도 디버그 정보도 없는 빌드가 됩니다. 늘 적습니다.
+
+## 테스트
+
+`add_test`는 "이 프로그램을 돌려서 **0을 돌려주면 통과**"라는 테스트를 등록합니다. 테스트 프레임워크 없이도 시작할 수 있습니다.
+
+```cpp nocheck
+// tests/test_pattern.cpp
+#include "blink/pattern.h"
+
+#include <print>
+#include <vector>
+
+int main()
+{
+    int failed = 0;
+    auto check = [&](bool ok, const char* what) {
+        if (!ok) {
+            std::println("실패: {}", what);
+            ++failed;
+        }
+    };
+
+    using Steps = std::vector<bool>;
+    check(blink::parse_pattern("101") == Steps{true, false, true}, "101");
+    check(blink::parse_pattern("1 0") == Steps{true, false}, "공백 건너뛰기");
+    check(blink::parse_pattern("").empty(), "빈 입력");
+    return failed;          // 0이 아니면 ctest가 실패로 센다
+}
+```
+
+테스트가 늘어나면 Catch2나 GoogleTest를 붙입니다.
+
+## 프리셋
+
+옵션 조합을 매번 치는 대신 `CMakePresets.json`에 이름을 붙여 둡니다.
+
+```json
+{
+    "version": 6,
+    "configurePresets": [
+        {
+            "name": "debug",
+            "generator": "Ninja",
+            "binaryDir": "build/debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "BLINK_SANITIZE": "ON"
+            }
+        },
+        {
+            "name": "release",
+            "generator": "Ninja",
+            "binaryDir": "build/release",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+        }
+    ]
+}
+```
+
+```sh
+cmake --preset debug            # debug 프리셋으로 설정
+cmake --build build/debug       # 빌드
+```
+
+편집기(VS Code, CLion, Qt Creator)가 이 파일을 읽어 같은 설정을 고르게 해 줍니다. 디버그 빌드에 [새니타이저](#/read/cpp-syntax/ubc-tools)를 켜 두는 것이 좋은 기본값입니다.
+
+## 외부 라이브러리
+
+시스템에 설치된 라이브러리는 두 가지 길로 찾습니다.
+
+```cmake
+# 1. CMake 설정 파일을 주는 라이브러리
+find_package(fmt REQUIRED)
+target_link_libraries(blink PRIVATE fmt::fmt)
+
+# 2. pkg-config(.pc 파일)만 주는 라이브러리
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(GPIOD REQUIRED IMPORTED_TARGET libgpiod)
+target_link_libraries(blink PRIVATE PkgConfig::GPIOD)
+```
+
+어느 쪽이든 결과는 **타깃**(`fmt::fmt`, `PkgConfig::GPIOD`)이고, 링크 한 줄로 헤더 경로와 링크 옵션이 함께 따라옵니다. `-I`와 `-l`을 손으로 적지 않습니다. 리눅스의 C 라이브러리(libgpiod, libcamera, ALSA 등)는 대부분 둘째 길입니다.
+
+소스째로 가져와 함께 빌드하려면 `FetchContent`를 씁니다. 설정할 때 내려받으므로 네트워크가 필요합니다.
+
+<Note>
+`CMAKE_CXX_STANDARD`가 20 이상이면 CMake 3.28부터는 [모듈](#/read/cpp-syntax/mod-modules)을 쓰는지 알아보려고 모든 소스를 한 번씩 미리 훑습니다. 모듈을 쓰지 않는 프로젝트에서는 `set(CMAKE_CXX_SCAN_FOR_MODULES OFF)`로 끄면 그만큼 빌드가 빨라집니다. 느린 보드에서 직접 빌드할 때 차이가 납니다.
+</Note>
+
+## 버전
+
+| 환경 | CMake |
+| --- | --- |
+| 우분투 24.04 | 3.28 |
+| 라즈베리 파이 OS (Debian 13) | 3.31 |
+| 최신 (2026년 11월) | 4.5 |
+
+`cmake_minimum_required`에는 **쓰는 기능이 요구하는 가장 낮은 버전**을 적습니다. 이 페이지의 내용은 3.28이면 모두 됩니다.
+
+## 정리
+
+- CMake는 타깃으로 생각한다. `add_library`/`add_executable`로 만들고 `target_link_libraries`로 잇는다
+- `PUBLIC`은 쓰는 쪽으로 전해지고 `PRIVATE`은 전해지지 않는다
+- `cmake -S . -B build`, `cmake --build build`, `ctest --test-dir build`. 빌드 종류는 늘 적는다

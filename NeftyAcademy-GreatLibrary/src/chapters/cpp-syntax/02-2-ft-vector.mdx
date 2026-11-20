@@ -1,0 +1,135 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '늘어나는 배열, 세 가지 범위 for, 범위 검사, 용량';
+
+[「calloc과 realloc」](#/read/c-basic/dyn-calloc-realloc)에서 "늘어나는 배열"을 손으로 만들었습니다. 포인터, 칸 수, 용량을 들고 다니며 `realloc`을 불렀습니다. `std::vector`는 그것을 표준 라이브러리가 만들어 둔 것입니다.
+
+## 만들고, 더하고, 돌기
+
+```cpp
+#include <print>
+#include <vector>
+
+int main()
+{
+    std::vector<int> temps = {21, 23, 25};
+    temps.push_back(22);                // 끝에 더한다. 자리가 없으면 알아서 늘린다
+
+    int sum = 0;
+    for (int t : temps)                 // 범위 기반 for: 처음부터 끝까지
+        sum += t;
+    double average = static_cast<double>(sum) / temps.size();
+    std::println("{}개, 평균 {}", temps.size(), average);
+
+    for (int& t : temps)                // 참조로 받으면 칸을 고칠 수 있다
+        t += 1;
+    for (int t : temps)
+        std::print("{} ", t);
+    std::println("");
+}
+```
+
+```text
+4개, 평균 22.75
+22 24 26 23
+```
+
+`std::vector<int>`의 `<int>`는 "무엇을 담는가"입니다. `std::vector<std::string>`, `std::vector<point>`처럼 아무 타입이나 넣을 수 있습니다. 이렇게 타입을 인자로 받는 것이 템플릿입니다.
+
+## 범위 기반 for의 세 모양
+
+| 쓰는 법 | 뜻 | 쓰는 때 |
+| --- | --- | --- |
+| `for (auto x : v)` | 칸마다 **복사**해서 받는다 | `int`처럼 작은 값 |
+| `for (const auto& x : v)` | 복사 없이 읽기만 | `std::string`처럼 큰 값 |
+| `for (auto& x : v)` | 칸 자체를 받아 고친다 | 내용을 바꿀 때 |
+
+`auto`는 "타입은 컴파일러가 알아서"입니다. `&`가 붙은 것은 참조이고 [「좌측값 참조」](#/read/cpp-syntax/ref-lvalue)에서 다룹니다. 지금은 "복사하지 않고 그 칸을 직접 가리키는 이름"으로 읽으면 됩니다.
+
+번호가 필요하면 C처럼 씁니다. `size()`는 부호 없는 `std::size_t`를 돌려줍니다.
+
+```cpp nocheck
+for (std::size_t i = 0; i < temps.size(); ++i)
+    std::println("{}: {}", i, temps[i]);
+```
+
+## 범위를 벗어나면
+
+```cpp
+#include <print>
+#include <stdexcept>
+#include <vector>
+
+int main()
+{
+    std::vector<int> v = {1, 2, 3};
+    try {
+        std::println("{}", v.at(1));
+        std::println("{}", v.at(7));        // 범위 밖
+    } catch (const std::out_of_range&) {
+        std::println("범위를 벗어났습니다");
+    }
+}
+```
+
+```text
+2
+범위를 벗어났습니다
+```
+
+| | 범위 검사 | 벗어나면 |
+| --- | --- | --- |
+| `v[i]` | 하지 않는다 | C 배열과 똑같이 정의되지 않은 동작 |
+| `v.at(i)` | 한다 | `std::out_of_range` 예외 |
+
+`v[i]`가 빠르지만 틀리면 조용히 망가집니다. 배우는 동안에는 `-D_GLIBCXX_ASSERTIONS`나 새니타이저를 켜 두면 `v[i]`의 실수도 그 자리에서 잡힙니다.
+
+## 크기와 용량
+
+```cpp
+#include <print>
+#include <vector>
+
+int main()
+{
+    std::vector<int> v;
+    for (int i = 0; i < 6; ++i) {
+        v.push_back(i);
+        std::println("size {} capacity {}", v.size(), v.capacity());
+    }
+}
+```
+
+```text
+size 1 capacity 1
+size 2 capacity 2
+size 3 capacity 4
+size 4 capacity 4
+size 5 capacity 8
+size 6 capacity 8
+```
+
+`size`는 지금 들어 있는 칸 수, `capacity`는 다시 할당하지 않고 담을 수 있는 칸 수입니다. 꽉 차면 더 큰 메모리를 잡고 전부 옮깁니다(위는 GCC의 결과로 두 배씩 늘립니다. MSVC는 1.5배입니다). 몇 개가 들어갈지 미리 알면 `v.reserve(1000);`으로 한 번에 잡아 둡니다.
+
+<Note kind="warn">
+다시 할당되면 원소들의 주소가 바뀝니다. `int& first = v[0];`처럼 칸을 가리키는 참조나 포인터를 들고 있다가 `push_back`을 하면 그 참조는 죽은 메모리를 가리킵니다. [「반복자와 참조의 무효화」](#/read/cpp-syntax/ubc-invalidation)에서 자세히 봅니다.
+</Note>
+
+## 자주 쓰는 것들
+
+| 하는 일 | 쓰는 법 |
+| --- | --- |
+| 비었는가 | `v.empty()` |
+| 첫 칸, 끝 칸 | `v.front()`, `v.back()` |
+| 끝에서 빼기 | `v.pop_back()` |
+| 전부 지우기 | `v.clear()` |
+| n칸을 0으로 만들어 시작 | `std::vector<int> v(n);` |
+| C 함수에 넘기기 | `v.data()`와 `v.size()` |
+
+`std::vector<int> v(3);`은 0이 든 3칸이고 `std::vector<int> v{3};`은 3이 든 1칸입니다. 괄호의 모양에 따라 뜻이 갈리는 드문 경우이고 [「중괄호 초기화」](#/read/cpp-syntax/types-init)에서 다시 봅니다.
+
+## 정리
+
+- 길이가 변하는 배열은 `std::vector`. 메모리는 스스로 관리한다
+- 돌 때는 범위 기반 for, 큰 원소는 `const auto&`로 받는다
+- `[]`는 검사하지 않고 `at()`은 검사한다

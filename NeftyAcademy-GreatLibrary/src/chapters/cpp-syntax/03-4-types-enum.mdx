@@ -1,0 +1,125 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '이름이 새지 않고 정수로 바뀌지 않는 열거형, 바탕 타입 정하기';
+
+C의 `enum`에는 세 가지 흠이 있었습니다. 이름이 바깥으로 새고, 아무 정수와나 섞이고, 크기를 정할 수 없었습니다. `enum class`는 이 셋을 고친 열거형입니다.
+
+## C의 enum이 불편한 곳
+
+```cpp nocheck
+enum color { red, green, blue };
+enum signal { red, yellow };        // 오류: red가 이미 있다
+
+int n = green;                      // 저절로 정수가 된다
+if (green == 1) { … }               // 아무 정수와 비교된다
+```
+
+## enum class
+
+```cpp
+#include <cstdint>
+#include <print>
+#include <string_view>
+#include <utility>
+
+enum class Mode : std::uint8_t { input, output, alt };
+
+std::string_view name(Mode m)
+{
+    switch (m) {
+        using enum Mode;            // C++20: 이 안에서는 Mode:: 를 생략
+    case input:  return "입력";
+    case output: return "출력";
+    case alt:    return "대체 기능";
+    }
+    return "?";
+}
+
+int main()
+{
+    Mode m = Mode::output;
+    std::println("{} {} {}", name(m), std::to_underlying(m), sizeof(m));
+
+    Mode from_register = static_cast<Mode>(2);      // 정수에서 올 때는 명시적으로
+    std::println("{}", name(from_register));
+}
+```
+
+```text
+출력 1 1
+대체 기능
+```
+
+| | `enum` | `enum class` |
+| --- | --- | --- |
+| 이름의 범위 | 바깥으로 샌다 (`red`) | 타입 안에 있다 (`Mode::input`) |
+| 정수로 | 저절로 바뀐다 | 바뀌지 않는다. `std::to_underlying`이나 `static_cast` |
+| 정수에서 | C++에서는 오류 | `static_cast<Mode>(값)` |
+| 바탕 타입 | 컴파일러가 고른다 | 기본 `int`, `: 타입`으로 정한다 |
+
+`int x = m;`은 컴파일 오류입니다. 열거값을 숫자처럼 쓰는 실수와, 서로 다른 열거형을 섞는 실수가 모두 컴파일할 때 걸립니다.
+
+## 바탕 타입
+
+`enum class Mode : std::uint8_t`의 `: std::uint8_t`가 바탕 타입입니다. 이 열거형의 값이 메모리에서 정확히 1바이트를 차지합니다. 레지스터의 필드나 통신 패킷의 한 바이트를 그대로 열거형으로 다룰 수 있습니다. 바탕 타입을 적으면 정의 없이 `enum class Mode : std::uint8_t;`로 전방 선언도 됩니다.
+
+```cpp nocheck
+enum class Command : std::uint8_t {
+    ping = 0x01,
+    read = 0x10,
+    write = 0x11,
+};
+```
+
+## switch와 함께
+
+`switch`에서 열거값을 하나 빠뜨리면 컴파일러가 `-Wswitch`로 알려 줍니다. 그래서 `default:`를 두지 않는 편이 좋습니다. 값을 새로 더했을 때 고쳐야 할 `switch`를 컴파일러가 전부 찾아 줍니다.
+
+`static_cast<Mode>(7)`처럼 정의하지 않은 값도 만들 수는 있습니다. 바깥에서 들어온 바이트를 열거형으로 바꿀 때는 범위를 먼저 확인하세요.
+
+## using enum
+
+`using enum Mode;`는 그 범위 안에서 `Mode::`를 생략하게 해 줍니다(C++20). `switch` 안이나 짧은 함수 안처럼 좁은 곳에서만 쓰면 `enum class`의 이점을 잃지 않습니다.
+
+## 비트 깃발로 쓸 때
+
+`enum class`는 정수가 아니라서 `|`, `&`가 저절로 되지 않습니다. 깃발로 쓰려면 연산자를 직접 정의합니다([「산술과 복합 대입」](#/read/cpp-syntax/op-arith)).
+
+```cpp
+#include <cstdint>
+#include <print>
+#include <utility>
+
+enum class Perm : std::uint8_t { none = 0, read = 1, write = 2, exec = 4 };
+
+constexpr Perm operator|(Perm a, Perm b)
+{
+    return static_cast<Perm>(std::to_underlying(a) | std::to_underlying(b));
+}
+constexpr bool has(Perm set, Perm flag)
+{
+    return (std::to_underlying(set) & std::to_underlying(flag)) != 0;
+}
+
+int main()
+{
+    Perm p = Perm::read | Perm::exec;
+    std::println("{} {}", has(p, Perm::read), has(p, Perm::write));
+    std::println("{}", std::to_underlying(p));
+}
+```
+
+```text
+true false
+5
+```
+
+<Note>
+옛 `enum`도 사라지지는 않았습니다. C 헤더와 맞춰야 할 때, 그리고 클래스 안에서 상수 묶음으로 쓸 때 여전히 보입니다. 새로 쓰는 코드에서는 `enum class`가 기본입니다.
+</Note>
+
+## 정리
+
+- `enum class`의 값은 `타입::이름`으로 쓰고, 정수와 저절로 섞이지 않는다
+- `: std::uint8_t`처럼 바탕 타입을 정해 크기를 고정할 수 있다
+- `switch`에는 `default`를 두지 않아 빠뜨린 값을 컴파일러가 찾게 한다

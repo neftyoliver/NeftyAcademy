@@ -1,0 +1,141 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '인자 개수가 정해지지 않은 템플릿, 묶음 펼치기, 접기 식, 그대로 전달하기';
+
+`std::println("{} {}", a, b)`는 인자를 몇 개든, 어떤 타입이든 받습니다. C의 `printf`가 `...`와 `va_list`로 하던 일을 C++은 **가변 인자 템플릿**으로 합니다. 타입이 사라지지 않고 컴파일할 때 모두 검사됩니다.
+
+## 묶음과 접기
+
+```cpp
+#include <print>
+
+template <typename... Args>
+auto sum(Args... args)
+{
+    return (args + ...);                // 접기 식
+}
+
+template <typename... Args>
+void print_all(const Args&... args)
+{
+    std::println("인자 {}개", sizeof...(args));
+    (std::println("  {}", args), ...);  // 쉼표로 접는다: 하나씩 차례로
+}
+
+template <typename T, typename... Rest>
+bool all_equal(const T& first, const Rest&... rest)
+{
+    return ((first == rest) && ...);
+}
+
+int main()
+{
+    std::println("{}", sum(1, 2, 3, 4));
+    std::println("{}", sum(0.5, 2));
+    print_all(17, "gpio", 3.3);
+    std::println("{} {}", all_equal(4, 4, 4), all_equal(4, 4, 5));
+}
+```
+
+```text
+10
+2.5
+인자 3개
+  17
+  gpio
+  3.3
+true false
+```
+
+| 문법 | 이름 | 뜻 |
+| --- | --- | --- |
+| `typename... Args` | 템플릿 인자 묶음 | 타입 0개 이상 |
+| `Args... args` | 함수 인자 묶음 | 그 타입들의 값 0개 이상 |
+| `sizeof...(args)` | | 묶음에 든 개수 (컴파일할 때의 상수) |
+| `f(args...)` | 묶음 펼치기 | `f(a1, a2, a3)` |
+| `(args + ...)` | 접기 식 | `a1 + (a2 + a3)` |
+
+`...`의 위치를 기억하는 요령: 선언에서는 이름 **앞**(`Args... args`), 쓸 때는 **뒤**(`args...`)입니다.
+
+## 접기 식
+
+C++17의 접기 식(fold expression)은 묶음의 원소 사이사이에 연산자를 끼워 넣습니다. 괄호가 문법의 일부라서 빠뜨리면 오류입니다.
+
+| 꼴 | 펼쳐지면 |
+| --- | --- |
+| `(args + ...)` | `a1 + (a2 + (a3 + a4))` |
+| `(... + args)` | `((a1 + a2) + a3) + a4` |
+| `(args + ... + 0)` | `a1 + (a2 + (a3 + 0))`. 묶음이 비어도 된다 |
+| `(f(args), ...)` | `f(a1), f(a2), f(a3)`. 차례로 실행한다 |
+| `(pred(args) && ...)` | 모두 참인가. 거짓을 만나면 멈춘다 |
+
+묶음이 비었을 때 `&&`는 `true`, `||`는 `false`, 쉼표는 아무 일도 안 하는 것으로 정해져 있습니다. 그 밖의 연산자는 빈 묶음이 오류이므로 `+ 0`처럼 시작값을 줍니다.
+
+## 무늬째로 펼치기
+
+`...` 앞에는 묶음 이름만이 아니라 묶음이 든 **식 전체**가 올 수 있습니다. 식이 원소마다 한 번씩 되풀이됩니다.
+
+```cpp nocheck
+f(args...);                 // f(a1, a2, a3)
+f(g(args)...);              // f(g(a1), g(a2), g(a3))
+f(g(args...));              // f(g(a1, a2, a3))
+std::tuple<Args...> t;      // std::tuple<A1, A2, A3>
+```
+
+## 그대로 전달하기
+
+가변 인자와 [전달 참조](#/read/cpp-syntax/tpl-deduction)를 합치면 "받은 인자를 몇 개든 그대로 다른 함수에 넘기는" 함수가 됩니다.
+
+```cpp
+#include <format>
+#include <print>
+#include <utility>
+
+template <typename... Args>
+void info(std::format_string<Args...> fmt, Args&&... args)
+{
+    std::println("[info] {}", std::format(fmt, std::forward<Args>(args)...));
+}
+
+int main()
+{
+    info("pin {} = {}", 17, true);
+    info("준비 끝");
+}
+```
+
+```text
+[info] pin 17 = true
+[info] 준비 끝
+```
+
+`std::forward<Args>(args)...`는 인자마다 `std::forward<A1>(a1), std::forward<A2>(a2)`로 펼쳐집니다. `std::make_unique<T>(인자들)`, `vector::emplace_back(인자들)`, `std::thread(함수, 인자들)`이 모두 이 꼴입니다.
+
+`std::format_string<Args...>`은 서식 문자열이 인자들과 맞는지를 **컴파일할 때** 검사하는 타입입니다. `info("{} {}", 17)`처럼 인자가 모자라거나 `info("{:d}", "text")`처럼 서식이 타입과 어긋나면 컴파일 오류가 납니다. 인자가 남는 것은 허용됩니다.
+
+## 묶음에서 하나씩 꺼내기
+
+접기 식으로 안 되는 일은 "첫 인자와 나머지"로 나눠 재귀하는 옛 방법을 씁니다. `all_equal`의 `T first, Rest... rest`가 그 꼴입니다.
+
+```cpp nocheck
+void show() {}                              // 인자가 없을 때 끝난다
+
+template <typename T, typename... Rest>
+void show(const T& first, const Rest&... rest)
+{
+    std::println("{}", first);
+    show(rest...);                          // 하나 줄여서 다시 부른다
+}
+```
+
+C++26에는 `args...[0]`으로 묶음의 몇 번째 원소를 바로 꺼내는 문법이 들어옵니다([「C++26」](#/read/cpp-syntax/ver-26)).
+
+<Note>
+C의 `...`(가변 인자 함수)도 C++에서 쓸 수 있지만, 인자의 타입과 개수를 컴파일러가 모릅니다. `printf("%d", 3.5)`가 컴파일되는 까닭입니다. C 라이브러리를 부를 때 말고는 쓸 일이 없습니다.
+</Note>
+
+## 정리
+
+- `typename... Args`와 `Args... args`가 인자 묶음. `args...`로 펼친다
+- 접기 식 `(args 연산자 ...)`으로 묶음 전체에 연산을 건다
+- `Args&&... args`와 `std::forward<Args>(args)...`로 인자를 그대로 넘긴다

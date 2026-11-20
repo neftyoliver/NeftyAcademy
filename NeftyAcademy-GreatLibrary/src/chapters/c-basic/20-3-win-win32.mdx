@@ -36,25 +36,31 @@ static void add_line(void)
         return;
     SendMessageW(list, LB_ADDSTRING, 0, (LPARAM)text);
     LRESULT count = SendMessageW(list, LB_GETCOUNT, 0, 0);
-    SendMessageW(list, LB_SETTOPINDEX, (WPARAM)(count - 1), 0);     // 맨 아래로 스크롤
+    // 맨 아래로 스크롤
+    SendMessageW(list, LB_SETTOPINDEX, (WPARAM)(count - 1), 0);
     SetWindowTextW(edit, L"");
     SetFocus(edit);
 }
 
 // 창에 일이 생길 때마다 윈도우가 이 함수를 부른다
-static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
+static LRESULT CALLBACK window_proc(HWND window, UINT message,
+                                    WPARAM wparam, LPARAM lparam)
 {
     switch (message) {
     case WM_CREATE:
         edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                               16, 16, 220, 28, window, (HMENU)(INT_PTR)ID_EDIT, NULL, NULL);
+                               16, 16, 220, 28,
+                               window, (HMENU)(INT_PTR)ID_EDIT, NULL, NULL);
         CreateWindowExW(0, L"BUTTON", L"Add",
                         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                        248, 16, 96, 28, window, (HMENU)(INT_PTR)ID_BUTTON, NULL, NULL);
+                        248, 16, 96, 28,
+                        window, (HMENU)(INT_PTR)ID_BUTTON, NULL, NULL);
         list = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
-                               WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOINTEGRALHEIGHT,
-                               16, 56, 328, 188, window, (HMENU)(INT_PTR)ID_LIST, NULL, NULL);
+                               WS_CHILD | WS_VISIBLE | WS_VSCROLL
+                                   | LBS_NOINTEGRALHEIGHT,
+                               16, 56, 328, 188,
+                               window, (HMENU)(INT_PTR)ID_LIST, NULL, NULL);
         return 0;
     case WM_COMMAND:
         if (LOWORD(wparam) == ID_BUTTON && HIWORD(wparam) == BN_CLICKED)
@@ -64,7 +70,8 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
         PostQuitMessage(0);
         return 0;
     }
-    return DefWindowProcW(window, message, wparam, lparam);     // 나머지는 기본 처리에 맡긴다
+    // 나머지는 기본 처리에 맡긴다
+    return DefWindowProcW(window, message, wparam, lparam);
 }
 
 int main(void)
@@ -82,7 +89,8 @@ int main(void)
     if (!RegisterClassExW(&wc))
         return 1;
 
-    HWND window = CreateWindowExW(0, L"HelloWindow", L"Hello Win32", WS_OVERLAPPEDWINDOW,
+    HWND window = CreateWindowExW(0, L"HelloWindow", L"Hello Win32",
+                                  WS_OVERLAPPEDWINDOW,
                                   CW_USEDEFAULT, CW_USEDEFAULT, 380, 300,
                                   NULL, NULL, instance, NULL);
     if (window == NULL)

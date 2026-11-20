@@ -1,0 +1,135 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '그 자리에서 만드는 함수, 캡처, 알고리즘에 넘기기';
+
+C에서 "정렬 기준"이나 "끝나면 부를 것"을 넘기려면 함수를 따로 만들고 함수 포인터를 넘겼습니다. 바깥의 값이 필요하면 `void *` 인자를 하나 더 끼워 넣었습니다([「함수 포인터」](#/read/c-basic/ptr-function)). 람다는 이 둘을 한 번에 해결합니다. 함수를 쓰는 자리에서 바로 만들고, 필요한 바깥 변수를 함께 들고 갑니다.
+
+## 모양
+
+```cpp nocheck
+[캡처](인자) { 본문 }
+```
+
+```cpp
+#include <algorithm>
+#include <print>
+#include <string>
+#include <vector>
+
+struct device {
+    std::string name;
+    int pin;
+};
+
+int main()
+{
+    std::vector<device> all = {{"led", 17}, {"button", 27}, {"fan", 12}};
+
+    // 정렬 기준을 그 자리에서 적는다
+    std::sort(all.begin(), all.end(),
+              [](const device& a, const device& b) { return a.pin < b.pin; });
+    for (const auto& d : all)
+        std::print("{}:{} ", d.name, d.pin);
+    std::println("");
+
+    int limit = 15;
+    // limit를 복사해 들고 간다
+    auto above = [limit](const device& d) { return d.pin > limit; };
+    std::println("{}", std::count_if(all.begin(), all.end(), above));
+
+    int total = 0;
+    // total을 참조로 잡아 고친다
+    std::for_each(all.begin(), all.end(),
+                  [&total](const device& d) { total += d.pin; });
+    std::println("{}", total);
+}
+```
+
+```text
+fan:12 led:17 button:27
+2
+56
+```
+
+람다는 값입니다. `auto`에 담아 이름을 붙일 수 있고(`above`), 함수에 그대로 넘길 수 있습니다. 반환 타입은 `return` 문에서 추론됩니다.
+
+## 캡처
+
+대괄호 안에는 람다가 **바깥에서 가져갈 변수**를 적습니다.
+
+| 캡처 | 뜻 |
+| --- | --- |
+| `[]` | 아무것도 가져가지 않는다 |
+| `[x]` | `x`를 복사해서 들고 간다. 람다 안에서 고칠 수 없다 |
+| `[&x]` | `x`를 참조로 본다. 고치면 바깥의 `x`가 바뀐다 |
+| `[x, &y]` | 섞어 쓴다 |
+| `[=]` | 본문에서 쓴 것을 모두 복사로 |
+| `[&]` | 본문에서 쓴 것을 모두 참조로 |
+
+복사 캡처는 람다가 **만들어지는 순간**의 값을 가져갑니다. 그 뒤에 `limit`를 바꿔도 `above`는 15를 기억합니다.
+
+참조 캡처는 바깥 변수가 살아 있는 동안에만 유효합니다. 람다를 그 자리에서 바로 쓰는 경우(`std::for_each`에 넘기기)에는 안전하지만, 람다를 보관했다가 나중에 부르거나 함수 밖으로 돌려주면 죽은 변수를 가리키게 됩니다([「캡처의 종류와 수명」](#/read/cpp-syntax/lam-capture)).
+
+## 람다를 받는 함수
+
+```cpp
+#include <print>
+
+void repeat(int n, auto action)         // 무엇이든 부를 수 있는 것을 받는다
+{
+    for (int i = 0; i < n; ++i)
+        action(i);
+}
+
+int main()
+{
+    int sum = 0;
+    repeat(4, [&sum](int i) { sum += i * i; });
+    std::println("{}", sum);
+
+    repeat(2, [](int i) { std::println("{}번째", i); });
+}
+```
+
+```text
+14
+0번째
+1번째
+```
+
+인자 타입을 `auto`로 적으면 람다, 함수 포인터, 그 밖에 `()`로 부를 수 있는 것을 모두 받습니다(C++20. 속은 템플릿입니다). 람다마다 타입이 서로 달라서 타입 이름을 직접 적을 수는 없습니다.
+
+## 표준 알고리즘과 함께
+
+`<algorithm>`의 함수들은 "무엇을 할지"를 람다로 받습니다.
+
+| 하려는 일 | 알고리즘 |
+| --- | --- |
+| 기준대로 정렬 | `std::sort(first, last, 비교)` |
+| 조건에 맞는 첫 원소 | `std::find_if(first, last, 조건)` |
+| 조건에 맞는 개수 | `std::count_if(first, last, 조건)` |
+| 하나라도 / 모두 | `std::any_of`, `std::all_of` |
+| 조건에 맞는 것 지우기 | `std::erase_if(컨테이너, 조건)` |
+
+C++20의 `std::ranges` 판은 `begin`, `end` 대신 컨테이너를 통째로 받습니다. `std::ranges::sort(all, {}, &device::pin);`은 "`pin` 멤버를 기준으로 정렬"입니다.
+
+## 함수 포인터와의 관계
+
+캡처가 없는 람다는 보통 함수 포인터로 바뀝니다. C API의 콜백 자리에 그대로 넘길 수 있습니다.
+
+```cpp nocheck
+void (*handler)(int) = [](int sig) { /* … */ };
+std::signal(SIGINT, handler);
+```
+
+캡처가 있으면 바뀌지 않습니다. 들고 가는 변수를 둘 곳이 함수 포인터에는 없기 때문입니다. 그럴 때는 C에서 하던 대로 `void *` 문맥 인자에 객체의 주소를 넘깁니다.
+
+<Note kind="tip">
+처음에는 `[&]`와 `[=]`보다 필요한 변수를 하나씩 적는 쪽을 권합니다. 람다가 바깥의 무엇에 기대는지가 대괄호에 드러납니다.
+</Note>
+
+## 정리
+
+- `[캡처](인자) { 본문 }`으로 쓰는 자리에서 함수를 만든다
+- `[x]`는 만들 때의 값을 복사, `[&x]`는 바깥 변수를 직접 본다
+- 받는 쪽은 `auto` 인자로. 캡처 없는 람다는 함수 포인터가 된다

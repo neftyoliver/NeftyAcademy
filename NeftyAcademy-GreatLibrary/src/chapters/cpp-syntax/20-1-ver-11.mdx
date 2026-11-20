@@ -1,0 +1,148 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '모던 C++이 시작된 판과 그것을 다듬은 판. 이 책 앞쪽 절반의 출처';
+
+"모던 C++"은 C++11에서 시작합니다. 그 전의 C++(C++98, C++03)과는 다른 언어처럼 보일 만큼 많이 바뀌었고, 이 책의 앞쪽 절반이 사실상 C++11의 내용입니다. C++14는 3년 뒤에 그 모서리를 다듬었습니다.
+
+## C++11의 언어
+
+| 기능 | 한 줄 설명 | 본 곳 |
+| --- | --- | --- |
+| `auto`, `decltype` | 타입 추론 | [auto](#/read/cpp-syntax/types-auto) |
+| 범위 `for` | `for (auto& x : 컨테이너)` | [vector](#/read/cpp-syntax/ft-vector) |
+| 람다 | 그 자리에서 만드는 함수 | [람다](#/read/cpp-syntax/fn-lambda) |
+| `nullptr` | 정수가 아닌 널 포인터 | [기본 타입](#/read/cpp-syntax/types-builtin) |
+| 우측값 참조와 이동 | `T&&`, `std::move` | [우측값 참조](#/read/cpp-syntax/sm-rvalue), [이동](#/read/cpp-syntax/sm-move) |
+| 중괄호 초기화 | `T x{…};`, `std::initializer_list` | [초기화](#/read/cpp-syntax/types-init) |
+| `enum class` | 이름이 새지 않는 열거형 | [enum class](#/read/cpp-syntax/types-enum) |
+| `constexpr` | 컴파일할 때 계산 (C++11에서는 `return` 한 줄만) | [constexpr](#/read/cpp-syntax/ct-constexpr) |
+| `override`, `final` | 가상 함수 재정의를 컴파일러가 확인 | [virtual](#/read/cpp-syntax/inh-virtual) |
+| `= default`, `= delete` | 특수 멤버를 만들게 하거나 막기 | [특수 멤버의 규칙](#/read/cpp-syntax/sm-rules) |
+| `noexcept` | 던지지 않는다는 약속 | [noexcept](#/read/cpp-syntax/exc-noexcept) |
+| 가변 인자 템플릿 | `template <typename... Args>` | [가변 인자](#/read/cpp-syntax/tpl-variadic) |
+| `using` 별칭, 별칭 템플릿 | `typedef`를 대신한다 | [별칭](#/read/cpp-syntax/tpl-alias) |
+| `static_assert` | 컴파일할 때의 검사 | [static_assert](#/read/cpp-syntax/ct-assert) |
+| 멤버의 기본값, 위임 생성자 | `int n = 0;`을 클래스 안에 | [생성자](#/read/cpp-syntax/class-ctor) |
+| 사용자 정의 리터럴 | `100_ms` | [리터럴](#/read/cpp-syntax/types-literal) |
+| `explicit` 변환 연산자 | `explicit operator bool()` | [변환 연산자](#/read/cpp-syntax/op-conversion) |
+| `thread_local`, `alignas`, `alignof` | 스레드별 변수, 정렬 | [저장 기간](#/read/cpp-syntax/life-storage), [정렬](#/read/cpp-syntax/life-alignment) |
+| 속성 `[[noreturn]]` | 표준 속성 문법의 시작 | [속성](#/read/cpp-syntax/fn-attributes) |
+| 날 문자열 `R"(…)"` | 역슬래시를 그대로 쓴다 | |
+| `long long`, 고정 폭 정수 | `<cstdint>` | [기본 타입](#/read/cpp-syntax/types-builtin) |
+
+## C++11의 라이브러리
+
+| 헤더·타입 | 하는 일 |
+| --- | --- |
+| `std::unique_ptr`, `std::shared_ptr`, `std::weak_ptr` | [소유를 타입으로](#/read/cpp-syntax/ft-ownership) |
+| `<thread>`, `<mutex>`, `<condition_variable>`, `<atomic>`, `<future>` | 표준 스레드. 그 전에는 pthread를 직접 썼다 |
+| `<chrono>` | 시간과 기간. 단위가 타입에 들어 있다 |
+| `std::array`, `std::tuple` | 고정 크기 배열, 여러 값 묶기 |
+| `std::unordered_map`, `std::unordered_set` | 해시 테이블 |
+| `std::function`, `std::bind` | [호출 가능한 것 담기](#/read/cpp-syntax/lam-function) |
+| `<random>`, `<regex>` | 난수 생성기와 분포, 정규식 |
+| `<type_traits>` | [타입에 대해 묻기](#/read/cpp-syntax/ct-assert) |
+| `emplace_back`, `std::to_string`, `std::stoi`, `std::begin`/`end` | 자잘하지만 매일 쓰는 것들 |
+
+## C++14
+
+| 기능 | 한 줄 설명 | 본 곳 |
+| --- | --- | --- |
+| 제네릭 람다 | `[](auto x) { … }` | [클로저 타입](#/read/cpp-syntax/lam-closure) |
+| 초기화 캡처 | `[p = std::move(ptr)]` | [캡처](#/read/cpp-syntax/lam-capture) |
+| 함수의 반환 타입 추론 | `auto f() { return 1; }` | [auto](#/read/cpp-syntax/types-auto) |
+| 넉넉해진 `constexpr` | 지역 변수와 반복문 | [constexpr](#/read/cpp-syntax/ct-constexpr) |
+| 변수 템플릿 | `template <typename T> constexpr T pi = …;` | [변수 템플릿](#/read/cpp-syntax/tpl-alias) |
+| 2진수 리터럴, 자릿수 구분 | `0b1010'0101`, `1'000'000` | |
+| `[[deprecated]]` | 쓰지 말라는 표시 | [속성](#/read/cpp-syntax/fn-attributes) |
+| `std::make_unique` | C++11이 빠뜨린 것 | [unique_ptr](#/read/cpp-syntax/ft-ownership) |
+| `std::exchange` | 새 값을 넣고 옛 값을 돌려준다. 이동 생성자에서 쓴다 | |
+| 표준 리터럴 접미어 | `"text"s`, `100ms` | [리터럴](#/read/cpp-syntax/types-literal) |
+| `_t` 타입 특성 | `std::remove_const_t<T>` | [별칭 템플릿](#/read/cpp-syntax/tpl-alias) |
+
+## C++14의 모양
+
+아래 프로그램은 `-std=c++14`로 컴파일됩니다. 그래서 출력에 `std::println`이 아니라 `std::cout`을 썼습니다.
+
+```cpp
+#include <iostream>
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+enum class Level { low, high };                 // C++11: enum class
+
+struct Pin {
+    int number = 0;                             // C++11: 멤버의 기본값
+    Level level = Level::low;
+};
+
+class Board {
+public:
+    Board(std::initializer_list<int> numbers)   // C++11: 중괄호 목록 받기
+    {
+        for (int n : numbers)                   // C++11: 범위 for
+            pins_.push_back(Pin{n, Level::low});
+    }
+    Board(const Board&) = delete;               // C++11: = delete
+    Board(Board&&) noexcept = default;          // C++11: 이동, = default, noexcept
+
+    auto count() const { return pins_.size(); } // C++14: 반환 타입 추론
+
+    template <typename F>
+    void each(F visit) const
+    {
+        for (const auto& pin : pins_)           // C++11: auto
+            visit(pin);
+    }
+
+private:
+    std::vector<Pin> pins_;
+};
+
+int main()
+{
+    Board board{17, 27, 22};
+    auto owned = std::make_unique<Board>(std::move(board));     // C++14
+
+    int total = 0;
+    owned->each([&total](const auto& pin) { total += pin.number; });    // C++14
+
+    std::unordered_map<std::string, int> names{{"led", 17}, {"button", 27}};
+    constexpr int mask = 0b1111'0000;           // C++14: 2진수와 자릿수 구분
+    static_assert(mask == 240, "mask");         // C++11: static_assert
+
+    std::cout << owned->count() << ' ' << total << ' ' << names.at("led") << '\n';
+    int* nothing = nullptr;                     // C++11: nullptr
+    std::cout << std::boolalpha << (nothing == nullptr) << '\n';
+}
+```
+
+```text
+3 66 17
+true
+```
+
+## 왜 갈림길인가
+
+C++11 이전의 코드는 `new`와 `delete`, 반복자를 손으로 돌리는 `for`, 긴 타입 이름으로 가득했습니다. C++11이 준 세 가지가 그것을 바꿨습니다.
+
+| 도구 | 사라진 것 |
+| --- | --- |
+| 스마트 포인터와 이동 | 손으로 쓰는 `delete`, 깊은 복사를 피하려는 맨 포인터 |
+| `auto`와 범위 `for` | `std::vector<int>::const_iterator it = v.begin();` |
+| 람다 | 알고리즘에 넘기려고 따로 만드는 함수 객체 클래스 |
+
+옛 문법은 여전히 컴파일됩니다. 오래된 코드를 읽는 법은 [「C++98과 C++03의 코드 읽기」](#/read/cpp-syntax/leg-98)에서 봅니다.
+
+<Note>
+컴파일러 지원은 오래전에 끝났습니다. GCC 5, Clang 3.4 이후면 C++14 전체를 씁니다. 지금 C++11이나 C++14에 머무는 까닭은 컴파일러가 아니라 대개 프로젝트의 정책이나 오래된 벤더 툴체인입니다. 마이크로컨트롤러용 벤더 컴파일러가 그런 경우가 있습니다.
+</Note>
+
+## 정리
+
+- C++11: `auto`, 람다, 이동, 스마트 포인터, 범위 `for`, `constexpr`, 가변 인자 템플릿, 표준 스레드
+- C++14: 제네릭 람다, `make_unique`, 넉넉해진 `constexpr`, 반환 타입 추론
+- 이 둘이 지금 "C++답게 쓴다"고 할 때의 바탕이다

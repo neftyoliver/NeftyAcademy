@@ -1,0 +1,127 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '같은 이름 여러 함수, 고르는 순서, 모호함, 기본 인자, = delete';
+
+C에서는 인자 타입이 다르면 함수 이름도 달라야 했습니다(`abs`, `labs`, `fabs`). C++에서는 이름 하나에 인자 목록이 다른 함수를 여러 개 둘 수 있고, 부를 때 컴파일러가 인자를 보고 고릅니다.
+
+## 인자를 보고 고른다
+
+```cpp
+#include <print>
+#include <string_view>
+
+void show(int v) { std::println("int {}", v); }
+void show(double v) { std::println("double {}", v); }
+void show(std::string_view v) { std::println("text {}", v); }
+
+int main()
+{
+    show(1);
+    show(2.5);
+    show("abc");
+    show('a');          // char → int
+    show(3.0f);         // float → double
+}
+```
+
+```text
+int 1
+double 2.5
+text abc
+int 97
+double 3
+```
+
+`'a'`와 `3.0f`에 꼭 맞는 함수는 없습니다. 컴파일러는 후보마다 "인자를 맞추려면 어떤 변환이 필요한가"를 따져서 가장 가까운 것을 고릅니다.
+
+| 순위 | 변환 | 예 |
+| --- | --- | --- |
+| 1 | 정확히 일치 | `int` → `int`, `int` → `const int&`, 배열 → 포인터 |
+| 2 | 승격 | `char`·`short` → `int`, `float` → `double` |
+| 3 | 표준 변환 | `int` → `double`, `double` → `int`, 포인터 → `bool` |
+| 4 | 사용자 정의 변환 | `const char*` → `std::string` (생성자를 거친다) |
+
+반환 타입은 고르는 데 쓰이지 않습니다. 인자 목록이 같고 반환 타입만 다른 두 함수는 만들 수 없습니다.
+
+## 모호하면 오류
+
+```cpp nocheck
+void f(long v);
+void f(double v);
+
+f(1);       // 오류: int → long 과 int → double 이 같은 순위다
+f(1L);      // f(long)
+```
+
+가장 가까운 후보가 둘이면 컴파일러는 고르지 않고 오류를 냅니다. 조용히 엉뚱한 쪽이 불리는 것보다 낫습니다.
+
+조용히 엉뚱한 쪽이 불리는 경우도 하나 알아 두세요.
+
+```cpp nocheck
+void set(bool on);
+void set(const std::string& name);
+
+set("led");     // set(bool)이 불린다
+```
+
+`"led"`는 포인터이고, 포인터 → `bool`은 표준 변환(3순위)이라 `std::string`으로 가는 사용자 정의 변환(4순위)을 이깁니다. `bool`을 받는 오버로드는 이런 사고를 잘 냅니다.
+
+## 기본 인자
+
+```cpp
+#include <print>
+#include <string_view>
+
+void open(std::string_view port, int baud = 115200, bool parity = false)
+{
+    std::println("{} {} {}", port, baud, parity);
+}
+
+void set_pin(int pin) { std::println("pin {}", pin); }
+void set_pin(double) = delete;      // 이렇게 부르는 것을 막는다
+
+int main()
+{
+    open("/dev/ttyAMA0");
+    open("/dev/ttyAMA0", 9600);
+    open("/dev/ttyAMA0", 9600, true);
+    set_pin(17);
+    // set_pin(17.5);               // 오류: 지워진 함수
+}
+```
+
+```text
+/dev/ttyAMA0 115200 false
+/dev/ttyAMA0 9600 false
+/dev/ttyAMA0 9600 true
+pin 17
+```
+
+- 기본값은 **뒤쪽 인자부터** 줄 수 있다. 가운데만 건너뛸 수는 없다
+- 기본값은 선언(헤더)에 한 번만 적는다. 정의에 또 적으면 오류
+- 값은 컴파일할 때 부르는 자리에 채워진다
+
+`bool` 인자가 여럿이면 부르는 쪽에서 `open(port, 9600, true, false)`가 무슨 뜻인지 읽을 수 없습니다. 그럴 때는 설정을 구조체로 묶고 지정 초기화로 넘기는 편이 낫습니다.
+
+## = delete
+
+`= delete`는 "이 함수는 있지만 부를 수 없다"는 선언입니다. `set_pin(17.5)`는 `set_pin(int)`로 조용히 바뀌는 대신, 더 잘 맞는 `set_pin(double)`을 찾고 그것이 지워져 있어서 오류가 됩니다. 원치 않는 암시적 변환을 막는 도구입니다.
+
+## 오버로딩할 때의 기준
+
+| 이럴 때 쓴다 | 이럴 때는 이름을 달리한다 |
+| --- | --- |
+| 같은 일을 타입만 달리해서 한다 (`show`) | 하는 일이 다르다 (`read_text`, `read_binary`) |
+| 인자의 개수만 다르고 뜻이 이어진다 | 같은 타입인데 뜻이 다르다 (`from_celsius`, `from_kelvin`) |
+
+타입마다 똑같은 본문을 반복하게 되면 오버로딩이 아니라 [템플릿](#/read/cpp-syntax/tpl-function)이 맞습니다.
+
+<Note>
+오버로딩이 가능한 것은 컴파일러가 심볼 이름에 인자 타입을 새기기 때문입니다([「이름 맹글링과 extern "C"」](#/read/cpp-syntax/from-c-mangling)). `extern "C"` 함수는 오버로딩할 수 없습니다.
+</Note>
+
+## 정리
+
+- 이름이 같고 인자 목록이 다른 함수를 여러 개 둘 수 있다
+- 정확한 일치, 승격, 표준 변환, 사용자 정의 변환 순으로 가까운 것이 불린다
+- 기본 인자는 뒤에서부터, 선언에 한 번. 원치 않는 호출은 `= delete`로 막는다

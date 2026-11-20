@@ -1,0 +1,129 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '값, 참조, 옮겨 담기, this. 람다가 캡처한 것보다 오래 살 때 생기는 일';
+
+[람다의 대괄호](#/read/cpp-syntax/fn-lambda)는 바깥의 무엇을 안으로 가져올지를 적는 자리입니다. 가져오는 방식에 따라 람다가 **언제까지 안전한지**가 갈립니다.
+
+## 값, 참조, 옮겨 담기
+
+```cpp
+#include <functional>
+#include <memory>
+#include <print>
+#include <utility>
+#include <vector>
+
+std::function<int()> make_counter()
+{
+    int count = 0;
+    return [count]() mutable { return ++count; };   // 복사본을 품고 나간다
+    // return [&count] { return ++count; };         // 죽은 지역 변수를 가리킨다
+}
+
+int main()
+{
+    int threshold = 10;
+    auto by_copy = [threshold] { return threshold; };
+    auto by_ref = [&threshold] { return threshold; };
+    threshold = 99;
+    std::println("{} {}", by_copy(), by_ref());
+
+    auto counter = make_counter();
+    counter();
+    std::println("{}", counter());
+
+    auto data = std::make_unique<std::vector<int>>(3, 7);
+    auto owner = [d = std::move(data)] { return d->size(); };   // 옮겨 담는다
+    std::println("{} {}", owner(), data == nullptr);
+}
+```
+
+```text
+10 99
+2
+3 true
+```
+
+| 캡처 | 뜻 | 람다 안의 값 |
+| --- | --- | --- |
+| `[x]` | 값으로. 람다를 **만드는 순간**의 `x`를 복사한다 | 그 뒤 바깥이 바뀌어도 그대로 |
+| `[&x]` | 참조로. 바깥의 `x` 자체를 가리킨다 | 늘 지금의 `x` |
+| `[=]` | 쓰인 것을 모두 값으로 | |
+| `[&]` | 쓰인 것을 모두 참조로 | |
+| `[name = 식]` | 새 멤버를 만들고 식으로 초기화한다 (C++14) | `[d = std::move(data)]`처럼 옮겨 담을 때 |
+| `[&name = 식]` | 식에 묶인 참조 멤버 | |
+| `[this]` | 이 객체의 포인터 | 멤버를 `this->` 없이 쓴다 |
+| `[*this]` | 이 객체의 **복사본** (C++17) | |
+
+값으로 캡처한 것은 람다 안에서 `const`입니다. 고치려면 `mutable`을 붙입니다. 고쳐지는 것은 **람다가 품은 복사본**이지 바깥의 변수가 아닙니다. `make_counter`의 `count`가 그렇게 람다 안에서 자랍니다.
+
+## 수명
+
+참조 캡처는 **포인터를 품는 것**입니다. 가리키던 변수가 사라진 뒤에 람다를 부르면 [죽은 객체를 읽습니다](#/read/cpp-syntax/ubc-lifetime).
+
+| 람다가 쓰이는 곳 | `[&]` |
+| --- | --- |
+| 그 자리에서 바로 부른다 (`std::sort`, `std::for_each`에 넘기기) | 안전하다 |
+| 함수가 돌려준다 | **위험** |
+| 멤버 변수, 컨테이너, `std::function`에 보관한다 | 위험 |
+| 다른 스레드, 타이머, 이벤트 루프에 넘긴다 | 위험 |
+
+기준은 하나입니다. **람다가 지금의 범위보다 오래 살 수 있으면 값으로**(또는 옮겨서) 캡처합니다. 알고리즘에 넘기는 짧은 람다에는 `[&]`가 편하고 안전합니다.
+
+컴파일러는 이것을 잘 잡지 못합니다. Clang 19는 `return [&count] { … };`처럼 눈에 보이는 경우를 경고하지만(`-Wreturn-stack-address`) GCC 14는 그러지 않고, 람다가 `std::function`에 담겨 나가면 둘 다 조용합니다. 실행 중에는 [AddressSanitizer](#/read/cpp-syntax/ubc-tools)가 잡습니다.
+
+## this
+
+멤버 함수 안의 람다가 멤버를 쓰면 캡처되는 것은 멤버가 아니라 **`this` 포인터**입니다.
+
+```cpp nocheck
+class Blinker {
+public:
+    void start(Timer& timer)
+    {
+        timer.every(500ms, [this] { toggle(); });   // this를 품고 타이머에 남는다
+    }
+
+private:
+    void toggle();
+    bool on_ = false;
+};
+```
+
+`Blinker`가 `Timer`보다 먼저 사라지면, 타이머는 죽은 객체의 `toggle()`을 부릅니다. 콜백을 등록하는 코드에서 가장 흔한 수명 버그입니다.
+
+| 대책 | 방법 |
+| --- | --- |
+| 등록을 풀고 죽는다 | 소멸자에서 `timer.cancel(id)`. 등록과 해제를 쥐는 객체를 멤버로 둔다 |
+| 복사본을 품는다 | `[*this]`. 객체가 작고 복사해도 뜻이 같을 때 |
+| 살아 있는지 확인한다 | `shared_ptr`로 관리되는 객체라면 `[weak = weak_from_this()]`로 품고, 부를 때 `weak.lock()` |
+| 필요한 값만 품는다 | `[pin = pin_] { … }`. `this`가 필요 없게 만든다 |
+
+`[=]`는 멤버 함수 안에서 `this`를 **포인터째로** 조용히 캡처합니다. 값으로 복사된 것처럼 보여서 더 위험합니다. C++20에서 이 암묵적 캡처는 폐기 예정이 되었습니다. `this`가 필요하면 `[this]`나 `[=, this]`로 드러내 적습니다.
+
+## 옮겨 담기
+
+`[d = std::move(data)]`는 람다 안에 `d`라는 멤버를 만들고 `data`를 [옮겨](#/read/cpp-syntax/sm-move) 넣습니다. `std::unique_ptr`처럼 복사할 수 없는 것, 복사하기 아까운 큰 `std::string`이나 `std::vector`를 람다에 넘겨줄 때 씁니다.
+
+이렇게 만든 람다는 **복사할 수 없습니다**(품은 `unique_ptr`이 복사되지 않으므로). 그래서 `std::function`에 담기지 않습니다. [다음다음 페이지](#/read/cpp-syntax/lam-function)에서 대안을 봅니다.
+
+## 무엇이 캡처되지 않나
+
+| 종류 | 캡처 |
+| --- | --- |
+| 지역 변수, 매개변수 | 해야 쓸 수 있다 |
+| 전역 변수, `static` 변수 | 캡처 없이 그냥 쓴다. 캡처 목록에 적을 수 없다 |
+| `constexpr` 지역 상수를 값으로만 읽기 | 캡처 없이 쓸 수 있다 |
+| [구조적 바인딩](#/read/cpp-syntax/types-binding)의 이름 | C++20부터 캡처된다 |
+
+전역 변수는 "값으로 캡처했으니 안 바뀐다"고 착각하기 쉽습니다. `[=]`를 써도 전역은 복사되지 않고 늘 지금 값이 읽힙니다.
+
+<Note kind="tip">
+캡처 목록을 **하나씩 적는 것**이 `[=]`, `[&]`보다 읽기 좋습니다. 람다가 바깥의 무엇에 기대는지가 첫 줄에 드러나고, 수명을 따져 볼 목록이 됩니다. 한 줄짜리 술어에는 `[&]`도 괜찮습니다.
+</Note>
+
+## 정리
+
+- `[x]`는 만들 때의 복사본, `[&x]`는 바깥 변수 자체, `[n = std::move(x)]`는 옮겨 담기
+- 람다가 지금의 범위보다 오래 살면 참조 캡처는 죽은 변수를 가리킨다. 값으로 캡처한다
+- 멤버를 쓰면 `this` 포인터가 캡처된다. 객체가 람다보다 먼저 죽지 않게 한다

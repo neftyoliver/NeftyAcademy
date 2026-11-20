@@ -1,0 +1,162 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'T가 정해지는 규칙, 전달 참조와 std::forward, 클래스 템플릿의 인자 추론';
+
+함수 템플릿을 부를 때 컴파일러는 인자를 보고 `T`를 정합니다. 규칙은 [`auto`가 타입을 정하는 규칙](#/read/cpp-syntax/types-auto)과 같습니다. 사실은 `auto`가 이 규칙을 빌려 쓴 것입니다.
+
+## 매개변수의 꼴에 따라
+
+```cpp
+#include <print>
+#include <type_traits>
+
+template <typename T>
+void by_value(T) { std::println("T는 const? {}", std::is_const_v<T>); }
+
+template <typename T>
+void by_ref(T&) { std::println("T는 const? {}", std::is_const_v<T>); }
+
+template <typename T>
+void by_fwd(T&&) { std::println("T는 참조? {}", std::is_reference_v<T>); }
+
+int main()
+{
+    const int limit = 10;
+    int value = 3;
+
+    by_value(limit);        // T = int        복사본이므로 const가 떨어진다
+    by_ref(limit);          // T = const int  원본을 가리키므로 const가 남는다
+    by_fwd(value);          // T = int&       이름 있는 것(좌측값)을 넘겼다
+    by_fwd(3);              // T = int        임시 값(우측값)을 넘겼다
+}
+```
+
+```text
+T는 const? false
+T는 const? true
+T는 참조? true
+T는 참조? false
+```
+
+| 매개변수 | `const int` 변수를 넘기면 | 배열 `int[4]`를 넘기면 |
+| --- | --- | --- |
+| `T` | `T = int` | `T = int*` (포인터로 바뀐다) |
+| `T&` | `T = const int` | `T = int[4]` (길이가 남는다) |
+| `const T&` | `T = int` | `T = int[4]` |
+| `T&&` | `T = const int&` | `T = int(&)[4]` |
+
+값으로 받으면 복사본이 생기므로 원본의 `const`와 참조는 의미가 없어 떨어집니다. 참조로 받으면 원본의 성질을 지켜야 하므로 남습니다.
+
+## 변환은 하지 않는다
+
+추론은 인자의 타입을 **그대로** 맞춰 봅니다. `int`를 `double`로 바꿔 보는 일은 없습니다.
+
+```cpp nocheck
+template <typename T> T max_of(T a, T b);
+
+max_of(3, 7.5);             // 오류: 첫 인자는 T = int, 둘째는 T = double
+max_of<double>(3, 7.5);     // T를 정해 주면 그다음에는 보통의 변환이 된다
+```
+
+## 전달 참조
+
+`T&&`는 [우측값 참조](#/read/cpp-syntax/sm-rvalue)처럼 생겼지만, `T`가 **추론되는 자리**에서는 좌측값과 우측값을 **모두** 받습니다. 이것을 전달 참조(forwarding reference)라고 합니다.
+
+| 넘긴 것 | `T` | 매개변수의 타입 `T&&` |
+| --- | --- | --- |
+| 좌측값 `int` | `int&` | `int& &&` → `int&` |
+| 우측값 `int` | `int` | `int&&` |
+
+참조의 참조는 "하나라도 `&`면 `&`"로 접힙니다. 그 결과 `T` 안에 "원래 좌측값이었는가"가 기록됩니다. `std::forward<T>`가 그 기록을 읽어 원래대로 되돌립니다.
+
+```cpp
+#include <print>
+#include <string>
+#include <utility>
+
+void store(const std::string&) { std::println("복사해서 저장"); }
+void store(std::string&&) { std::println("옮겨서 저장"); }
+
+template <typename T>
+void relay(T&& value)
+{
+    store(std::forward<T>(value));      // 받은 그대로 넘긴다
+}
+
+int main()
+{
+    std::string name = "gpio";
+    relay(name);                        // 좌측값 → 좌측값으로
+    relay(std::string("temp"));         // 우측값 → 우측값으로
+}
+```
+
+```text
+복사해서 저장
+옮겨서 저장
+```
+
+[이름이 붙으면 좌측값](#/read/cpp-syntax/sm-rvalue)이므로, `forward` 없이 `store(value)`라고 쓰면 둘 다 "복사해서 저장"이 됩니다. `std::make_unique`와 `emplace_back`이 인자를 생성자에게 손실 없이 건네는 방법이 이것입니다.
+
+<Note kind="warn">
+`T&&`가 전달 참조인 것은 `T`가 **그 함수의** 템플릿 인자이고 꼴이 정확히 `T&&`일 때뿐입니다. `std::vector<T>&&`, `const T&&`, 클래스 템플릿의 `T`를 쓰는 멤버 함수의 `T&&`는 보통의 우측값 참조입니다.
+</Note>
+
+## 클래스 템플릿의 인자 추론 (CTAD)
+
+C++17부터는 클래스 템플릿도 생성자 인자에서 타입을 추론합니다.
+
+```cpp
+#include <array>
+#include <print>
+#include <utility>
+#include <vector>
+
+template <typename T>
+struct Range {
+    T low;
+    T high;
+};
+
+int main()
+{
+    std::pair p{17, 3.3};               // std::pair<int, double>
+    std::vector v{1, 2, 3};             // std::vector<int>
+    std::array a{0.5, 1.5};             // std::array<double, 2>
+    Range r{0, 100};                    // Range<int>: C++20부터 집합체도 된다
+
+    std::println("{} {} {} {}", p.second, v.size(), a.size(), r.high);
+}
+```
+
+```text
+3.3 3 2 100
+```
+
+`std::lock_guard lock{mutex};`, `std::unique_lock`, `std::optional o{3};`처럼 꺾쇠를 쓰지 않는 코드가 이것입니다.
+
+생성자만으로 추론이 안 되면 **추론 안내**(deduction guide)를 덧붙입니다. "이런 인자로 만들면 이 타입"이라고 알려 주는 한 줄입니다.
+
+```cpp nocheck
+template <typename T>
+class History {
+public:
+    template <typename It>
+    History(It first, It last);         // It에서 T를 알아낼 길이 없다
+};
+
+template <typename It>
+History(It, It) -> History<typename std::iterator_traits<It>::value_type>;
+```
+
+| 함정 | 결과 |
+| --- | --- |
+| `std::vector v{"a", "b"};` | `std::vector<const char*>`. `std::string`이 아니다 |
+| `std::vector w{v};` | `v`의 복사본. `vector`의 `vector`가 아니다 |
+| `std::vector v(3, 7);`과 `std::vector v{3, 7};` | 앞은 7이 세 개, 뒤는 3과 7 ([괄호와 중괄호](#/read/cpp-syntax/types-init)) |
+
+## 정리
+
+- 값으로 받으면 `const`와 참조가 떨어지고, 참조로 받으면 남는다. 추론은 변환을 하지 않는다
+- 추론되는 `T&&`는 전달 참조. `std::forward<T>`와 짝을 이뤄 받은 그대로 넘긴다
+- 클래스 템플릿도 생성자 인자에서 추론된다. 모자라면 추론 안내를 쓴다
