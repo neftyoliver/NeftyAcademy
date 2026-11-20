@@ -40,3 +40,31 @@ export function wrapTitle(title: string, max = 6): string[] {
   if (lines.length > 3) return [...lines.slice(0, 2), `${lines.slice(2).join(' ').slice(0, max - 1)}…`];
   return lines;
 }
+
+/** 책과 그 안의 모든 책(서가)을 한 줄로 편다. */
+export function allBooks(books: Book[]): Book[] {
+  return books.flatMap((b) => [b, ...allBooks(b.books ?? [])]);
+}
+
+/** 이 책(서가면 안쪽 책까지)의 챕터 수와 그중 쓴 것의 수. */
+export function progressOf(book: Book): { written: number; total: number } {
+  const own = flatChapters(book);
+  let written = own.filter((f) => !f.chapter.draft).length;
+  let total = own.length;
+  for (const inner of book.books ?? []) {
+    const p = progressOf(inner);
+    written += p.written;
+    total += p.total;
+  }
+  return { written, total };
+}
+
+/** 가장 바깥 책에서 id 인 책까지 내려가는 길. 못 찾으면 빈 배열. */
+export function pathToBook(books: Book[], id: string): Book[] {
+  for (const b of books) {
+    if (b.id === id) return [b];
+    const rest = pathToBook(b.books ?? [], id);
+    if (rest.length) return [b, ...rest];
+  }
+  return [];
+}

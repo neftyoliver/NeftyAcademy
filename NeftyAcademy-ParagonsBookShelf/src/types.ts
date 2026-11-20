@@ -20,6 +20,11 @@ export interface Chapter {
   /** 아직 쓰지 않은 챕터. 노드는 흐리게, 누르면 "준비 중"을 보여 준다. */
   draft?: boolean;
   Content?: ComponentType;
+  /**
+   * 이 챕터가 본문에서 가리키는 다른 챕터들. '책id/챕터id', 같은 책이면 '챕터id'만 적어도 된다.
+   * 지도에서 두 챕터 사이에 줄이 생긴다. 방향은 없다(어느 쪽에 적어도 같은 줄).
+   */
+  links?: string[];
   /** 하위 챕터. 번호는 3.1, 3.2처럼 붙고, 지도에서는 챕터 노드 바깥의 작은 점으로 보인다. id는 책 안에서 겹치지 않게. */
   children?: Chapter[];
 }
@@ -36,6 +41,12 @@ export interface Book {
   /** 갤러리 카드 위쪽에 들어갈 그림. SVG 같은 HTML 요소를 권장. */
   cover?: ReactNode;
   chapters: Chapter[];
+  /**
+   * 책 속의 책. 이것이 있으면 이 책은 여러 권을 담은 "서가"가 된다(예: C++ 안에 문법·STL·고급…).
+   * 서가도 몇 겹이든 겹칠 수 있다. 안쪽 책의 id도 도서관 전체에서 겹치지 않아야 한다(주소가 #/book/<id> 하나뿐이라서).
+   * 서가의 chapters 는 비워도 되고, 머리말 같은 챕터를 둘 수도 있다.
+   */
+  books?: Book[];
 }
 
 export interface Library {

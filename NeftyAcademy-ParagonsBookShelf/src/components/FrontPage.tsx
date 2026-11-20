@@ -1,11 +1,11 @@
 import { useBook } from '../context';
-import type { FrontView } from '../types';
+import type { Book, FrontView } from '../types';
 import { GalleryView } from './GalleryView';
 import { ListView } from './ListView';
 import { WebView } from './WebView';
 
 const VIEWS: { id: FrontView; label: string }[] = [
-  { id: 'web', label: '거미줄' },
+  { id: 'web', label: '지도' },
   { id: 'list', label: '목록' },
   { id: 'gallery', label: '갤러리' },
 ];
@@ -28,6 +28,31 @@ export function CategoryPicker() {
   );
 }
 
+/** 책 여러 권을 지도·목록·갤러리 가운데 고른 보기로 보여 준다. 앞표지와 서가(책 속의 책) 쪽이 함께 쓴다. */
+export function Shelf({ books, tabs }: { books: Book[]; tabs?: boolean }) {
+  const { view, setView } = useBook();
+  return (
+    <>
+      {tabs ? <ViewTabs /> : null}
+      <section className="bf-front-view" role="tabpanel">
+        {view === 'web' ? <WebView books={books} /> : view === 'list' ? <ListView books={books} /> : <GalleryView books={books} />}
+      </section>
+    </>
+  );
+
+  function ViewTabs() {
+    return (
+      <div className="bf-tabs" role="tablist" aria-label="보기">
+        {VIEWS.map((v) => (
+          <button key={v.id} type="button" role="tab" aria-selected={view === v.id} onClick={() => setView(v.id)}>
+            {v.label}
+          </button>
+        ))}
+      </div>
+    );
+  }
+}
+
 export function FrontPage() {
   const { library, view, setView, category } = useBook();
   const books = category ? library.books.filter((b) => b.category === category) : library.books;
@@ -48,9 +73,7 @@ export function FrontPage() {
         </div>
       </div>
 
-      <section className="bf-front-view" role="tabpanel">
-        {view === 'web' ? <WebView books={books} /> : view === 'list' ? <ListView books={books} /> : <GalleryView books={books} />}
-      </section>
+      <Shelf books={books} />
 
       {library.footer ? <footer className="bf-footer">{library.footer}</footer> : null}
     </main>

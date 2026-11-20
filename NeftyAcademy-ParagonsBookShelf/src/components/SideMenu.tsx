@@ -1,7 +1,8 @@
 import { useEffect, useRef } from 'react';
 import { bookColor, useBook } from '../context';
 import { href } from '../router';
-import { flatChapters } from './common';
+import type { Book } from '../types';
+import { allBooks, flatChapters } from './common';
 
 /**
  * 왼쪽에서 내려오는 메뉴. 상단바와 다른 빛깔의 반투명 판.
@@ -32,26 +33,7 @@ export function SideMenu({ open, onClose, current }: { open: boolean; onClose: (
         <details open>
           <summary>차례</summary>
           {library.books.map((book) => (
-            <details key={book.id} className="bf-menu-book" open={current?.bookId === book.id}>
-              <summary>
-                <span className="bf-dot" style={{ background: bookColor(library, book) }} />
-                {book.title}
-              </summary>
-              <ol className="bf-menu-chapters">
-                {flatChapters(book).map(({ chapter: ch, label, depth }) => (
-                  <li key={ch.id} className={depth ? 'bf-sub' : undefined}>
-                    <a
-                      href={href({ name: 'read', bookId: book.id, chapterId: ch.id })}
-                      aria-current={current?.bookId === book.id && current.chapterId === ch.id ? 'page' : undefined}
-                      className={ch.draft ? 'is-draft' : undefined}
-                    >
-                      <span className="bf-num">{label}</span>
-                      {ch.title}
-                    </a>
-                  </li>
-                ))}
-              </ol>
-            </details>
+            <MenuBook key={book.id} book={book} current={current} />
           ))}
         </details>
 
@@ -105,5 +87,45 @@ export function SideMenu({ open, onClose, current }: { open: boolean; onClose: (
         </details>
       </aside>
     </>
+  );
+}
+
+/** 메뉴의 책 한 권. 서가면 안쪽 책들이 한 단 들어가서 나온다. 지금 읽는 책이 이 안에 있으면 펴 둔다. */
+function MenuBook({ book, current }: { book: Book; current?: { bookId: string; chapterId?: string } }) {
+  const { library } = useBook();
+  const inside = current ? allBooks([book]).some((b) => b.id === current.bookId) : false;
+  return (
+    <details className="bf-menu-book" open={inside}>
+      <summary>
+        <span className="bf-dot" style={{ background: bookColor(library, book) }} />
+        {book.title}
+      </summary>
+      {book.chapters.length > 0 ? (
+        <ol className="bf-menu-chapters">
+          {flatChapters(book).map(({ chapter: ch, label, depth }) => (
+            <li key={ch.id} className={depth ? 'bf-sub' : undefined}>
+              <a
+                href={href({ name: 'read', bookId: book.id, chapterId: ch.id })}
+                aria-current={current?.bookId === book.id && current.chapterId === ch.id ? 'page' : undefined}
+                className={ch.draft ? 'is-draft' : undefined}
+              >
+                <span className="bf-num">{label}</span>
+                {ch.title}
+              </a>
+            </li>
+          ))}
+        </ol>
+      ) : null}
+      {book.books?.length ? (
+        <div className="bf-menu-inner">
+          <a className="bf-menu-open" href={href({ name: 'book', bookId: book.id })}>
+            서가 열기
+          </a>
+          {book.books.map((b) => (
+            <MenuBook key={b.id} book={b} current={current} />
+          ))}
+        </div>
+      ) : null}
+    </details>
   );
 }

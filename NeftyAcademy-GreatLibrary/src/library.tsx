@@ -1,5 +1,6 @@
 /**
- * Great Library 전체 차례. IoT까지 닿는 것을 목표로 네 권으로 나눈다.
+ * Great Library 전체 차례. IoT까지 닿는 것을 목표로 한 네 권과, C++·파이썬 서가.
+ * 서가(책 속의 책)의 차례는 src/books/ 아래 파일에 있다.
  *
  * 새 챕터를 쓰면 .mdx 파일을 만들고, 아래 해당 줄의 draft(...)를 written(..., Content)로 바꾼다.
  * 아직 안 쓴 챕터는 지도에 흐린 점선 노드로 보인다.
@@ -17,6 +18,8 @@ import PackageManagers from './chapters/basics/05-package-managers.mdx';
 import Git from './chapters/basics/06-git.mdx';
 import Commands from './chapters/basics/07-commands.mdx';
 import CEcosystem from './chapters/basics/08-c-ecosystem.mdx';
+import { cpp } from './books/cpp';
+import { python } from './books/python';
 import FirstCompile from './chapters/c-basic/01-first-compile.mdx';
 import Headers from './chapters/c-basic/02-headers.mdx';
 import Symbols from './chapters/c-basic/03-symbols.mdx';
@@ -76,11 +79,13 @@ const group = (id: string, title: string, children: Chapter[]): Chapter => ({ id
 
 export const library: Library = {
   title: 'Great Library',
-  subtitle: '컴퓨터 입문에서 C, 그리고 IoT까지',
+  subtitle: '컴퓨터 입문에서 C와 IoT, C++, 파이썬까지',
   storageKey: 'neftyacademy-great-library',
   categories: [
     { id: 'intro', name: '입문', color: '#4f7f78' },
     { id: 'c', name: 'C 프로그래밍', color: '#4a6fa5' },
+    { id: 'cpp', name: 'C++', color: '#7a5ea8' },
+    { id: 'python', name: '파이썬', color: '#b08a2e' },
     { id: 'ee', name: '전자공학', color: '#a0674a' },
   ],
   books: [
@@ -270,6 +275,11 @@ export const library: Library = {
         draft('fields', '전기와 자기장'),
       ],
     },
+
+    // =====================================================================
+    // 책 속에 책이 든 서가들. 차례는 src/books/ 아래에 글로 적혀 있다.
+    cpp,
+    python,
   ],
   footer: 'Nefty Academy · Great Library · AGPL-3.0-or-later',
 };

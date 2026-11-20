@@ -1,0 +1,41 @@
+2026/11/10 5:13 PM
+
+아 참고로 책엔 되도록 풍부하게 넣고 이 중 강의로 할건 서로 협의해서 고를겁니다.
+
+미네르바 말대로 일단 넣어야할 부분과 병합하면 좋은 내용 셋 적용 해주세요. 그리고 QT는 그러면 일단은 빼기로 할게요.
+
+파일 2개 공유함, 명령어 2개 실행함 외 2단계 더
+꼬리를 탁 차례에 반영했어요. 그리고 저장소가 이미 GitHub에 올라가 있네요. 잘 됐어요.
+
+추가한 것 (중급)
+
+챕터	하위 챕터	위치
+빌드 시스템	Makefile, CMake와 Ninja, 교차 컴파일	컴파일러 다음
+스레드 프로그래밍	스레드 만들고 기다리기, 뮤텍스와 경쟁 상태, 조건 변수, 원자적 연산	플랫폼 챕터 다음
+센서와 말하는 세 가지 버스	UART, I2C, SPI	GPIO 다음
+IoT 장치의 통신	MQTT, JSON 다루기, TLS, Wi-Fi, 블루투스 LE	HTTP 다음
+병합한 것 (초급)
+
+const와 typedef → 「const와 typedef」 한 챕터, 둘은 하위 챕터로
+struct와 union → 「여러 값을 묶는 타입」 한 챕터, 둘은 하위 챕터로
+뺀 것
+
+Qt 6 챕터와 하위 15개를 뺐어요. Qt가 빠졌으니 제안했던 “C에서 C++로 건너가기”도 넣지 않았어요.
+지금 구성
+
+책	챕터	하위
+컴퓨터의 입문	10	37
+컴퓨터 프로그래밍 초급	22	29
+컴퓨터 프로그래밍 중급	19	35
+전자공학 입문	7	13
+아까 입문의 하위 챕터를 38개라고 했는데, 다시 세어 보니 37개였어요.
+
+올리기
+노트북의 NeftyAcademy 폴더에 바뀐 파일을 넣어 뒀어요. 커밋은 네프티 이름으로 남아야 해서 그대로 뒀어요.
+
+powershell
+cd E:\ClaudeWorkspace\Projects\NeftyAcademy
+git add NeftyAcademy-GreatLibrary/src/library.tsx NeftyAcademy-GreatLibrary/README.md
+git commit -m "차례: 빌드·스레드·버스·IoT 통신 추가, 타입 챕터 병합, Qt 제외"
+git push
+대도서관 폴더에 neftyacademy-great-library-0.1.0.tgz 파일이 새로 생겨 있어요. npm pack으로 만든 묶음 같은데, 저장소에 올릴 게 아니라면 .gitignore에 *.tgz를 한 줄 넣어 두세요. 위 명령은 그 파일을 건드리지 않아요. 야옹. 🐾

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useState } from 'react';
 import { BookPage } from './components/BookPage';
 import { CategoryPicker, FrontPage } from './components/FrontPage';
 import { Reader } from './components/Reader';
@@ -18,7 +18,7 @@ export function BookApp({ library }: { library: Library }) {
 }
 
 function Screens() {
-  const { library, findBook, findChapter } = useBook();
+  const { library, findBook, findChapter, bookPath } = useBook();
   const route = parseHash(useHash());
   const [menuOpen, setMenuOpen] = useState(false);
   const closeMenu = useCallback(() => setMenuOpen(false), []);
@@ -34,18 +34,26 @@ function Screens() {
     document.title = title;
   });
 
+  // 상단바의 길: 서가 › 책 › 챕터. 마지막 것만 글자, 앞의 것들은 링크
+  const crumbs = (bookId: string, last: boolean) =>
+    bookPath(bookId).map((b, i, all) => (
+      <Fragment key={b.id}>
+        {i > 0 && <span aria-hidden="true">›</span>}
+        {last && i === all.length - 1 ? <span>{b.title}</span> : <a href={href({ name: 'book', bookId: b.id })}>{b.title}</a>}
+      </Fragment>
+    ));
+
   let trail = null;
   let current: { bookId: string; chapterId?: string } | undefined;
   if (route.name === 'book') {
-    const book = findBook(route.bookId);
     current = { bookId: route.bookId };
-    trail = book ? <span>{book.title}</span> : null;
+    trail = findBook(route.bookId) ? <>{crumbs(route.bookId, true)}</> : null;
   } else if (route.name === 'read') {
     const f = findChapter(route.bookId, route.chapterId);
     current = { bookId: route.bookId, chapterId: route.chapterId };
     trail = f ? (
       <>
-        <a href={href({ name: 'book', bookId: f.book.id })}>{f.book.title}</a>
+        {crumbs(f.book.id, false)}
         <span aria-hidden="true">›</span>
         <span>
           {f.label}. {f.chapter.title}

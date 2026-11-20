@@ -1,6 +1,6 @@
 import { createContext, useContext, useMemo, type ReactNode } from 'react';
 import { useStored } from './storage';
-import { flatChapters, type FlatChapter } from './components/common';
+import { allBooks, flatChapters, pathToBook, type FlatChapter } from './components/common';
 import type { Book, Bookmark, Chapter, FrontView, TextMark, Library } from './types';
 
 interface BookState {
@@ -14,7 +14,10 @@ interface BookState {
   setView: (v: FrontView) => void;
   category: string; // '' = 전체
   setCategory: (c: string) => void;
+  /** 서가 안쪽의 책까지 찾는다 */
   findBook: (id: string) => Book | undefined;
+  /** 가장 바깥 책에서 이 책까지의 길(자기 자신 포함) */
+  bookPath: (id: string) => Book[];
   findChapter: (bookId: string, chapterId: string) => { book: Book; chapter: Chapter; index: number; label: string; flat: FlatChapter[] } | undefined;
 }
 
@@ -28,7 +31,8 @@ export function BookProvider({ library, children }: { library: Library; children
   const [category, setCategory] = useStored<string>(k('category'), '');
 
   const value = useMemo<BookState>(() => {
-    const findBook = (id: string): Book | undefined => library.books.find((b) => b.id === id);
+    const every = allBooks(library.books);
+    const findBook = (id: string): Book | undefined => every.find((b) => b.id === id);
     return {
       library,
       bookmarks,
@@ -46,6 +50,7 @@ export function BookProvider({ library, children }: { library: Library; children
       category: library.categories.some((c) => c.id === category) ? category : '',
       setCategory,
       findBook,
+      bookPath: (id) => pathToBook(library.books, id),
       findChapter: (bookId, chapterId) => {
         const book = findBook(bookId);
         if (!book) return undefined;
