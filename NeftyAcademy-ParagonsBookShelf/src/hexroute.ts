@@ -16,8 +16,6 @@ export interface HexAxes {
   /** 지도 좌표 → 격자 좌표(소수) */
   toAxial: (p: Point) => { a: number; b: number };
   toPoint: (a: number, b: number) => Point;
-  /** 가장 가까운 "노드 자리"(두 좌표가 모두 짝수인 격자점)로 옮긴다 */
-  snap: (p: Point) => Point;
 }
 
 export function hexAxes(rotate: number): HexAxes {
@@ -28,11 +26,7 @@ export function hexAxes(rotate: number): HexAxes {
   const det = e1.x * e2.y - e1.y * e2.x;
   const toAxial = (p: Point) => ({ a: (p.x * e2.y - p.y * e2.x) / det, b: (e1.x * p.y - e1.y * p.x) / det });
   const toPoint = (a: number, b: number): Point => ({ x: a * e1.x + b * e2.x, y: a * e1.y + b * e2.y });
-  const snap = (p: Point): Point => {
-    const { a, b } = toAxial(p);
-    return toPoint(Math.round(a / 2) * 2, Math.round(b / 2) * 2);
-  };
-  return { toAxial, toPoint, snap };
+  return { toAxial, toPoint };
 }
 
 const DIRS: readonly (readonly [number, number])[] = [
@@ -49,6 +43,8 @@ const TURN = [0, 0.7, 1.6];
 const SHARED = 1.2;
 /** 출발지도 도착지도 아닌 책의 영역을 지나가는 값 */
 const FOREIGN = 4;
+/** 어느 책의 영역도 아닌 곳(조각 사이의 틈, 지도 바깥)을 지나가는 값. 줄이 되도록 제 책 안에서 돌게 한다. */
+const OUTSIDE = 1.5;
 
 /** 작은 값이 먼저 나오는 더미 */
 class Heap {
@@ -163,21 +159,29 @@ export class HexGrid {
     return id;
   }
 
-  /** 책 영역을 올린다. 영역은 가운데 center 에서 normals[k] 방향으로 reach[k] 만큼 떨어진 변 여섯 개로 둘러싸인 볼록 육각형이다. */
-  addRegion(book: number, center: Point, normals: Point[], reach: number[]): void {
-    const far = Math.max(...reach) * 1.2;
-    const c = this.axes.toAxial(center);
-    const span = Math.ceil(far / (GRID * 0.866)) + 1;
-    for (let db = -span; db <= span; db++)
-      for (let da = -span; da <= span; da++) {
-        const a = Math.round(c.a) + da;
-        const b = Math.round(c.b) + db;
+  /** 책 영역을 올린다. cell = 영역의 꼭짓점들(오목해도 된다). */
+  addRegion(book: number, cell: Point[]): void {
+    let minA = Infinity, minB = Infinity, maxA = -Infinity, maxB = -Infinity;
+    for (const p of cell) {
+      const { a, b } = this.axes.toAxial(p);
+      minA = Math.min(minA, a);
+      minB = Math.min(minB, b);
+      maxA = Math.max(maxA, a);
+      maxB = Math.max(maxB, b);
+    }
+    for (let b = Math.floor(minB); b <= Math.ceil(maxB); b++)
+      for (let a = Math.floor(minA); a <= Math.ceil(maxA); a++) {
         const v = this.index(a, b);
         if (v < 0) continue;
         const p = this.axes.toPoint(a, b);
-        const x = p.x - center.x;
-        const y = p.y - center.y;
-        if (normals.every((n, k) => x * n.x + y * n.y <= reach[k]!)) this.region[v] = book + 1;
+        // 점에서 오른쪽으로 그은 반직선이 변을 홀수 번 지나면 안쪽이다
+        let inside = false;
+        for (let i = 0, j = cell.length - 1; i < cell.length; j = i++) {
+          const u = cell[i]!;
+          const w = cell[j]!;
+          if (u.y > p.y !== w.y > p.y && p.x < ((w.x - u.x) * (p.y - u.y)) / (w.y - u.y) + u.x) inside = !inside;
+        }
+        if (inside) this.region[v] = book + 1;
       }
   }
 
@@ -235,7 +239,7 @@ export class HexGrid {
         const nv = nb * w + na;
         if (!open(nv)) continue;
         const r = region[nv]!;
-        const c = base + 1 + TURN[turn]! + Math.min(used[nv]!, 2) * SHARED + (r !== 0 && !home.includes(r - 1) ? FOREIGN : 0);
+        const c = base + 1 + TURN[turn]! + Math.min(used[nv]!, 2) * SHARED + (r === 0 ? OUTSIDE : home.includes(r - 1) ? 0 : FOREIGN);
         const ns = nv * 7 + d;
         if (seen[ns] === round && cost[ns]! <= c) continue;
         seen[ns] = round;

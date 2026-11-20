@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as RPointerEvent } from 'react';
 import { bookColor, useBook } from '../context';
-import { HexGrid, hexAxes } from '../hexroute';
+import { HexGrid } from '../hexroute';
 import { hexRingsFor, hexSpiral, type Point } from '../layout';
+import { layoutPie } from '../pie';
 import { href } from '../router';
 import type { Book, Chapter } from '../types';
 import { chapterNumber, wrapTitle } from './common';
@@ -13,9 +14,9 @@ const SUB_R = 7; // 하위 챕터도 같다
 const SUB_R_MAX = 36;
 const SUB_STEP = 27; // 하위 챕터 점 사이 간격(= 챕터에서 첫 고리까지의 거리). 길 찾기 격자(hexroute 의 GRID)의 두 배
 const CHAPTER_STEP = 124; // 챕터 사이 간격의 최소값. 하위 챕터가 많으면 더 벌어진다. 실제 값은 SUB_STEP 의 배수로 올림한다
-const BOOK_GAP = 26; // 책 영역과 영역 사이에 두는 여백
+const BOOK_GAP = 26; // 책의 조각과 조각 사이의 틈
 const REGION_PAD = 20; // 노드에서 책 영역의 테두리까지
-const TILT = 16; // 육각형을 살짝 돌리는 각도(도). 가운데에서 오는 줄이 챕터 노드 사이로 지나가게 한다
+const MAP_ROTATE = 30; // 책이 여러 권일 때 격자의 방향(도). 30이면 격자의 한 결이 가로로 눕는다
 const HUB_R = 30;
 const ZOOM_MAX = 8;
 // 줄이 노드의 가운데에 이보다 가까이 오지 못하는 거리. 확대해서 노드가 커져도 줄이 노드에 닿지 않는 값이다
@@ -62,15 +63,6 @@ const polar = (c: Point, r: number, deg: number): Point => {
 };
 const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
 
-/** 책이 n권일 때 가운데 둘레의 육각형에서 쓸 자리(도). 꼭짓점이 좌우에 오도록 30도 돌린 육각형이다. */
-const BOOK_SLOTS: Record<number, number[]> = {
-  2: [270, 90],
-  3: [30, 150, 270],
-  4: [330, 30, 150, 210],
-  5: [330, 30, 90, 150, 210],
-  6: [330, 30, 90, 150, 210, 270],
-};
-
 /**
  * 배율 k 에서의 노드 반지름. 확대하면 노드 사이는 k배로 벌어지지만 노드는 그대로이고,
  * 사이가 충분히 벌어지면 제목이 들어갈 만큼만 커진다. 챕터가 먼저 커지고, 더 확대하면 하위 챕터가 커진다.
@@ -95,44 +87,45 @@ function itemsOf(book: Book): { chapter: Chapter; innerBook?: string }[] {
   ];
 }
 
-/** 책 한 권의 모양. extent = 가운데에서 가장 바깥 점까지의 거리. rotate = 육각형을 돌리는 각도. */
-function shapeOf(book: Book, rotate: number): { extent: number; build: (c: Point) => PlacedChapter[] } {
-  // 챕터 하나가 하위 챕터까지 포함해 차지하는 반지름
-  const reach = (ch: Chapter): number => {
-    const k = ch.children?.length ?? 0;
-    return k ? hexRingsFor(k) * SUB_STEP + SUB_R : CHAPTER_R;
-  };
+/** 책 한 권이 지도에서 차지하는 크기. items = 책 둘레에 놓을 것들, widest = 그중 가장 넓은 것의 반지름, step = 자리 사이 간격 */
+function measure(book: Book): { items: ReturnType<typeof itemsOf>; widest: number; step: number } {
   const items = itemsOf(book);
-  const widest = Math.max(CHAPTER_R, ...items.map((it) => reach(it.chapter)));
+  const widest = Math.max(CHAPTER_R, ...items.map((it) => reachOf(it.chapter)));
   // 챕터와 하위 챕터가 모두 같은 격자의 노드 자리에 놓이도록 SUB_STEP 의 배수로 올린다
   const step = Math.ceil(Math.max(CHAPTER_STEP, widest * 2 + 18) / SUB_STEP) * SUB_STEP;
-  const extent = hexRingsFor(items.length) * step + widest;
+  return { items, widest, step };
+}
 
-  return {
-    extent,
-    build: (c) => {
-      const spots = hexSpiral(items.length, c.x, c.y, step, rotate);
-      return items.map(({ chapter, innerBook }, i) => {
-        const label = chapterNumber(book, i);
-        const at = spots[i]!;
-        const subSpots = hexSpiral(chapter.children?.length ?? 0, at.x, at.y, SUB_STEP, rotate);
-        return {
-          chapter,
-          innerBook,
-          label,
-          at: { x: at.x, y: at.y },
-          reach: reach(chapter),
-          subs: (chapter.children ?? []).map((sub, j) => ({ sub, label: `${label}.${j + 1}`, at: { x: subSpots[j]!.x, y: subSpots[j]!.y } })),
-        };
-      });
-    },
-  };
+/** 챕터 하나가 하위 챕터까지 포함해 차지하는 반지름 */
+function reachOf(ch: Chapter): number {
+  const k = ch.children?.length ?? 0;
+  return k ? hexRingsFor(k) * SUB_STEP + SUB_R : CHAPTER_R;
+}
+
+/** 정해진 자리(spots)에 챕터를 차례로 놓는다. 하위 챕터는 챕터 둘레에 작은 육각형을 그려 가며 놓인다. */
+function chaptersAt(book: Book, spots: Point[], rotate: number): PlacedChapter[] {
+  return itemsOf(book).map(({ chapter, innerBook }, i) => {
+    const label = chapterNumber(book, i);
+    const at = spots[i]!;
+    const subSpots = hexSpiral(chapter.children?.length ?? 0, at.x, at.y, SUB_STEP, rotate);
+    return {
+      chapter,
+      innerBook,
+      label,
+      at: { x: at.x, y: at.y },
+      reach: reachOf(chapter),
+      subs: (chapter.children ?? []).map((sub, j) => ({ sub, label: `${label}.${j + 1}`, at: { x: subSpots[j]!.x, y: subSpots[j]!.y } })),
+    };
+  });
 }
 
 /**
- * 지도 보기. 책은 큰 노드, 챕터는 그 둘레에 육각형을 그려 가며 놓이는 번호 붙은 노드, 하위 챕터는 챕터 둘레의 작은 육각형.
- * 연한 빨강 화살표 줄은 읽는 순서(목록 보기와 같은 순서)다. 책마다 자기 색의 점선 육각형이 영역을 표시한다.
- * 배치 규칙은 layout.ts 의 hexSpiral 참고(첫 고리 6개, 다음 12개, 18개…).
+ * 지도 보기. 책은 큰 노드, 챕터는 번호 붙은 노드, 하위 챕터는 챕터 둘레의 작은 육각형.
+ * 연한 빨강 화살표 줄은 읽는 순서(목록 보기와 같은 순서)다. 책마다 자기 색의 점선 테두리가 영역을 표시한다.
+ *
+ * 책이 여러 권이면 지도 전체가 책의 수만큼 모서리가 있는 정다각형이 되고, 가운데에서 뻗은 경계선이 그것을
+ * 책의 수만큼 조각으로 나눈다(pie.ts). 조각의 너비는 책의 크기에 맞춰 저절로 정해지고, 조각 사이의 틈은 어디서나 같다.
+ * 책이 한 권이면 그 책을 가운데에 두고 챕터를 육각형으로 둘러 놓는다(layout.ts 의 hexSpiral).
  *
  * 줄은 모두 육각형 결(60도 간격의 세 방향)을 따라 꺾이는 꺾은선이고, 노드를 뚫지 않는다(hexroute.ts).
  * 휠을 굴리거나 단추를 누르면 확대·축소된다. 확대하면 노드는 그대로 두고 간격만 벌어지며,
@@ -148,83 +141,45 @@ export function WebView({ books }: { books: Book[] }) {
 
   const { placed, box, hub, links } = useMemo(() => {
     const n = books.length;
+    const sizes = books.map(measure);
+    let rotate: number;
+    let placed: PlacedBook[];
+    let outline: Point[];
 
-    // 책들도 가운데 둘레의 육각형 자리에 놓는다. 먼저 간격 1짜리 육각형에서의 방향을 정한다.
-    const slots = BOOK_SLOTS[n];
-    const spiral = hexSpiral(n, 0, 0, 1, -30);
-    const unit: Point[] = books.map((_, i) => {
-      if (n === 1) return { x: 0, y: 0 };
-      if (slots) return polar({ x: 0, y: 0 }, 1, slots[i]!);
-      return { x: spiral[i]!.x, y: spiral[i]!.y };
-    });
-
-    // 가운데에서 책으로 가는 줄이 챕터 노드 사이로 지나가도록, 줄의 방향이 육각형 꼭짓점에서 TILT도 비껴 나게 돌린다.
-    // 책 영역끼리 변이 나란하도록 모든 책을 같은 각도로 돌린다(여섯 권까지는 어차피 같은 값이 나온다).
-    const toHub = n > 1 ? (Math.atan2(-unit[0]!.x, unit[0]!.y) * 180) / Math.PI : TILT; // 책에서 본 가운데의 방향(0 = 12시, 시계 방향)
-    const rotate = (((toHub - TILT) % 60) + 60) % 60;
-    const axes = hexAxes(rotate);
-    const shapes = books.map((book) => shapeOf(book, rotate));
-
-    // 책을 원점에 놓았을 때 노드들이 차지하는 동그라미들
-    const local = books.map((_, i) => [
-      { x: 0, y: 0, r: BOOK_R },
-      ...shapes[i]!.build({ x: 0, y: 0 }).map((c) => ({ x: c.at.x, y: c.at.y, r: c.reach })),
-    ]);
-
-    // 책 영역: 변의 방향은 정육각형과 같고, 변마다 노드에 딱 맞게 당긴 육각형.
-    // normals[k] = 가운데에서 k번째 변을 향하는 방향, reach[i][k] = 책 i의 가운데에서 그 변까지의 거리
-    const normals = Array.from({ length: 6 }, (_, k) => polar({ x: 0, y: 0 }, 1, rotate + 30 + 60 * k));
-    const reach = local.map((circles) => normals.map((nk) => Math.max(...circles.map((c) => c.x * nk.x + c.y * nk.y + c.r)) + REGION_PAD));
-    const corners = (i: number): Point[] =>
-      normals.map((a, k) => {
+    if (n === 1) {
+      // 책이 한 권이면 그 책을 가운데에 두고, 챕터는 책 둘레에 육각형을 그려 가며 놓는다(layout.ts 의 hexSpiral)
+      rotate = 0;
+      const book = books[0]!;
+      const { items, step } = sizes[0]!;
+      const chapters = chaptersAt(book, hexSpiral(items.length, 0, 0, step, rotate), rotate);
+      // 영역: 변의 방향은 정육각형과 같고, 변마다 노드에 딱 맞게 당긴 육각형
+      const circles = [{ x: 0, y: 0, r: BOOK_R }, ...chapters.map((c) => ({ x: c.at.x, y: c.at.y, r: c.reach }))];
+      const normals = Array.from({ length: 6 }, (_, k) => polar({ x: 0, y: 0 }, 1, rotate + 30 + 60 * k));
+      const reach = normals.map((nk) => Math.max(...circles.map((c) => c.x * nk.x + c.y * nk.y + c.r)) + REGION_PAD);
+      outline = normals.map((a, k) => {
         // k번째 변과 k+1번째 변이 만나는 점
         const b = normals[(k + 1) % 6]!;
-        const ha = reach[i]![k]!;
-        const hb = reach[i]![(k + 1) % 6]!;
         const det = a.x * b.y - a.y * b.x;
-        return { x: (ha * b.y - hb * a.y) / det, y: (a.x * hb - b.x * ha) / det };
+        return { x: (reach[k]! * b.y - reach[(k + 1) % 6]! * a.y) / det, y: (a.x * reach[(k + 1) % 6]! - b.x * reach[k]!) / det };
       });
-
-    // 책의 가운데는 격자의 노드 자리에 맞춘다. 그래야 모든 책의 노드가 한 장의 격자 위에 놓여 줄이 책 사이를 건너갈 수 있다.
-    const centersAt = (step: number): Point[] => unit.map((u) => axes.snap({ x: u.x * step, y: u.y * step }));
-
-    // 간격을 step 으로 잡았을 때 두 책의 영역이 겹치거나, 영역이 가운데 표시를 덮는가.
-    // 변의 방향이 같은 볼록 도형끼리라서, 여섯 방향 가운데 하나에서라도 떨어져 있으면 겹치지 않는다.
-    const collides = (step: number): boolean => {
-      const at = centersAt(step);
-      for (let i = 0; i < n; i++) {
-        const clearOfHub = normals.some((nk, k) => -(at[i]!.x * nk.x + at[i]!.y * nk.y) - reach[i]![k]! >= HUB_R + BOOK_GAP);
-        if (!clearOfHub) return true;
-        for (let j = i + 1; j < n; j++) {
-          const dx = at[j]!.x - at[i]!.x;
-          const dy = at[j]!.y - at[i]!.y;
-          const apart = normals.some((nk, k) => dx * nk.x + dy * nk.y >= reach[i]![k]! + reach[j]![(k + 3) % 6]! + BOOK_GAP);
-          if (!apart) return true;
-        }
-      }
-      return false;
-    };
-    // 넉넉한 간격에서 시작해, 겹치기 직전까지 가운데로 당긴다
-    let step = 0;
-    if (n > 1) {
-      for (let i = 0; i < n; i++)
-        for (let j = i + 1; j < n; j++)
-          step = Math.max(step, (shapes[i]!.extent + shapes[j]!.extent + REGION_PAD * 3 + BOOK_GAP + 40) / Math.hypot(unit[i]!.x - unit[j]!.x, unit[i]!.y - unit[j]!.y));
-      while (step > 8 && !collides(step - 8)) step -= 8;
+      placed = [{ book, at: { x: 0, y: 0 }, chapters, order: [], region: outline }];
+    } else {
+      // 여러 권이면 책의 수만큼 모서리가 있는 다각형을 조각으로 나눠 한 조각에 한 권씩 놓는다(pie.ts)
+      rotate = MAP_ROTATE;
+      const pie = layoutPie(
+        sizes.map((s) => ({ step: s.step, clears: [BOOK_R, ...s.items.map((it) => reachOf(it.chapter))].map((r) => r + REGION_PAD) })),
+        { rotate, gap: BOOK_GAP, hubRadius: HUB_R + BOOK_GAP / 2 },
+      );
+      outline = pie.outline;
+      placed = books.map((book, i) => {
+        const { cell, spots } = pie.books[i]!;
+        return { book, at: spots[0]!, chapters: chaptersAt(book, spots.slice(1), rotate), order: [], region: cell };
+      });
     }
-    const centers = centersAt(step);
-
-    const placed: PlacedBook[] = books.map((book, i) => ({
-      book,
-      at: centers[i]!,
-      chapters: shapes[i]!.build(centers[i]!),
-      order: [],
-      region: corners(i).map((v) => ({ x: v.x + centers[i]!.x, y: v.y + centers[i]!.y })),
-    }));
     const hub: Point | null = n > 1 ? { x: 0, y: 0 } : null;
 
     // 줄 긋기: 모든 노드를 격자에 올리고, 격자 위에서 길을 찾는다
-    const grid = new HexGrid(rotate, [...placed.flatMap((p) => p.region), { x: 0, y: 0 }]);
+    const grid = new HexGrid(rotate, [...outline, { x: 0, y: 0 }]);
     const hubNode = hub ? grid.addNode(hub, CLEAR.hub) : -1;
     const bookNode = placed.map((p) => grid.addNode(p.at, CLEAR.book));
     /** '책/챕터' → 노드. 묶음 챕터와 하위 챕터 모두 찾을 수 있다. */
@@ -234,7 +189,7 @@ export function WebView({ books }: { books: Book[] }) {
         where.set(`${p.book.id}/${c.chapter.id}`, { node: grid.addNode(c.at, CLEAR.chapter), book: i, at: c.at });
         for (const s of c.subs) where.set(`${p.book.id}/${s.sub.id}`, { node: grid.addNode(s.at, CLEAR.sub), book: i, at: s.at });
       }
-      grid.addRegion(i, p.at, normals, reach[i]!);
+      grid.addRegion(i, p.region);
     });
     const between = (a: { node: number; at: Point }, b: { node: number; at: Point }, home: number[]): Line => grid.route(a.node, b.node, home) ?? [a.at, b.at];
 
@@ -271,13 +226,12 @@ export function WebView({ books }: { books: Book[] }) {
     for (const p of placed) p.book.chapters.forEach((ch) => collect(p.book.id, ch));
 
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const p of placed)
-      for (const v of p.region) {
-        minX = Math.min(minX, v.x);
-        minY = Math.min(minY, v.y);
-        maxX = Math.max(maxX, v.x);
-        maxY = Math.max(maxY, v.y);
-      }
+    for (const v of outline) {
+      minX = Math.min(minX, v.x);
+      minY = Math.min(minY, v.y);
+      maxX = Math.max(maxX, v.x);
+      maxY = Math.max(maxY, v.y);
+    }
     const pad = 16;
     return { placed, links: [...links.values()], hub, box: { x: minX - pad, y: minY - pad, w: maxX - minX + pad * 2, h: maxY - minY + pad * 2 } };
   }, [books]);
