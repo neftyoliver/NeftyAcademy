@@ -2,22 +2,29 @@ import { useEffect, useMemo, useRef, useState, type PointerEvent as RPointerEven
 import { bookColor, useBook } from '../context';
 import { HexGrid } from '../hexroute';
 import { hexRingsFor, hexSpiral, type Point } from '../layout';
-import { layoutPie } from '../pie';
+import { layoutOnion } from '../onion';
 import { href } from '../router';
 import type { Book, Chapter } from '../types';
 import { chapterNumber, wrapTitle } from './common';
 
-const BOOK_R = 50;
-const CHAPTER_R = 15; // 챕터 노드의 기본 반지름. 확대하면 CHAPTER_R_MAX 까지 커지며 제목이 들어간다
-const CHAPTER_R_MAX = 46;
-const SUB_R = 7; // 하위 챕터도 같다
-const SUB_R_MAX = 36;
+// 노드의 반지름과 글자 크기는 배율 1(전체 보기)에서의 값이다. 확대하면 함께 커진다(radiiAt)
+const BOOK_R = 48;
+const BOOK_FONT = 14; // 책 제목의 글자 크기. 줄 사이는 BOOK_LEADING
+const BOOK_LEADING = 17;
+const CHAPTER_R = 15;
+const CHAPTER_FONT = 0.8; // 번호만 보일 때 번호의 글자 크기(챕터 반지름의 몇 배인가)
+const SUB_R = 7;
 const SUB_STEP = 27; // 하위 챕터 점 사이 간격(= 챕터에서 첫 고리까지의 거리). 길 찾기 격자(hexroute 의 GRID)의 두 배
 const CHAPTER_STEP = 124; // 챕터 사이 간격의 최소값. 하위 챕터가 많으면 더 벌어진다. 실제 값은 SUB_STEP 의 배수로 올림한다
-const BOOK_GAP = 26; // 책의 조각과 조각 사이의 틈
+const BOOK_GAP = 14; // 책 영역과 영역 사이의 틈
 const REGION_PAD = 20; // 노드에서 책 영역의 테두리까지
-const MAP_ROTATE = 30; // 책이 여러 권일 때 격자의 방향(도). 30이면 격자의 한 결이 가로로 눕는다
+const MAP_ROTATE = 30; // 책이 여러 권일 때 격자의 방향(도). 30이면 격자의 한 결이 가로로 눕고, 지도의 육각형은 위아래 변이 평평하다
 const HUB_R = 30;
+const HUB_FONT = 13;
+const TIP_FONT = 13; // 노드 위에 뜨는 이름표. 배율의 제곱근만큼만 커진다
+// 노드 속에 제목까지 넣기 시작하는 반지름
+const CHAPTER_TITLED_R = 30;
+const SUB_TITLED_R = 22;
 const ZOOM_MAX = 8;
 // 줄이 노드의 가운데에 이보다 가까이 오지 못하는 거리. 확대해서 노드가 커져도 줄이 노드에 닿지 않는 값이다
 const CLEAR = { book: BOOK_R + 2, hub: HUB_R + 2, chapter: 23, sub: 11.5 };
@@ -45,8 +52,8 @@ interface PlacedBook {
   chapters: PlacedChapter[];
   /** 읽는 순서대로 잇는 선들: 책 → 1 → 2 → … (하위 챕터가 있으면 7 → 7.1 → 7.2 → … → 8) */
   order: { line: Line; sub: boolean }[];
-  /** 이 책의 영역: 노드들을 감싸는 육각형의 꼭짓점 */
-  region: Point[];
+  /** 이 책의 영역: 노드들을 감싸는 다각형(들) */
+  region: Point[][];
   /** 가운데 표시에서 이 책으로 오는 줄 */
   fromHub?: Line;
 }
@@ -64,15 +71,14 @@ const polar = (c: Point, r: number, deg: number): Point => {
 const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
 
 /**
- * 배율 k 에서의 노드 반지름. 확대하면 노드 사이는 k배로 벌어지지만 노드는 그대로이고,
- * 사이가 충분히 벌어지면 제목이 들어갈 만큼만 커진다. 챕터가 먼저 커지고, 더 확대하면 하위 챕터가 커진다.
- * (하위 챕터는 챕터에서 SUB_STEP * k 만큼 떨어져 있으므로 두 반지름의 합이 그보다 작아야 한다.)
+ * 배율 k 에서의 노드 반지름. 확대하면 노드 사이가 k배로 벌어지고, 노드도(그 속의 글자도) 함께 커진다.
+ * 책, 가운데 표시, 하위 챕터는 그대로 k배가 된다. 챕터는 첫 하위 챕터까지의 거리(SUB_STEP * k)에서
+ * 하위 챕터와 틈(4 + k. 배율 1에서 5)을 뺀 만큼이라 k배보다 조금 더 빨리 커지고, 그만큼 제목이 일찍 들어간다.
+ * 어느 배율에서도 노드끼리 겹치지 않고, 줄이 비켜 가는 거리(CLEAR * k)보다 작다.
  */
-function radiiAt(k: number): { chapter: number; sub: number } {
-  const gap = SUB_STEP * k;
-  const chapter = clamp(gap - SUB_R - 5, CHAPTER_R, CHAPTER_R_MAX);
-  const sub = clamp(Math.min((gap - 4) / 2, gap - chapter - 5), SUB_R, SUB_R_MAX);
-  return { chapter, sub };
+function radiiAt(k: number): { book: number; hub: number; chapter: number; sub: number } {
+  const sub = SUB_R * k;
+  return { book: BOOK_R * k, hub: HUB_R * k, chapter: SUB_STEP * k - (4 + k) - sub, sub };
 }
 
 /**
@@ -123,8 +129,8 @@ function chaptersAt(book: Book, spots: Point[], rotate: number): PlacedChapter[]
  * 지도 보기. 책은 큰 노드, 챕터는 번호 붙은 노드, 하위 챕터는 챕터 둘레의 작은 육각형.
  * 연한 빨강 화살표 줄은 읽는 순서(목록 보기와 같은 순서)다. 책마다 자기 색의 점선 테두리가 영역을 표시한다.
  *
- * 책이 여러 권이면 지도 전체가 책의 수만큼 모서리가 있는 정다각형이 되고, 가운데에서 뻗은 경계선이 그것을
- * 책의 수만큼 조각으로 나눈다(pie.ts). 조각의 너비는 책의 크기에 맞춰 저절로 정해지고, 조각 사이의 틈은 어디서나 같다.
+ * 책이 여러 권이면 지도 전체가 육각형이 되고, 책들은 양파 껍질처럼 겹겹이(한 겹에 여섯 권 안팎) 놓인다(onion.ts).
+ * 노드는 모두 한 장의 격자 위에 같은 간격으로 놓이고, 책의 영역은 그 자리들을 감싸는 다각형으로 나중에 그려진다.
  * 책이 한 권이면 그 책을 가운데에 두고 챕터를 육각형으로 둘러 놓는다(layout.ts 의 hexSpiral).
  *
  * 줄은 모두 육각형 결(60도 간격의 세 방향)을 따라 꺾이는 꺾은선이고, 노드를 뚫지 않는다(hexroute.ts).
@@ -162,18 +168,16 @@ export function WebView({ books }: { books: Book[] }) {
         const det = a.x * b.y - a.y * b.x;
         return { x: (reach[k]! * b.y - reach[(k + 1) % 6]! * a.y) / det, y: (a.x * reach[(k + 1) % 6]! - b.x * reach[k]!) / det };
       });
-      placed = [{ book, at: { x: 0, y: 0 }, chapters, order: [], region: outline }];
+      placed = [{ book, at: { x: 0, y: 0 }, chapters, order: [], region: [outline] }];
     } else {
-      // 여러 권이면 책의 수만큼 모서리가 있는 다각형을 조각으로 나눠 한 조각에 한 권씩 놓는다(pie.ts)
+      // 여러 권이면 지도 전체가 육각형이 되게 양파 껍질처럼 겹겹이 놓는다(onion.ts).
+      // 자리 사이의 간격은 어느 책에서나 같다: 가장 넓은 간격이 필요한 책에 맞춘다.
       rotate = MAP_ROTATE;
-      const pie = layoutPie(
-        sizes.map((s) => ({ step: s.step, clears: [BOOK_R, ...s.items.map((it) => reachOf(it.chapter))].map((r) => r + REGION_PAD) })),
-        { rotate, gap: BOOK_GAP, hubRadius: HUB_R + BOOK_GAP / 2 },
-      );
-      outline = pie.outline;
+      const onion = layoutOnion(sizes.map((s) => s.items.length + 1), { step: Math.max(...sizes.map((s) => s.step)), rotate, gap: BOOK_GAP });
+      outline = onion.outline;
       placed = books.map((book, i) => {
-        const { cell, spots } = pie.books[i]!;
-        return { book, at: spots[0]!, chapters: chaptersAt(book, spots.slice(1), rotate), order: [], region: cell };
+        const { spots, region } = onion.books[i]!;
+        return { book, at: spots[0]!, chapters: chaptersAt(book, spots.slice(1), rotate), order: [], region };
       });
     }
     const hub: Point | null = n > 1 ? { x: 0, y: 0 } : null;
@@ -189,7 +193,7 @@ export function WebView({ books }: { books: Book[] }) {
         where.set(`${p.book.id}/${c.chapter.id}`, { node: grid.addNode(c.at, CLEAR.chapter), book: i, at: c.at });
         for (const s of c.subs) where.set(`${p.book.id}/${s.sub.id}`, { node: grid.addNode(s.at, CLEAR.sub), book: i, at: s.at });
       }
-      grid.addRegion(i, p.region);
+      for (const loop of p.region) grid.addRegion(i, loop);
     });
     const between = (a: { node: number; at: Point }, b: { node: number; at: Point }, home: number[]): Line => grid.route(a.node, b.node, home) ?? [a.at, b.at];
 
@@ -293,8 +297,8 @@ export function WebView({ books }: { books: Book[] }) {
     return `M${at(1, 0)} L${at(-1, 0.8)} L${at(-1, -0.8)} z`;
   };
   const radii = radiiAt(k);
-  const chapterTitled = radii.chapter >= 30;
-  const subTitled = radii.sub >= 22;
+  const chapterTitled = radii.chapter >= CHAPTER_TITLED_R;
+  const subTitled = radii.sub >= SUB_TITLED_R;
   const zoom = (f: number): void =>
     setView((v) => {
       const next = clamp(v.k * f, 1, ZOOM_MAX);
@@ -374,7 +378,7 @@ export function WebView({ books }: { books: Book[] }) {
       >
         <g className="bf-web-regions">
           {placed.map((p) => (
-            <polygon key={p.book.id} points={p.region.map((v) => `${T(v).x.toFixed(1)},${T(v).y.toFixed(1)}`).join(' ')} style={{ ['--node' as string]: bookColor(library, p.book) }} />
+            <path key={p.book.id} d={p.region.map((loop) => `${path(loop)} Z`).join(' ')} style={{ ['--node' as string]: bookColor(library, p.book) }} />
           ))}
         </g>
 
@@ -399,8 +403,8 @@ export function WebView({ books }: { books: Book[] }) {
 
         {hub && (
           <g className="bf-web-hub">
-            <circle cx={T(hub).x} cy={T(hub).y} r={HUB_R} />
-            <text x={T(hub).x} y={T(hub).y} dy="0.35em">
+            <circle cx={T(hub).x} cy={T(hub).y} r={radii.hub} />
+            <text x={T(hub).x} y={T(hub).y} dy="0.35em" style={{ fontSize: HUB_FONT * k }}>
               {library.books.length}권
             </text>
           </g>
@@ -440,7 +444,7 @@ export function WebView({ books }: { books: Book[] }) {
                       {chapterTitled ? (
                         titled(at, radii.chapter, c.label, c.chapter.title)
                       ) : (
-                        <text x={at.x} y={at.y} dy="0.35em">
+                        <text x={at.x} y={at.y} dy="0.35em" style={{ fontSize: radii.chapter * CHAPTER_FONT }}>
                           {c.label}
                         </text>
                       )}
@@ -449,9 +453,9 @@ export function WebView({ books }: { books: Book[] }) {
                 );
               })}
               <a href={href({ name: 'book', bookId: p.book.id })} className="bf-node bf-node-book" aria-label={p.book.title}>
-                <circle cx={bookAt.x} cy={bookAt.y} r={BOOK_R} />
+                <circle cx={bookAt.x} cy={bookAt.y} r={radii.book} />
                 {wrapTitle(p.book.title).map((line, i, all) => (
-                  <text key={i} x={bookAt.x} y={bookAt.y + (i - (all.length - 1) / 2) * 17} dy="0.35em">
+                  <text key={i} x={bookAt.x} y={bookAt.y + (i - (all.length - 1) / 2) * BOOK_LEADING * k} dy="0.35em" style={{ fontSize: BOOK_FONT * k }}>
                     {line}
                   </text>
                 ))}
@@ -461,8 +465,10 @@ export function WebView({ books }: { books: Book[] }) {
         })}
 
         {hover && (
-          <g className="bf-web-tip" transform={`translate(${T(hover.at).x} ${T(hover.at).y - (hover.sub ? radii.sub : radii.chapter) - 10})`} pointerEvents="none">
-            <text textAnchor="middle">{hover.label}</text>
+          <g className="bf-web-tip" transform={`translate(${T(hover.at).x} ${T(hover.at).y - (hover.sub ? radii.sub : radii.chapter) - 10 * Math.sqrt(k)})`} pointerEvents="none">
+            <text textAnchor="middle" style={{ fontSize: TIP_FONT * Math.sqrt(k), strokeWidth: 5 * Math.sqrt(k) }}>
+              {hover.label}
+            </text>
           </g>
         )}
       </svg>
