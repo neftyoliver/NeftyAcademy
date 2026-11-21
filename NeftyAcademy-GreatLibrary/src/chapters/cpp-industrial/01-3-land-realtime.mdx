@@ -1,0 +1,107 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '실시간이라는 요구: 마감과 주기, 경성·준경성·연성, 상대 sleep의 밀림, 평균이 아니라 최악을 보는 이유';
+
+사무용 프로그램은 빠를수록 좋고, 가끔 느려도 사용자가 조금 기다리면 그만입니다. 장비를 제어하는 프로그램은 다릅니다. 계산 결과가 맞아도 **늦게 나오면 틀린 것**이 됩니다. 이렇게 정해진 시각(**마감**)까지 결과를 내는 것이 정확성의 일부인 시스템을 실시간 시스템이라고 부릅니다.
+
+## 마감을 놓치면
+
+| 종류 | 마감을 놓치면 | 예 |
+| --- | --- | --- |
+| 경성 실시간 | 시스템이 실패한다. 다치거나 장비가 부서질 수 있다 | 서보 위치 제어, 에어백 |
+| 준경성 실시간 | 늦은 결과는 쓸모가 없지만, 가끔이면 견딘다 | 지나간 제품의 비전 검사 결과 |
+| 연성 실시간 | 늦을수록 품질이 떨어질 뿐이다 | HMI 화면 갱신, 이력 기록 |
+
+제어 프로그램은 대개 **주기**를 가집니다. 서보 드라이브를 제어하는 루프는 수백 마이크로초에서 수 밀리초마다, PLC는 수 밀리초에서 수십 밀리초마다 한 바퀴를 돕니다. 주기마다 입력을 읽고 계산해 출력을 내는 일이 다음 주기가 오기 전에 끝나야 합니다. 그리고 깨어나는 시각이 주기마다 얼마나 흔들리는지(**지터**)도 중요합니다. [「PID 제어」](#/read/cpp-industrial/mot-pid) 같은 제어 계산은 일정한 간격으로 샘플을 받는다고 가정하기 때문입니다.
+
+## 1밀리초 주기를 두 가지로
+
+1밀리초마다 한 번씩 2000번 깨어나는 작업을 두 가지로 짜서, 원래 깨어나야 했던 시각보다 얼마나 늦었는지 쟀습니다. 실시간 커널이 아닌 보통 리눅스(가상 기계, 2코어)에서 잰 값입니다.
+
+```cpp norun
+// 1밀리초 주기 작업 2000번: 상대 sleep과 절대 시각 sleep을 비교한다
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <ctime>
+#include <thread>
+#include <vector>
+
+using namespace std::chrono;
+constexpr int kCycles = 2000;
+constexpr long kPeriodNs = 1'000'000;
+
+long long nowNs() {
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1'000'000'000LL + ts.tv_nsec;
+}
+
+void report(const char* name, long long startNs, std::vector<long long>& late) {
+    const double total = (nowNs() - startNs) / 1e6;
+    std::sort(late.begin(), late.end());
+    long long sum = 0;
+    for (long long v : late) sum += v;
+    std::printf("%s: 전체 %.1fms (예정 %dms)\n", name, total, kCycles);
+    std::printf("    늦음 평균 %lldµs, 99%% %lldµs, 최대 %lldµs\n",
+                sum / kCycles / 1000, late[kCycles * 99 / 100] / 1000,
+                late.back() / 1000);
+}
+
+int main() {
+    std::vector<long long> late(kCycles);
+
+    // 1) 매번 "지금부터 1ms" 잔다: 늦음이 다음 주기로 쌓인다
+    long long start = nowNs();
+    for (int i = 0; i < kCycles; ++i) {
+        const long long due = start + (i + 1) * kPeriodNs;   // 원래 깨어날 시각
+        std::this_thread::sleep_for(1ms);
+        late[i] = nowNs() - due;
+    }
+    report("상대 sleep", start, late);
+
+    // 2) "몇 시 몇 분에 깨워 달라"고 잔다: 늦어도 다음 주기는 제자리다
+    start = nowNs();
+    timespec next{};
+    clock_gettime(CLOCK_MONOTONIC, &next);
+    for (int i = 0; i < kCycles; ++i) {
+        next.tv_nsec += kPeriodNs;
+        if (next.tv_nsec >= 1'000'000'000) {          // 초 넘김
+            next.tv_nsec -= 1'000'000'000;
+            ++next.tv_sec;
+        }
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, nullptr);
+        late[i] = nowNs() - (next.tv_sec * 1'000'000'000LL + next.tv_nsec);
+    }
+    report("절대 시각", start, late);
+}
+```
+
+```text nocheck
+상대 sleep: 전체 2201.3ms (예정 2000ms)
+    늦음 평균 101890µs, 99% 199070µs, 최대 201273µs
+절대 시각: 전체 2000.1ms (예정 2000ms)
+    늦음 평균 93µs, 99% 200µs, 최대 842µs
+```
+
+- **상대 sleep은 밀린다**: `sleep_for(1ms)`는 "지금부터 적어도 1ms"를 뜻합니다. 매번 0.1ms쯤 늦게 깨어나면 그 늦음이 다음 주기의 출발점이 되어 계속 쌓입니다. 2000번 만에 200ms, 주기 200개만큼 밀렸습니다
+- **절대 시각은 제자리로 돌아온다**: `clock_nanosleep`에 `TIMER_ABSTIME`으로 "몇 시 몇 분"을 주면, 한 번 늦어도 다음 깨어날 시각은 원래 자리입니다. 전체 시간이 정확히 2000ms입니다
+- **평균이 아니라 최악**: 절대 시각 방식의 평균 늦음은 0.1ms 정도지만, 가장 늦은 한 번은 0.8ms였습니다. 1ms 주기에서 0.8ms 늦으면 그 주기의 계산 시간은 거의 남지 않습니다. 같은 프로그램을 다시 돌리면 최대값은 1~2ms까지도 나왔습니다. 실시간 시스템의 성능은 평균이 아니라 **가장 나쁜 경우**로 말합니다
+
+## 빠른 것과 실시간은 다르다
+
+실시간 시스템에 필요한 것은 높은 처리량이 아니라 **예측할 수 있음**입니다. 평균 10µs에 끝나지만 가끔 5ms가 걸리는 코드보다, 늘 200µs에 끝나는 코드가 1ms 주기 제어에는 낫습니다. 그래서 실시간 코드는 보통의 C++ 습관 몇 가지를 버립니다.
+
+- 주기 안에서는 메모리를 할당하지 않고, 처음 만지는 메모리에서 생기는 페이지 폴트를 미리 없앱니다([「메모리 잠금과 할당 금지」](#/read/cpp-industrial/rt-memory))
+- 다른 스레드와 잠금을 다투지 않고, 운영 체제가 이 스레드를 먼저 돌리도록 우선순위를 줍니다([「PREEMPT_RT」](#/read/cpp-industrial/rt-preempt))
+- 지연이 어디서 오는지를 재고([「지연과 지터」](#/read/cpp-industrial/rt-jitter)), 오랫동안 돌려 최악의 값을 확인합니다([「측정」](#/read/cpp-industrial/rt-measure))
+
+<Note>
+위 측정의 최대값은 이 기계에서 몇 초 돌린 결과일 뿐입니다. 하루를 돌리면 더 나쁜 값이 나올 수 있고, 실시간 시스템은 그 값까지 견뎌야 합니다. 4장에서 같은 측정을 실시간 우선순위와 메모리 잠금을 더해 다시 하고, 오래 돌려 분포를 보는 방법을 다룹니다.
+</Note>
+
+## 정리
+
+- 실시간 시스템에서는 결과가 마감까지 나와야 맞은 것이며, 놓쳤을 때의 결과에 따라 경성, 준경성, 연성으로 나눈다
+- 주기 작업은 상대 sleep이 아니라 절대 시각(clock_nanosleep, TIMER_ABSTIME)으로 깨어나야 늦음이 쌓이지 않는다
+- 실시간 성능은 평균이 아니라 최악의 경우로 판단하며, 할당·잠금·우선순위·측정을 모두 이 기준으로 다룬다
