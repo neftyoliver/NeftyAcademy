@@ -1,0 +1,104 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '추적성: 일련번호와 자재 로트의 계보, 재귀 질의로 앞뒤 추적, 공정 기록, 회수 범위 좁히기';
+
+어느 날 부품 업체에서 연락이 옵니다. "지난주에 보낸 축전기 로트 CAP-L77에 불량이 있습니다." 이때 공장이 답해야 할 질문은 하나입니다. **그 로트가 들어간 제품은 정확히 어느 것인가.** 답하지 못하면 그 주에 만든 제품을 전부 회수해야 하고, 답할 수 있으면 몇 대만 회수하면 됩니다. 제품마다 무엇이 언제 어디서 어떻게 들어가고 측정되었는지 기록하는 것이 **추적성**입니다. 자동차, 의료 기기, 식품, 항공에서는 법과 고객이 요구하고, 다른 산업에서도 품질 문제를 좁히는 가장 강력한 도구입니다.
+
+## 계보를 기록하고 추적하기
+
+제품마다 일련번호를 붙이고(보통 레이저로 새긴 DataMatrix 코드), 각 공정에서 그 번호를 읽어 무엇을 했는지 기록합니다. 완제품은 하위 조립품(기판)을 품고, 하위 조립품은 다시 자재 로트를 씁니다. 이 계보를 SQLite에 기록하고 재귀 질의로 양쪽 방향으로 추적했습니다.
+
+```cpp flags=-lsqlite3
+// 추적성: 어떤 자재 로트가 어느 제품에 들어갔는지 기록하고, 앞뒤로 추적한다
+#include <sqlite3.h>
+#include <cstdio>
+
+void exec(sqlite3* db, const char* sql) {
+    char* err = nullptr;
+    if (sqlite3_exec(db, sql, nullptr, nullptr, &err) != SQLITE_OK) {
+        std::printf("SQL 오류: %s\n", err);
+        sqlite3_free(err);
+    }
+}
+void query(sqlite3* db, const char* title, const char* sql) {
+    sqlite3_stmt* st;
+    sqlite3_prepare_v2(db, sql, -1, &st, nullptr);
+    std::printf("%s:", title);
+    while (sqlite3_step(st) == SQLITE_ROW)
+        std::printf(" %s", reinterpret_cast<const char*>(
+                                 sqlite3_column_text(st, 0)));
+    std::printf("\n");
+    sqlite3_finalize(st);
+}
+
+int main() {
+    sqlite3* db;
+    sqlite3_open(":memory:", &db);
+    exec(db, R"(
+        CREATE TABLE unit(serial TEXT PRIMARY KEY, kind TEXT, made TEXT);
+        CREATE TABLE uses(parent TEXT, child TEXT);       -- 제품이 품은 하위 제품
+        CREATE TABLE consumed(serial TEXT, lot TEXT);     -- 제품이 쓴 자재 로트
+        CREATE TABLE measure(serial TEXT, station TEXT, name TEXT, value REAL);
+
+        -- 기판 3장: 부품 로트가 섞여 들어갔다
+        INSERT INTO unit VALUES ('PCB-001','기판','2026-11-20 09:12'),
+                                ('PCB-002','기판','2026-11-20 09:13'),
+                                ('PCB-003','기판','2026-11-20 09:15');
+        INSERT INTO consumed VALUES ('PCB-001','CAP-L77'), ('PCB-001','IC-L12'),
+                                    ('PCB-002','CAP-L77'), ('PCB-002','IC-L13'),
+                                    ('PCB-003','CAP-L78'), ('PCB-003','IC-L13');
+        -- 완제품 3대: 기판 하나씩과 케이스 로트
+        INSERT INTO unit VALUES ('CTRL-1001','제어기','2026-11-20 14:02'),
+                                ('CTRL-1002','제어기','2026-11-20 14:05'),
+                                ('CTRL-1003','제어기','2026-11-20 14:09');
+        INSERT INTO uses VALUES ('CTRL-1001','PCB-002'), ('CTRL-1002','PCB-001'),
+                                ('CTRL-1003','PCB-003');
+        INSERT INTO consumed VALUES ('CTRL-1001','CASE-L5'),
+                                    ('CTRL-1002','CASE-L5'),
+                                    ('CTRL-1003','CASE-L6');
+        INSERT INTO measure VALUES ('CTRL-1002','시험대2','전압',4.98),
+                                   ('CTRL-1002','시험대2','소비전류',0.212);
+    )");
+
+    // 뒤로 추적: 이 완제품에는 무엇이 들어갔나(하위 제품까지 거슬러)
+    query(db, "CTRL-1002에 들어간 로트", R"(
+        WITH RECURSIVE parts(s) AS (
+            SELECT 'CTRL-1002'
+            UNION SELECT child FROM uses JOIN parts ON parent = s)
+        SELECT lot FROM consumed JOIN parts ON serial = s ORDER BY lot)");
+
+    // 앞으로 추적: 축전기 로트 CAP-L77에 불량이 났다. 어느 완제품을 회수하나
+    query(db, "CAP-L77이 들어간 완제품", R"(
+        WITH RECURSIVE up(s) AS (
+            SELECT serial FROM consumed WHERE lot = 'CAP-L77'
+            UNION SELECT parent FROM uses JOIN up ON child = s)
+        SELECT s FROM up JOIN unit ON serial = s
+        WHERE kind = '제어기' ORDER BY s)");
+
+    query(db, "CTRL-1002의 시험 기록", R"(
+        SELECT station || ' ' || name || '=' || value FROM measure
+        WHERE serial = 'CTRL-1002')");
+    sqlite3_close(db);
+}
+```
+
+```text
+CTRL-1002에 들어간 로트: CAP-L77 CASE-L5 IC-L12
+CAP-L77이 들어간 완제품: CTRL-1001 CTRL-1002
+CTRL-1002의 시험 기록: 시험대2 전압=4.98 시험대2 소비전류=0.212
+```
+
+- **세 가지 기록**: 제품(일련번호, 종류, 만든 시각), 계보(제품이 품은 하위 제품, 쓴 자재 로트), 공정 기록(어느 장비에서 무엇을 쟀는지)입니다. 공정 기록에는 측정값뿐 아니라 그때 쓴 레시피의 판, 장비 번호, 작업자도 함께 남깁니다
+- **뒤로 추적**: 완제품 CTRL-1002에서 출발해 품은 기판 PCB-001로 내려가고, 둘이 쓴 로트를 모았습니다. 고객이 불량을 신고했을 때 원인 후보를 찾는 방향입니다
+- **앞으로 추적**: 로트 CAP-L77을 쓴 기판에서 출발해 그 기판을 품은 완제품으로 올라갔습니다. 6대 중 2대만 회수하면 됩니다. 하위 조립품이 몇 단계든 `WITH RECURSIVE` 하나로 따라갑니다
+- **정확한 짝짓기가 전부**: 이 추적은 각 공정에서 일련번호와 로트를 **정확히** 읽어 기록했을 때만 맞습니다. 자재 상자를 바꿀 때 새 로트를 찍지 않으면 기록은 거짓이 됩니다. 그래서 현장에서는 바코드를 찍지 않으면 장비가 다음 동작으로 넘어가지 않게(인터록) 만들곤 합니다
+
+<Note>
+추적 기록은 사고와 분쟁의 증거이므로, 고칠 수 없게 남기고([「사용자와 권한」](#/read/cpp-industrial/hmi-users)의 해시 사슬처럼) 법이나 고객이 정한 기간 동안 보관합니다. 공장 시계가 서로 다르면 "이 부품이 먼저냐 저 측정이 먼저냐"가 흐려지므로 모든 장비의 시계를 맞추는 것도 추적성의 일부입니다. 한 번 찍은 일련번호는 이력 저장소의 시계열([「시계열 저장」](#/read/cpp-industrial/data-timeseries))과도 이어 두면, 그 제품이 오븐을 지나던 순간의 온도까지 찾아볼 수 있습니다.
+</Note>
+
+## 정리
+
+- 추적성은 제품 일련번호마다 들어간 하위 제품과 자재 로트, 그리고 공정 기록을 남겨, 문제가 생긴 범위를 정확히 좁히는 일이다
+- 계보는 재귀 질의로 뒤로(제품에서 로트로)와 앞으로(로트에서 제품으로) 추적하며, 앞으로 추적이 회수 범위를 정한다
+- 기록은 공정에서 정확히 읽은 번호로만 맞으므로 인터록으로 빠짐을 막고, 고칠 수 없게 남기며 시계를 맞춘다
