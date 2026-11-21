@@ -1,0 +1,94 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '카메라 인터페이스: GigE Vision, USB3 Vision, GenICam, 대역폭 계산, 패킷 손실과 재전송';
+
+머신 비전은 카메라로 제품을 보고 판단하는 일입니다. 부품이 있는지, 치수가 맞는지, 라벨이 바른지, 흠집이 없는지를 사람 대신 1초에 수십 번 봅니다. 그 시작은 카메라에서 이미지를 빠짐없이, 제때 받아 오는 것입니다. 산업용 카메라는 웹캠과 달리 노출과 트리거를 정밀하게 다루고, 표준 인터페이스로 이미지를 보냅니다.
+
+## 인터페이스와 GenICam
+
+- **GigE Vision**: 이더넷으로 연결합니다. 케이블을 100m까지 쓸 수 있고 스위치로 여러 대를 묶기 쉽습니다. 제어는 UDP 3956번 포트의 GVCP로, 이미지는 GVSP라는 UDP 스트림으로 옵니다. 5GigE와 10GigE도 있습니다
+- **USB3 Vision**: USB 3로 연결합니다. 설치가 쉽고 GigE보다 빠르지만 케이블이 짧습니다
+- **CoaXPress, Camera Link**: 프레임 그래버 카드가 필요한 고속 인터페이스입니다. 초고속, 초고해상도 검사에 씁니다
+- **MIPI CSI-2**: 임베디드 보드에 카메라 모듈을 직접 붙일 때 씁니다
+
+어느 인터페이스든 카메라의 설정은 **GenICam** 표준으로 다룹니다. 카메라가 자기 기능 목록을 XML로 내놓고, 프로그램은 `ExposureTime`, `Gain`, `TriggerMode`, `PixelFormat` 같은 표준 이름으로 값을 읽고 씁니다. 그래서 제조사가 달라도 같은 코드로 다룰 수 있습니다. 제조사 SDK도 있고, 오픈 소스로는 GigE Vision과 USB3 Vision을 지원하는 Aravis가 있습니다.
+
+## 대역폭과 패킷 손실
+
+카메라를 고를 때 먼저 계산할 것은 대역폭입니다. 가로 × 세로 × 화소당 바이트 × 초당 프레임이 1초에 보내야 할 양입니다. 그리고 GigE Vision은 UDP 위에서 프레임을 패킷 수백 개로 나눠 보내므로, 빠진 패킷을 다시 요청하는 일이 생깁니다. 둘을 계산하고 흉내 냈습니다.
+
+```cpp
+// 카메라 고르기: 필요한 대역폭을 계산하고, GigE Vision의 패킷 손실을 흉내 낸다
+#include <cstdint>
+#include <cstdio>
+#include <vector>
+
+struct Config { const char* name; int w, h; double bytesPerPixel; double fps; };
+struct Link { const char* name; double mbps; };   // 실효 대역폭(MB/s, 대략)
+
+int main() {
+    const Config cams[] = {
+        {"1920x1200 Mono8 60fps", 1920, 1200, 1.0, 60},
+        {"2448x2048 Mono8 24fps", 2448, 2048, 1.0, 24},
+        {"1440x1080 Mono12p 100fps", 1440, 1080, 1.5, 100},
+        {"4096x3000 Mono8 30fps", 4096, 3000, 1.0, 30},
+    };
+    const Link links[] = {{"GigE", 115}, {"USB3", 380}, {"5GigE", 580},
+                          {"10GigE", 1100}};
+    for (const Config& c : cams) {
+        const double need = c.w * c.h * c.bytesPerPixel * c.fps / 1e6;
+        std::printf("%s: %.0f MB/s →", c.name, need);
+        for (const Link& l : links)                  // 여유 20%를 남긴다
+            if (need <= l.mbps * 0.8) { std::printf(" %s", l.name); }
+        std::printf("\n");
+    }
+
+    // GigE Vision: 프레임 하나를 패킷 수백 개로 나눠 UDP로 보낸다(점보 프레임 8KB)
+    const int frameBytes = 1920 * 1200, payload = 8000;
+    const int packets = (frameBytes + payload - 1) / payload;
+    std::printf("프레임 %d바이트 = 데이터 패킷 %d개\n", frameBytes, packets);
+    uint32_t rng = 12345;                            // 손실을 흉내 내는 간단한 난수
+    auto lost = [&] {                                // 대략 2000개에 하나를 잃는다
+        rng = rng * 1664525u + 1013904223u;
+        return (rng >> 16) % 2000 == 0;
+    };
+    int complete = 0, resent = 0, dropped = 0;
+    for (int frame = 0; frame < 100; ++frame) {
+        std::vector<bool> got(packets);
+        for (int p = 0; p < packets; ++p) got[p] = !lost();
+        int missing = 0;
+        for (bool g : got) missing += !g;
+        if (missing == 0) { ++complete; continue; }
+        // 빠진 패킷 번호로 재전송을 요청한다. 재전송도 잃으면 프레임을 버린다
+        bool ok = true;
+        for (int p = 0; p < packets; ++p)
+            if (!got[p] && lost()) ok = false;
+        ok ? ++resent : ++dropped;
+    }
+    std::printf("100프레임: 그대로 완성 %d, 재전송으로 완성 %d, 버림 %d\n",
+                complete, resent, dropped);
+}
+```
+
+```text
+1920x1200 Mono8 60fps: 138 MB/s → USB3 5GigE 10GigE
+2448x2048 Mono8 24fps: 120 MB/s → USB3 5GigE 10GigE
+1440x1080 Mono12p 100fps: 233 MB/s → USB3 5GigE 10GigE
+4096x3000 Mono8 30fps: 369 MB/s → 5GigE 10GigE
+프레임 2304000바이트 = 데이터 패킷 288개
+100프레임: 그대로 완성 88, 재전송으로 완성 12, 버림 0
+```
+
+- **GigE는 생각보다 좁다**: 1기가비트 이더넷의 실효 대역폭은 115MB/s쯤이고 여유를 두면 92MB/s입니다. 2메가 화소 카메라를 60fps로 돌리기에도 모자랍니다. 고해상도 카메라는 해상도를 낮추거나(ROI), 프레임 수를 줄이거나, 더 빠른 인터페이스로 갑니다. 12비트 화소(Mono12p)는 8비트보다 1.5배 많습니다
+- **점보 프레임**: 데이터를 8KB씩 담은 점보 프레임으로도 한 장에 288개 패킷입니다. 보통의 1500바이트 MTU라면 1600개쯤이 되어 패킷 처리에 CPU를 훨씬 많이 씁니다. 네트워크 카드와 스위치에서 점보 프레임을 켜는 것이 GigE 카메라 설치의 첫 단계입니다
+- **재전송**: 2000개에 하나꼴로 패킷을 잃어도 100장 중 12장은 패킷이 빠졌습니다. GigE Vision은 빠진 패킷 번호로 재전송을 요청해 프레임을 완성합니다. 그래도 못 채우면 그 프레임은 버리고, 프로그램은 프레임 번호의 건너뜀으로 그 사실을 알아야 합니다. 검사 장비에서 프레임을 조용히 놓치는 것은 불량품을 그냥 보내는 것과 같습니다
+
+<Note>
+움직이는 제품을 찍을 때는 **글로벌 셔터** 카메라를 씁니다. 화면을 위에서 아래로 차례로 읽는 롤링 셔터는 빠르게 지나가는 물체를 비스듬히 휘어 찍습니다. 색이 필요 없는 검사는 흑백(Mono) 카메라가 더 선명하고 데이터도 적습니다. 컬러 카메라는 보통 Bayer 패턴의 원시 화소를 보내고, 색 복원은 PC에서 합니다.
+</Note>
+
+## 정리
+
+- 산업용 카메라는 GigE Vision, USB3 Vision, CoaXPress 같은 표준 인터페이스로 연결하고, GenICam의 표준 기능 이름으로 설정한다
+- 필요한 대역폭은 해상도 × 화소당 바이트 × 프레임 수로 계산하며, GigE는 실효 115MB/s쯤으로 생각보다 좁다
+- GigE Vision은 UDP 패킷 손실을 재전송으로 메우고, 프로그램은 버려진 프레임을 프레임 번호로 알아채야 한다
