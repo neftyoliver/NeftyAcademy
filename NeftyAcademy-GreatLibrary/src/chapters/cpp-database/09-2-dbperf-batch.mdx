@@ -1,0 +1,178 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '배치 삽입: 커밋과 왕복의 값, 여러 행 VALUES, 배열 unnest, 파이프라인, COPY와 이스케이프';
+
+행을 많이 넣을 때 한 행의 값은 주로 세 가지로 정해집니다. 커밋할 때마다 서버가 WAL을 디스크에 써서 기다리는 시간, 클라이언트와 서버 사이의 왕복, 그리고 문장마다 해석하고 실행하는 일입니다. 아래 프로그램은 2만 행을 여섯 가지 방법으로 넣고 시간을 잽니다. 시간은 기계마다, 실행마다 다르므로 검사기는 이 프로그램을 돌리지 않고, 출력은 이 책의 검사 기계(PostgreSQL 16, localhost TCP와 TLS, `-O2`)에서 잰 한 번입니다.
+
+## 여섯 가지 방법 재기
+
+```cpp pkg=libpq norun
+#include <libpq-fe.h>
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <functional>
+#include <string>
+#include <vector>
+
+constexpr int N = 20000;
+
+void exec(PGconn* c, const char* sql) { PQclear(PQexec(c, sql)); }
+
+std::string name_of(int i) { return "부품-" + std::to_string(i); }
+
+// 한글은 두 칸, 아스키는 한 칸으로 세어 오른쪽을 공백으로 채운다
+std::string pad(const std::string& s, int width) {
+    int w = 0;
+    for (unsigned char ch : s) w += ch < 0x80 ? 1 : ch >= 0xE0 ? 2 : 0;
+    return s + std::string(std::max(0, width - w), ' ');
+}
+
+// COPY 텍스트 형식에서 뜻이 있는 글자를 \로 감싸 덧붙인다 (NULL은 \N으로 적는다)
+void append_copy(std::string& buf, const std::string& s) {
+    for (char ch : s) {
+        switch (ch) {
+        case '\\': buf += "\\\\"; break;
+        case '\t': buf += "\\t"; break;
+        case '\n': buf += "\\n"; break;
+        case '\r': buf += "\\r"; break;
+        default: buf += ch;
+        }
+    }
+}
+
+// 방법 하나를 재고, 들어간 행 수를 확인한다
+void measure(PGconn* c, const char* label, const std::function<void()>& load) {
+    exec(c, "TRUNCATE bt_parts");
+    auto t0 = std::chrono::steady_clock::now();
+    load();
+    auto ms = std::chrono::duration<double, std::milli>(
+                  std::chrono::steady_clock::now() - t0).count();
+    PGresult* r = PQexec(c, "SELECT count(*) FROM bt_parts");
+    std::printf("%s %7.1f ms  (%s행)\n", pad(label, 26).c_str(), ms,
+                PQgetvalue(r, 0, 0));
+    PQclear(r);
+}
+
+void insert_one(PGconn* c, int i, const char* stmt) {   // 준비된 문장으로 한 행
+    std::string id = std::to_string(i), name = name_of(i);
+    const char* v[] = {id.c_str(), name.c_str()};
+    PQclear(PQexecPrepared(c, stmt, 2, v, nullptr, nullptr, 0));
+}
+
+int main() {
+    PGconn* c = PQconnectdb("host=localhost dbname=academy user=academy "
+                            "password=academy");
+    exec(c, "SET client_min_messages = warning");
+    exec(c, "DROP TABLE IF EXISTS bt_parts");
+    exec(c, "CREATE TABLE bt_parts (id int PRIMARY KEY, name text NOT NULL)");
+    PQclear(PQprepare(c, "ins", "INSERT INTO bt_parts VALUES ($1, $2)", 2,
+                      nullptr));
+
+    measure(c, "한 행씩, 행마다 커밋", [&] {
+        for (int i = 0; i < N; ++i) insert_one(c, i, "ins");
+    });
+    measure(c, "한 행씩, 트랜잭션 하나", [&] {
+        exec(c, "BEGIN");
+        for (int i = 0; i < N; ++i) insert_one(c, i, "ins");
+        exec(c, "COMMIT");
+    });
+    measure(c, "여러 행 VALUES (500행씩)", [&] {
+        exec(c, "BEGIN");
+        for (int base = 0; base < N; base += 500) {
+            std::string sql = "INSERT INTO bt_parts VALUES ";
+            std::vector<std::string> vals;
+            for (int i = base; i < base + 500; ++i) {
+                int k = static_cast<int>(vals.size());
+                sql += (k ? ", ($" : "($") + std::to_string(k + 1) + ", $" +
+                       std::to_string(k + 2) + ")";
+                vals.push_back(std::to_string(i));
+                vals.push_back(name_of(i));
+            }
+            std::vector<const char*> p;
+            for (auto& s : vals) p.push_back(s.c_str());
+            PQclear(PQexecParams(c, sql.c_str(), int(p.size()), nullptr, p.data(),
+                                 nullptr, nullptr, 0));
+        }
+        exec(c, "COMMIT");
+    });
+    measure(c, "배열 두 개를 unnest", [&] {
+        std::string ids = "{", names = "{";
+        for (int i = 0; i < N; ++i) {
+            ids += (i ? "," : "") + std::to_string(i);
+            names += (i ? ",\"" : "\"") + name_of(i) + "\"";
+        }
+        ids += "}";
+        names += "}";
+        const char* p[] = {ids.c_str(), names.c_str()};
+        PQclear(PQexecParams(c, "INSERT INTO bt_parts SELECT * FROM "
+                                "unnest($1::int[], $2::text[])",
+                             2, nullptr, p, nullptr, nullptr, 0));
+    });
+    measure(c, "파이프라인, 트랜잭션 하나", [&] {
+        PQenterPipelineMode(c);
+        PQsendQueryParams(c, "BEGIN", 0, nullptr, nullptr, nullptr, nullptr, 0);
+        for (int i = 0; i < N; ++i) {
+            std::string id = std::to_string(i), name = name_of(i);
+            const char* v[] = {id.c_str(), name.c_str()};
+            PQsendQueryPrepared(c, "ins", 2, v, nullptr, nullptr, 0);
+        }
+        PQsendQueryParams(c, "COMMIT", 0, nullptr, nullptr, nullptr, nullptr, 0);
+        PQpipelineSync(c);
+        for (;;) {
+            PGresult* r = PQgetResult(c);
+            if (r == nullptr) continue;
+            bool sync = PQresultStatus(r) == PGRES_PIPELINE_SYNC;
+            PQclear(r);
+            if (sync) break;
+        }
+        PQexitPipelineMode(c);
+    });
+    measure(c, "COPY FROM STDIN", [&] {
+        exec(c, "COPY bt_parts FROM STDIN");          // 텍스트 형식: 탭과 줄바꿈
+        std::string buf;
+        for (int i = 0; i < N; ++i) {
+            buf += std::to_string(i);
+            buf += '\t';
+            append_copy(buf, name_of(i));
+            buf += '\n';
+            if (buf.size() > 64 * 1024 || i == N - 1) {
+                PQputCopyData(c, buf.data(), int(buf.size()));
+                buf.clear();
+            }
+        }
+        PQputCopyEnd(c, nullptr);
+        while (PGresult* r = PQgetResult(c)) PQclear(r);   // COPY의 성패
+    });
+    PQfinish(c);
+}
+```
+
+```text nocheck
+한 행씩, 행마다 커밋        3801.7 ms  (20000행)
+한 행씩, 트랜잭션 하나      1068.7 ms  (20000행)
+여러 행 VALUES (500행씩)      45.6 ms  (20000행)
+배열 두 개를 unnest           28.4 ms  (20000행)
+파이프라인, 트랜잭션 하나     65.4 ms  (20000행)
+COPY FROM STDIN               17.8 ms  (20000행)
+```
+
+- **커밋이 가장 비싸다**: 행마다 커밋하면 2만 번 WAL을 디스크에 쓰고 기다려 3.8초가 걸렸습니다. 트랜잭션 하나로 묶자 1.07초로 줄었습니다
+- **왕복을 줄인다**: 트랜잭션 하나여도 문장 2만 개는 왕복 2만 번입니다. 한 문장에 500행씩 `VALUES`를 이어 붙이자 46ms가 되었습니다. 매개변수는 여전히 묶었고, 한 문장의 매개변수는 프로토콜이 16비트로 세므로 65535개를 넘을 수 없습니다
+- **배열 하나로**: 열마다 배열 하나를 만들어 `unnest`로 풀면 행 수와 상관없이 매개변수 두 개짜리 문장 하나가 됩니다(28ms). 배열 글자 안에서 큰따옴표와 역슬래시는 이스케이프해야 합니다
+- **파이프라인**: 왕복은 없어졌지만 2만 개의 문장을 하나씩 실행하는 일은 남아 65ms였습니다([「비동기 쿼리」](#/read/cpp-database/pool-async))
+- **COPY**: 대량으로 넣기 위한 전용 길이라 문장이 하나뿐이고 18ms로 가장 빨랐습니다. 텍스트 형식에서는 탭, 줄바꿈, 역슬래시를 이스케이프하고 NULL은 `\N`으로 적습니다. 처음에는 행마다 새 문자열을 만들어 돌려주는 이스케이프 함수를 썼는데 COPY가 두 배 느려졌습니다. 이 규모에서는 클라이언트가 데이터를 만드는 비용도 서버만큼 중요합니다
+
+## COPY를 쓸 때
+
+COPY는 한 행이라도 실패하면 전체가 되돌려지고, `ON CONFLICT`나 `RETURNING`을 쓸 수 없습니다. 중복을 다뤄야 하면 임시 테이블에 COPY한 뒤 `INSERT ... SELECT ... ON CONFLICT`로 옮깁니다. PostgreSQL 17부터는 `ON_ERROR ignore`로 형 변환에 실패한 행만 건너뛸 수 있고, 18부터는 `REJECT_LIMIT`으로 건너뛸 행 수에 끝을 둡니다. SQLite는 네트워크 왕복이 없어서 트랜잭션 하나와 준비된 문장이면 대부분 충분합니다([「트랜잭션」](#/read/cpp-database/sqlite-tx)). MySQL과 MariaDB는 여러 행 INSERT와 `LOAD DATA`를 쓰는데, 한 문장의 크기는 `max_allowed_packet`을 넘을 수 없습니다.
+
+<Note>
+아주 많이 넣을 때는 인덱스와 외래 키를 잠시 지웠다가 넣은 뒤 다시 만드는 편이 빠르기도 합니다. 행마다 인덱스를 고치는 것보다 한 번에 만드는 것이 싸기 때문입니다. 다 넣은 뒤에는 `ANALYZE`로 통계를 새로 만들어야 플래너가 바뀐 크기를 압니다([「실행 계획 읽기」](#/read/cpp-database/dbperf-plan)).
+</Note>
+
+## 정리
+
+- 행마다 커밋하지 말고 트랜잭션으로 묶으며, 그다음 비용인 왕복은 여러 행 VALUES, 배열 unnest, 파이프라인으로 줄인다
+- 가장 빠른 COPY는 텍스트 형식의 이스케이프를 지키고, 실패하면 전체가 되돌려지므로 중복 처리는 임시 테이블을 거친다
+- 클라이언트가 데이터를 만드는 비용과 인덱스 유지 비용도 재 보고, 다 넣은 뒤에는 ANALYZE한다
