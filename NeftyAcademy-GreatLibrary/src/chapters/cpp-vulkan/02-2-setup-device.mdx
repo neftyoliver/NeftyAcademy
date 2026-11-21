@@ -1,0 +1,187 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '물리 장치와 논리 장치: 장치 고르기와 점수, 큐 받기, 기능을 묻고 켜기, portability_subset, vkx_device';
+
+물리 장치(`VkPhysicalDevice`)는 기계에 꽂힌 GPU 하나이고, 인스턴스에서 나열해 얻습니다. 이름, 종류, 지원하는 판, 한계값, 기능, 메모리, 큐 패밀리를 물어볼 수 있을 뿐 만들거나 없애지 않습니다. 실제 일은 그 장치로 만든 **논리 장치**(`VkDevice`)에 시킵니다. 논리 장치를 만들 때 큐를 몇 개 쓸지, 어떤 장치 확장과 기능을 켤지 정하고, 그 밖의 것은 쓸 수 없습니다. 이 쪽의 `vkx_device.hpp`는 [「인스턴스와 확장」](#/read/cpp-vulkan/setup-instance)의 도우미 위에 얹혀, 장치를 고르고 논리 장치와 큐를 만들어 줍니다.
+
+## 장치를 고르고 만드는 도우미
+
+```cpp vk file=vkx_device.hpp with=vkx_instance.hpp
+#pragma once
+#include "vkx_instance.hpp"
+
+namespace vkx {
+
+struct Device {
+    VkPhysicalDevice gpu = VK_NULL_HANDLE;
+    VkDevice handle = VK_NULL_HANDLE;
+    uint32_t family = 0;                  // 그래픽과 컴퓨트를 함께 하는 큐 패밀리
+    VkQueue queue = VK_NULL_HANDLE;
+    VkPhysicalDeviceProperties props{};
+    VkPhysicalDeviceMemoryProperties memory{};
+};
+
+inline bool has_device_extension(VkPhysicalDevice gpu, const char* name) {
+    uint32_t n = 0;
+    vkEnumerateDeviceExtensionProperties(gpu, nullptr, &n, nullptr);
+    std::vector<VkExtensionProperties> all(n);
+    vkEnumerateDeviceExtensionProperties(gpu, nullptr, &n, all.data());
+    for (auto& e : all)
+        if (std::strcmp(e.extensionName, name) == 0) return true;
+    return false;
+}
+
+// 따로 꽂는 GPU를 가장 높이 친다. 1.3이 안 되거나 확장이 모자라면 -1
+inline int score(VkPhysicalDevice gpu, const std::vector<const char*>& extensions) {
+    VkPhysicalDeviceProperties p;
+    vkGetPhysicalDeviceProperties(gpu, &p);
+    if (p.apiVersion < VK_API_VERSION_1_3) return -1;
+    for (const char* e : extensions)
+        if (!has_device_extension(gpu, e)) return -1;
+    switch (p.deviceType) {
+        case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return 4;
+        case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return 3;
+        case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: return 2;
+        default: return 1;                                  // CPU 구현 등
+    }
+}
+
+// 가장 좋은 장치로 논리 장치를 만든다. extra에는 더 켤 기능 구조체를 엮어 준다
+inline Device make_device(VkInstance instance,
+                          std::vector<const char*> extensions = {},
+                          void* extra = nullptr) {
+    uint32_t n = 0;
+    vkEnumeratePhysicalDevices(instance, &n, nullptr);
+    std::vector<VkPhysicalDevice> gpus(n);
+    vkEnumeratePhysicalDevices(instance, &n, gpus.data());
+    Device d;
+    int best = -1;
+    for (VkPhysicalDevice g : gpus)
+        if (int s = score(g, extensions); s > best) best = s, d.gpu = g;
+    if (best < 0) check(VK_ERROR_FEATURE_NOT_PRESENT, "쓸 만한 GPU 찾기");
+    vkGetPhysicalDeviceProperties(d.gpu, &d.props);
+    vkGetPhysicalDeviceMemoryProperties(d.gpu, &d.memory);
+
+    uint32_t nf = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(d.gpu, &nf, nullptr);
+    std::vector<VkQueueFamilyProperties> families(nf);
+    vkGetPhysicalDeviceQueueFamilyProperties(d.gpu, &nf, families.data());
+    const VkQueueFlags need = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
+    while (d.family < nf && (families[d.family].queueFlags & need) != need)
+        ++d.family;
+    if (d.family == nf) check(VK_ERROR_FEATURE_NOT_PRESENT, "큐 패밀리 찾기");
+    if (has_device_extension(d.gpu, "VK_KHR_portability_subset"))
+        extensions.push_back("VK_KHR_portability_subset");   // MoltenVK에서는 필수
+
+    // 지원하는 기능을 묻고, 그 가운데 이 책이 쓰는 것만 켠다
+    VkPhysicalDeviceVulkan13Features s13{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+    VkPhysicalDeviceVulkan12Features s12{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+        .pNext = &s13};
+    VkPhysicalDeviceVulkan11Features s11{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+        .pNext = &s12};
+    VkPhysicalDeviceFeatures2 s{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &s11};
+    vkGetPhysicalDeviceFeatures2(d.gpu, &s);
+    VkPhysicalDeviceVulkan13Features f13{.sType = s13.sType, .pNext = extra};
+    VkPhysicalDeviceVulkan12Features f12{.sType = s12.sType, .pNext = &f13};
+    VkPhysicalDeviceVulkan11Features f11{.sType = s11.sType, .pNext = &f12};
+    VkPhysicalDeviceFeatures2 f{.sType = s.sType, .pNext = &f11};
+#define VKX_ON(to, from, name) to.name = from.name   // 지원하면 켜진다
+    VKX_ON(f13, s13, dynamicRendering);
+    VKX_ON(f13, s13, synchronization2);
+    VKX_ON(f13, s13, maintenance4);
+    VKX_ON(f12, s12, timelineSemaphore);
+    VKX_ON(f12, s12, bufferDeviceAddress);
+    VKX_ON(f12, s12, scalarBlockLayout);
+    VKX_ON(f12, s12, hostQueryReset);
+    VKX_ON(f12, s12, drawIndirectCount);
+    VKX_ON(f12, s12, descriptorIndexing);
+    VKX_ON(f12, s12, runtimeDescriptorArray);
+    VKX_ON(f12, s12, descriptorBindingPartiallyBound);
+    VKX_ON(f12, s12, descriptorBindingVariableDescriptorCount);
+    VKX_ON(f12, s12, shaderSampledImageArrayNonUniformIndexing);
+    VKX_ON(f11, s11, shaderDrawParameters);
+    VKX_ON(f.features, s.features, samplerAnisotropy);
+    VKX_ON(f.features, s.features, multiDrawIndirect);
+    VKX_ON(f.features, s.features, drawIndirectFirstInstance);
+    VKX_ON(f.features, s.features, sampleRateShading);
+    VKX_ON(f.features, s.features, pipelineStatisticsQuery);
+    VKX_ON(f.features, s.features, textureCompressionBC);
+#undef VKX_ON
+
+    float priority = 1.0f;
+    VkDeviceQueueCreateInfo qci{.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                                .queueFamilyIndex = d.family, .queueCount = 1,
+                                .pQueuePriorities = &priority};
+    VkDeviceCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+                          .pNext = &f,   // pEnabledFeatures 대신 사슬로
+                          .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
+                          .enabledExtensionCount = uint32_t(extensions.size()),
+                          .ppEnabledExtensionNames = extensions.data()};
+    check(vkCreateDevice(d.gpu, &ci, nullptr, &d.handle), "vkCreateDevice");
+    vkGetDeviceQueue(d.handle, d.family, 0, &d.queue);
+    return d;
+}
+
+inline void destroy(Device& d) { vkDestroyDevice(d.handle, nullptr); }
+
+}  // namespace vkx
+```
+
+- **점수로 고르기**: 노트북에는 내장 GPU와 따로 꽂는 GPU가 함께 있는 일이 흔합니다. 필요한 판이나 확장이 없는 장치는 -1로 빼고, 남은 것 가운데 따로 꽂는 GPU를 가장 높이 칩니다. 실제 프로그램은 사용자가 고를 수 있게 해 두는 것이 좋습니다
+- **큐는 만들지 않고 받는다**: 큐는 논리 장치를 만들 때 패밀리와 개수를 적어 두면 함께 생기고, `vkGetDeviceQueue`로 꺼냅니다. 여기서는 그래픽과 컴퓨트를 함께 하는 패밀리의 큐 하나만 씁니다([「큐 패밀리」](#/read/cpp-vulkan/setup-queues))
+- **묻고 나서 켜기**: `vkGetPhysicalDeviceFeatures2`로 받은 지원 여부를 그대로 복사해 켜므로, 지원하지 않는 기능은 꺼진 채로 남습니다. 1.3을 지원하는 장치는 동적 렌더링, synchronization2, maintenance4를 반드시 지원하므로 `score`가 판만 보아도 이 책의 기본은 갖춰집니다. 디스크립터 인덱싱처럼 선택인 기능은 쓰는 쪽에서 다시 확인합니다([「바인드리스」](#/read/cpp-vulkan/desc-bindless))
+- **모두 켜지 않는 까닭**: 지원하는 기능을 몽땅 켜는 것도 가능하지만, `robustBufferAccess`처럼 켜기만 해도 느려질 수 있는 기능이 있어서 명세도 신중하라고 권합니다. 쓰는 것만 켭니다
+- **extra와 portability_subset**: 레이 트레이싱처럼 확장에 딸린 기능은 그 구조체를 `extra`로 넘겨 사슬 끝에 붙입니다. MoltenVK처럼 `VK_KHR_portability_subset`을 알리는 장치에서는 이 확장을 반드시 켜야 하므로 저절로 더합니다
+
+## 장치 살펴보기
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp
+#include "vkx_device.hpp"
+
+int main() {
+    vkx::Instance inst = vkx::make_instance();
+    uint32_t n = 0;
+    vkEnumeratePhysicalDevices(inst.handle, &n, nullptr);
+    std::vector<VkPhysicalDevice> gpus(n);
+    vkEnumeratePhysicalDevices(inst.handle, &n, gpus.data());
+    const char* kinds[] = {"기타", "내장 GPU", "따로 꽂는 GPU", "가상 GPU", "CPU"};
+    for (VkPhysicalDevice g : gpus) {
+        VkPhysicalDeviceProperties p;
+        vkGetPhysicalDeviceProperties(g, &p);
+        std::printf("%s: %s, 점수 %d\n", kinds[p.deviceType], p.deviceName,
+                    vkx::score(g, {}));
+        std::printf("  레이 트레이싱 확장을 요구하면 점수 %d\n",
+                    vkx::score(g, {VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME}));
+        std::printf("  NVIDIA 전용 확장을 요구하면 점수 %d\n",
+                    vkx::score(g, {VK_NV_MESH_SHADER_EXTENSION_NAME}));
+    }
+    vkx::Device dev = vkx::make_device(inst.handle);
+    std::printf("논리 장치를 만들고 큐 패밀리 %u의 0번 큐를 받음\n", dev.family);
+    vkx::destroy(dev);
+    vkx::destroy(inst);
+}
+```
+
+```text
+CPU: llvmpipe (LLVM 20.1.2, 256 bits), 점수 1
+  레이 트레이싱 확장을 요구하면 점수 1
+  NVIDIA 전용 확장을 요구하면 점수 -1
+논리 장치를 만들고 큐 패밀리 0의 0번 큐를 받음
+```
+
+- **lavapipe는 CPU 장치**: 이 기계에는 GPU가 없어 CPU 구현 하나만 보입니다. GPU가 있는 기계라면 그 GPU가 4점이나 3점으로 먼저 뽑힙니다
+- **확장은 장치마다**: 레이 트레이싱 확장은 lavapipe도 지원해서 점수가 그대로였고, NVIDIA 전용 메시 셰이더 확장(`VK_NV_mesh_shader`)은 없어 -1이 되었습니다. 장치 확장은 `vkEnumerateDeviceExtensionProperties`로 장치마다 따로 묻습니다
+
+<Note>
+리눅스에서 여러 GPU가 보일 때는 Mesa의 장치 선택 레이어가 나열 순서를 바꿔 주기도 합니다. `MESA_VK_DEVICE_SELECT=list`로 실행하면 장치 목록과 `10005:0` 같은 회사:장치 번호를 보여 주고, 그 번호를 같은 변수에 주면 그 장치가 맨 앞에 옵니다. 윈도우에서는 그래픽 설정에서 프로그램마다 GPU를 고를 수 있어서, 나열 순서만 믿고 첫 장치를 쓰면 의도와 다른 GPU에서 돌 수 있습니다.
+</Note>
+
+## 정리
+
+- 물리 장치는 나열해서 묻기만 하는 GPU이고, 판·확장·종류로 점수를 매겨 고른 뒤 그것으로 논리 장치를 만들며, 큐는 논리 장치와 함께 생긴 것을 받는다
+- 기능은 Features2와 1.1·1.2·1.3 구조체 사슬로 지원 여부를 묻고, 그중 쓰는 것만 같은 사슬로 켜며, 확장에 딸린 기능은 사슬 끝에 덧붙인다
+- vkx_device.hpp의 make_device는 장치 고르기, 그래픽·컴퓨트 큐 패밀리, 기본 기능 켜기, portability_subset까지 맡는다

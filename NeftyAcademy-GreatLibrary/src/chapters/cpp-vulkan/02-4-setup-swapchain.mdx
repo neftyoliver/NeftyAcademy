@@ -1,0 +1,198 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '표면과 스왑체인: 창을 잇는 표면, 크기·포맷·내보내기 방식, 이미지와 뷰, 이미지 받기, vkx_swapchain';
+
+벌칸에는 "화면"이라는 개념이 핵심에 없습니다. 창은 **표면**(`VkSurfaceKHR`)이라는 인스턴스 객체로 이어 붙이고, 화면에 내보낼 이미지 몇 장은 **스왑체인**(`VkSwapchainKHR`)이 가집니다. 프로그램은 스왑체인에서 이미지 한 장을 받아(acquire) 그리고, 다 그리면 돌려주며 내보내 달라고(present) 합니다. 이 쪽의 `vkx_swapchain.hpp`는 창 없이도 돌도록 헤드리스 표면을 쓰고, 표면에 맞춰 스왑체인과 이미지 뷰를 만듭니다.
+
+## 스왑체인을 만드는 도우미
+
+```cpp vk file=vkx_swapchain.hpp with=vkx_instance.hpp,vkx_device.hpp
+#pragma once
+#include "vkx_device.hpp"
+#include <algorithm>
+
+namespace vkx {
+
+// 창 없이 쓰는 표면. 창이 있으면 이 자리에 glfwCreateWindowSurface 같은 것이 온다
+inline VkSurfaceKHR make_headless_surface(VkInstance instance) {
+    auto create = reinterpret_cast<PFN_vkCreateHeadlessSurfaceEXT>(
+        vkGetInstanceProcAddr(instance, "vkCreateHeadlessSurfaceEXT"));
+    VkHeadlessSurfaceCreateInfoEXT ci{
+        .sType = VK_STRUCTURE_TYPE_HEADLESS_SURFACE_CREATE_INFO_EXT};
+    VkSurfaceKHR surface;
+    check(create(instance, &ci, nullptr, &surface), "헤드리스 표면 만들기");
+    return surface;
+}
+
+// sRGB로 인코딩해 주는 8비트 포맷이 있으면 그것을, 없으면 첫 포맷을 고른다
+inline VkSurfaceFormatKHR choose_format(VkPhysicalDevice gpu,
+                                        VkSurfaceKHR surface) {
+    uint32_t n = 0;
+    vkGetPhysicalDeviceSurfaceFormatsKHR(gpu, surface, &n, nullptr);
+    std::vector<VkSurfaceFormatKHR> all(n);
+    vkGetPhysicalDeviceSurfaceFormatsKHR(gpu, surface, &n, all.data());
+    for (VkSurfaceFormatKHR f : all) {
+        bool srgb = f.format == VK_FORMAT_B8G8R8A8_SRGB ||
+                    f.format == VK_FORMAT_R8G8B8A8_SRGB;
+        if (srgb && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) return f;
+    }
+    return all[0];
+}
+
+struct Swapchain {
+    VkSwapchainKHR handle = VK_NULL_HANDLE;
+    VkSurfaceFormatKHR format{};
+    VkExtent2D extent{};
+    std::vector<VkImage> images;          // 스왑체인의 것이라 없애지 않는다
+    std::vector<VkImageView> views;       // 그리기에 쓸 뷰(우리가 만들고 없앤다)
+};
+
+// want는 표면이 크기를 정하지 않을 때 쓸 크기. old를 주면 새 스왑체인으로 갈아탄다
+inline Swapchain make_swapchain(const Device& d, VkSurfaceKHR surface,
+                                VkExtent2D want,
+                                VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR,
+                                VkSwapchainKHR old = VK_NULL_HANDLE) {
+    VkBool32 can_present = VK_FALSE;
+    vkGetPhysicalDeviceSurfaceSupportKHR(d.gpu, d.family, surface, &can_present);
+    if (!can_present) check(VK_ERROR_FEATURE_NOT_PRESENT, "이 큐로 내보내기");
+    VkSurfaceCapabilitiesKHR caps;
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(d.gpu, surface, &caps);
+    Swapchain s;
+    s.format = choose_format(d.gpu, surface);
+    s.extent = caps.currentExtent;
+    if (s.extent.width == UINT32_MAX) {   // 0xFFFFFFFF: 크기를 스왑체인이 정한다
+        s.extent.width = std::clamp(want.width, caps.minImageExtent.width,
+                                    caps.maxImageExtent.width);
+        s.extent.height = std::clamp(want.height, caps.minImageExtent.height,
+                                     caps.maxImageExtent.height);
+    }
+    uint32_t count = caps.minImageCount + 1;  // 하나 더 두어 기다림을 줄인다
+    if (caps.maxImageCount != 0) count = std::min(count, caps.maxImageCount);
+    VkSwapchainCreateInfoKHR ci{
+        .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+        .surface = surface, .minImageCount = count,
+        .imageFormat = s.format.format, .imageColorSpace = s.format.colorSpace,
+        .imageExtent = s.extent, .imageArrayLayers = 1,
+        .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                      VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .preTransform = caps.currentTransform,
+        .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        .presentMode = mode, .clipped = VK_TRUE, .oldSwapchain = old};
+    check(vkCreateSwapchainKHR(d.handle, &ci, nullptr, &s.handle), "스왑체인");
+    vkGetSwapchainImagesKHR(d.handle, s.handle, &count, nullptr);
+    s.images.resize(count);
+    vkGetSwapchainImagesKHR(d.handle, s.handle, &count, s.images.data());
+    for (VkImage image : s.images) {
+        VkImageViewCreateInfo vci{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = image,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = s.format.format,
+            .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        VkImageView view;
+        check(vkCreateImageView(d.handle, &vci, nullptr, &view), "이미지 뷰");
+        s.views.push_back(view);
+    }
+    return s;
+}
+
+inline void destroy(const Device& d, Swapchain& s) {
+    for (VkImageView v : s.views) vkDestroyImageView(d.handle, v, nullptr);
+    vkDestroySwapchainKHR(d.handle, s.handle, nullptr);
+}
+
+}  // namespace vkx
+```
+
+- **표면은 창 시스템 확장으로**: 실제 창이라면 `vkCreateWin32SurfaceKHR` 같은 함수나 GLFW의 `glfwCreateWindowSurface`가 표면을 만들고, 그다음은 이 도우미와 같습니다. 스왑체인은 장치 확장 `VK_KHR_swapchain`을 켜야 씁니다
+- **크기**: 윈도우나 X11에서는 `currentExtent`가 창 크기로 정해져 오고, 웨이랜드나 헤드리스처럼 0xFFFFFFFF가 오면 허용 범위 안에서 프로그램이 정합니다
+- **포맷**: `_SRGB` 포맷은 셰이더가 쓴 선형 색을 하드웨어가 sRGB로 바꿔 저장해 주므로 먼저 찾습니다. 없으면 셰이더에서 직접 감마를 입히거나 후처리 마지막에 바꿉니다([「후처리」](#/read/cpp-vulkan/tech-post))
+- **이미지 수**: 최소보다 한 장 더 두면 표시 엔진을 기다리는 일이 줄어듭니다
+- **이미지와 뷰**: 이미지는 스왑체인의 것이라 없애지 않고, 그리기에 쓸 이미지 뷰만 만들고 없앱니다. 창 크기가 바뀌면 `oldSwapchain`에 옛것을 넘겨 새로 만듭니다
+
+## 표면에 물어보기
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp,vkx_swapchain.hpp
+#include "vkx_swapchain.hpp"
+
+const char* format_name(VkFormat f) {
+    switch (f) {
+        case VK_FORMAT_R8G8B8A8_UNORM: return "R8G8B8A8_UNORM";
+        case VK_FORMAT_R8G8B8A8_SRGB: return "R8G8B8A8_SRGB";
+        case VK_FORMAT_B8G8R8A8_UNORM: return "B8G8R8A8_UNORM";
+        case VK_FORMAT_B8G8R8A8_SRGB: return "B8G8R8A8_SRGB";
+        default: return "그 밖의 포맷";
+    }
+}
+
+int main() {
+    vkx::Instance inst = vkx::make_instance(
+        {VK_KHR_SURFACE_EXTENSION_NAME, VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME});
+    VkSurfaceKHR surface = vkx::make_headless_surface(inst.handle);
+    vkx::Device dev =
+        vkx::make_device(inst.handle, {VK_KHR_SWAPCHAIN_EXTENSION_NAME});
+
+    VkSurfaceCapabilitiesKHR caps;
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(dev.gpu, surface, &caps);
+    bool free_size = caps.currentExtent.width == UINT32_MAX;
+    std::printf("이미지 %u장 이상, 최대 %u장(0이면 제한 없음), 현재 크기 %s\n",
+                caps.minImageCount, caps.maxImageCount,
+                free_size ? "정해지지 않음" : "정해짐");
+    uint32_t n = 0;
+    vkGetPhysicalDeviceSurfaceFormatsKHR(dev.gpu, surface, &n, nullptr);
+    std::vector<VkSurfaceFormatKHR> formats(n);
+    vkGetPhysicalDeviceSurfaceFormatsKHR(dev.gpu, surface, &n, formats.data());
+    for (VkSurfaceFormatKHR f : formats)
+        std::printf("  포맷 %s\n", format_name(f.format));
+    vkGetPhysicalDeviceSurfacePresentModesKHR(dev.gpu, surface, &n, nullptr);
+    std::vector<VkPresentModeKHR> modes(n);
+    vkGetPhysicalDeviceSurfacePresentModesKHR(dev.gpu, surface, &n, modes.data());
+    const char* mode_names[] = {"IMMEDIATE", "MAILBOX", "FIFO", "FIFO_RELAXED"};
+    VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;     // 모든 장치가 지원한다
+    for (VkPresentModeKHR m : modes) {
+        std::printf("  내보내기 방식 %s\n", m <= 3 ? mode_names[m] : "그 밖의 것");
+        if (m == VK_PRESENT_MODE_MAILBOX_KHR) mode = m;   // 있으면 지연이 짧은 쪽
+    }
+
+    vkx::Swapchain sc = vkx::make_swapchain(dev, surface, {640, 480}, mode);
+    std::printf("스왑체인: %s, %u×%u, %s, 이미지 %zu장\n",
+                format_name(sc.format.format), sc.extent.width, sc.extent.height,
+                mode_names[mode], sc.images.size());
+    VkFenceCreateInfo fci{.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    VkFence acquired;
+    vkCreateFence(dev.handle, &fci, nullptr, &acquired);
+    uint32_t index = 0;
+    VkResult r = vkAcquireNextImageKHR(dev.handle, sc.handle, UINT64_MAX,
+                                       VK_NULL_HANDLE, acquired, &index);
+    vkWaitForFences(dev.handle, 1, &acquired, VK_TRUE, UINT64_MAX);
+    std::printf("vkAcquireNextImageKHR → %d, 이미지 %u번을 받음\n", r, index);
+    vkDestroyFence(dev.handle, acquired, nullptr);
+    vkx::destroy(dev, sc);
+    vkx::destroy(dev);
+    vkDestroySurfaceKHR(inst.handle, surface, nullptr);
+    vkx::destroy(inst);
+}
+```
+
+```text
+이미지 4장 이상, 최대 0장(0이면 제한 없음), 현재 크기 정해지지 않음
+  포맷 R8G8B8A8_UNORM
+  포맷 B8G8R8A8_UNORM
+  내보내기 방식 MAILBOX
+  내보내기 방식 FIFO
+스왑체인: R8G8B8A8_UNORM, 640×480, MAILBOX, 이미지 5장
+vkAcquireNextImageKHR → 0, 이미지 0번을 받음
+```
+
+- **sRGB가 없는 표면**: lavapipe의 헤드리스 표면은 `_UNORM` 포맷 둘만 알려 주어 첫 포맷이 골라졌습니다. 실제 창에서는 대개 `B8G8R8A8_SRGB`가 있습니다
+- **내보내기 방식**: `FIFO`는 수직 동기에 맞춰 차례대로 보여 주는 줄이라 모든 장치가 지원하고 화면이 찢어지지 않습니다. `MAILBOX`는 기다리는 이미지를 새것으로 바꿔치기해 지연이 짧고 찢어짐도 없지만 버리는 프레임만큼 전기를 더 씁니다. `IMMEDIATE`는 기다리지 않아 찢어질 수 있고, `FIFO_RELAXED`는 늦은 프레임만 바로 내보냅니다. 배터리가 중요한 기기에서는 `FIFO`가 좋습니다
+- **받은 번호는 순서대로가 아니다**: `vkAcquireNextImageKHR`가 돌려주는 번호는 표시 엔진 사정에 따라 정해집니다. 함수가 돌아온 순간에도 이미지는 아직 표시 중일 수 있어서, 넘겨준 펜스나 세마포어가 신호를 받은 뒤에만 그 이미지를 씁니다([「펜스와 세마포어」](#/read/cpp-vulkan/tri-sync))
+
+<Note>
+받기와 내보내기는 창 상태가 바뀐 것도 알려 줍니다. `VK_SUBOPTIMAL_KHR`는 쓸 수는 있지만 다시 만드는 편이 좋다는 뜻이고, `VK_ERROR_OUT_OF_DATE_KHR`는 더는 쓸 수 없다는 뜻이라 스왑체인을 다시 만듭니다([「프레임 루프」](#/read/cpp-vulkan/tri-loop)). 창을 최소화해 크기가 0×0이 되면 스왑체인을 만들 수 없으므로, 창이 다시 커질 때까지 그리기를 멈춥니다.
+</Note>
+
+## 정리
+
+- 창은 창 시스템 확장으로 만든 표면이 잇고, 스왑체인은 VK_KHR_swapchain으로 그 표면에 내보낼 이미지 몇 장을 가진다
+- 크기는 currentExtent가 0xFFFFFFFF일 때만 정하고, 포맷은 _SRGB를 먼저 찾으며, 내보내기 방식은 늘 있는 FIFO를 기본으로 지연이 중요하면 MAILBOX를 쓴다
+- 받은 이미지 번호는 순서가 없고 신호를 받은 뒤에만 쓰며, SUBOPTIMAL이나 OUT_OF_DATE가 오면 oldSwapchain을 넘겨 다시 만든다
