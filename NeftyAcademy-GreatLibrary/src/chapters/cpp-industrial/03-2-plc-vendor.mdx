@@ -1,0 +1,160 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '제조사 프로토콜: S7, Logix, MC, FINS의 차이, S7 주소 해석과 빅 엔디언 데이터, Snap7과 libplctag';
+
+PLC가 [「Modbus RTU와 TCP」](#/read/cpp-industrial/fb-modbus)나 [「OPC UA」](#/read/cpp-industrial/fb-opcua)를 지원하면 그것을 쓰는 것이 가장 편합니다. 하지만 현장의 오래된 PLC는 대개 제조사 고유의 프로토콜만 말합니다. 그 프로토콜로 PLC 메모리를 직접 읽고 쓰는 일이 PC 쪽 프로그램을 짤 때 자주 생깁니다.
+
+| 제조사 | 프로토콜 | 포트 | 참고 |
+| --- | --- | --- | --- |
+| 지멘스 S7 | S7comm(ISO-on-TCP 위) | TCP 102 | Snap7 |
+| 로크웰 Logix | EtherNet/IP의 CIP 태그 서비스 | TCP 44818 | libplctag |
+| 미쓰비시 MELSEC | MC 프로토콜(SLMP) | PLC에서 설정 | 공개 사양서 |
+| 오므론 | FINS | UDP 9600 | 공개 사양서 |
+
+가장 큰 차이는 **주소를 어떻게 가리키는가**입니다. 지멘스, 미쓰비시, 오므론은 `DB10.DBW4`, `D100`, `DM100`처럼 메모리 영역과 번호로 가리키고, 로크웰 Logix는 `Line1_Speed`처럼 **태그 이름**으로 가리킵니다. 두 번째 차이는 **바이트 순서**입니다. 지멘스와 오므론은 큰 쪽 바이트를 먼저 두고, 미쓰비시 MC의 바이너리 형식과 로크웰은 작은 쪽을 먼저 둡니다.
+
+## S7 주소와 데이터 블록
+
+지멘스 PLC에서 가장 많이 읽는 것은 데이터 블록(DB)입니다. 주소를 해석하는 함수와, DB에서 읽어 온 바이트를 값으로 바꾸는 함수를 짰습니다.
+
+```cpp
+// 지멘스 S7의 절대 주소를 해석하고, 데이터 블록에서 읽은 바이트를 값으로 바꾼다
+#include <bit>
+#include <charconv>
+#include <cstdint>
+#include <cstdio>
+#include <optional>
+#include <string>
+#include <string_view>
+
+struct S7Address {
+    // 'D' 데이터 블록, 'M' 비트 메모리, 'I' 입력, 'Q' 출력
+    char area;
+    int db = 0, byte = 0, bit = -1;  // bit가 -1이면 비트가 아닌 주소
+    int size = 1;                    // 바이트 수
+};
+
+// 앞에서부터 숫자 하나를 읽는다
+bool number(std::string_view& s, int& out) {
+    auto [p, ec] = std::from_chars(s.data(), s.data() + s.size(), out);
+    if (ec != std::errc{}) return false;
+    s.remove_prefix(p - s.data());
+    return true;
+}
+
+// "DB10.DBX6.3", "DB10.DBW0", "MW20", "Q1.2" 같은 주소를 해석한다
+std::optional<S7Address> parse(std::string_view s) {
+    S7Address a{};
+    if (s.starts_with("DB")) {
+        s.remove_prefix(2);
+        if (!number(s, a.db) || !s.starts_with(".DB")) return std::nullopt;
+        s.remove_prefix(3);
+        a.area = 'D';
+    } else if (!s.empty() && (s[0] == 'M' || s[0] == 'I' || s[0] == 'Q')) {
+        a.area = s[0];
+        s.remove_prefix(1);
+    } else {
+        return std::nullopt;
+    }
+    // X 비트, B 바이트, W 워드, D 더블 워드
+    char kind = 'X';
+    if (!s.empty() && (s[0] == 'X' || s[0] == 'B' || s[0] == 'W' || s[0] == 'D')) {
+        kind = s[0];
+        s.remove_prefix(1);
+    }
+    if (!number(s, a.byte)) return std::nullopt;
+    a.size = kind == 'W' ? 2 : kind == 'D' ? 4 : 1;
+    if (kind == 'X') {                           // 비트 주소는 .0~.7이 꼭 붙는다
+        if (s.size() != 2 || s[0] != '.' || s[1] < '0' || s[1] > '7')
+            return std::nullopt;
+        a.bit = s[1] - '0';
+        s.remove_prefix(2);
+    }
+    if (!s.empty()) return std::nullopt;
+    return a;
+}
+
+// S7은 큰 쪽 바이트를 먼저 둔다(빅 엔디언)
+int16_t i16(const uint8_t* p) { return int16_t(p[0] << 8 | p[1]); }
+int32_t i32(const uint8_t* p) {
+    return int32_t(uint32_t(p[0]) << 24 | p[1] << 16 | p[2] << 8 | p[3]);
+}
+float real(const uint8_t* p) { return std::bit_cast<float>(i32(p)); }
+std::string s7string(const uint8_t* p) {   // [최대 길이][현재 길이][글자...]
+    return std::string(reinterpret_cast<const char*>(p + 2), p[1]);
+}
+
+int main() {
+    for (const char* text :
+         {"DB10.DBW0", "DB10.DBD2", "DB10.DBX6.3", "MW20", "Q1.2", "DB10.DBX6"}) {
+        if (auto a = parse(text))
+            std::printf("%-12s 영역 %c, DB %d, 바이트 %d, 비트 %d, %d바이트\n",
+                        text, a->area, a->db, a->byte, a->bit, a->size);
+        else
+            std::printf("%-12s 잘못된 주소\n", text);
+    }
+
+    // DB10을 0번부터 20바이트 읽어 왔다고 하자(Snap7의 DBRead가 돌려주는 모양)
+    const uint8_t db10[20] = {
+        0x04, 0xD2,                                // 0: INT 계수
+        0x42, 0x91, 0x00, 0x00,                    // 2: REAL 온도
+        0x08, 0x00,                                // 6.3: BOOL 운전 중
+        10, 6, 'L', 'I', 'N', 'E', '-', 'A', 0, 0, 0, 0};   // 8: STRING[10] 이름
+    std::printf("계수 %d (작은 쪽 먼저로 잘못 읽으면 %d)\n", i16(db10),
+                int16_t(db10[0] | db10[1] << 8));
+    std::printf("온도 %.1f, 운전 중 %d, 이름 \"%s\"\n", real(db10 + 2),
+                (db10[6] >> 3) & 1, s7string(db10 + 8).c_str());
+}
+```
+
+```text
+DB10.DBW0    영역 D, DB 10, 바이트 0, 비트 -1, 2바이트
+DB10.DBD2    영역 D, DB 10, 바이트 2, 비트 -1, 4바이트
+DB10.DBX6.3  영역 D, DB 10, 바이트 6, 비트 3, 1바이트
+MW20         영역 M, DB 0, 바이트 20, 비트 -1, 2바이트
+Q1.2         영역 Q, DB 0, 바이트 1, 비트 2, 1바이트
+DB10.DBX6    잘못된 주소
+계수 1234 (작은 쪽 먼저로 잘못 읽으면 -11772)
+온도 72.5, 운전 중 1, 이름 "LINE-A"
+```
+
+- **주소의 모양**: `DBX6.3`은 6번 바이트의 3번 비트, `DBW0`은 0번부터 2바이트(워드), `DBD2`는 2번부터 4바이트(더블 워드)입니다. 비트 주소에 비트 번호가 빠진 `DB10.DBX6`은 거부했습니다. 주소 문자열은 설정 파일에서 오는 경우가 많으므로, 읽을 때 엄격하게 검사해야 엉뚱한 메모리를 쓰지 않습니다
+- **빅 엔디언**: `04 D2`는 1234인데, PC의 습관대로 작은 쪽을 먼저 읽으면 -11772가 됩니다. REAL도 `42 91 00 00`을 큰 쪽부터 이어 `0x42910000`을 만든 뒤 `std::bit_cast`로 실수로 바꾸었습니다
+- **S7 STRING**: 앞의 두 바이트가 최대 길이(10)와 현재 길이(6)이고, 그 뒤에 글자가 옵니다. 최대 길이만큼 자리를 차지하므로 다음 변수는 8 + 2 + 10 = 20번에서 시작합니다
+
+## 라이브러리로 읽기
+
+실제 통신에는 라이브러리를 씁니다. 지멘스는 Snap7, 로크웰은 libplctag가 널리 쓰입니다. 두 라이브러리의 핵심 부분만 보이면 다음과 같습니다. 검사 환경에 두 라이브러리가 없어 문서와 대조만 했습니다.
+
+```cpp nocheck
+// 지멘스 S7: Snap7(LGPLv3)로 DB10의 0번부터 20바이트 읽기
+#include "snap7.h"
+TS7Client plc;
+if (plc.ConnectTo("192.168.0.1", 0, 1) == 0) {     // IP, 랙 0, 슬롯 1(S7-1200/1500)
+    uint8_t db10[20];
+    if (plc.DBRead(10, 0, sizeof db10, db10) == 0)
+        std::printf("온도 %.1f\n", real(db10 + 2)); // 위의 해석 함수를 그대로 쓴다
+    plc.Disconnect();
+}
+
+// 로크웰 Logix: libplctag로 이름이 Line1_Speed인 REAL 태그 읽기
+#include <libplctag.h>
+const char* attrs = "protocol=ab-eip&gateway=192.168.0.20&path=1,0"
+                    "&plc=ControlLogix&name=Line1_Speed";
+const int32_t tag = plc_tag_create(attrs, 5000);    // 제한 시간 5000ms
+if (tag >= 0 && plc_tag_read(tag, 5000) == PLCTAG_STATUS_OK)
+    std::printf("속도 %.1f\n", plc_tag_get_float32(tag, 0));
+if (tag >= 0) plc_tag_destroy(tag);
+```
+
+S7-1200/1500에서 Snap7 같은 외부 프로그램이 DB를 읽게 하려면 PLC 설정에서 PUT/GET 통신을 허용하고, 그 DB의 "최적화된 블록 접근"을 꺼서 절대 주소가 생기게 해야 합니다. 로크웰은 태그 이름으로 읽으므로 주소 계산이 없고, 구조체(UDT) 태그는 멤버 이름(`Motor1.Speed`)으로도 읽습니다.
+
+<Note>
+S7comm 같은 옛 프로토콜에는 인증이 없어서, 네트워크에 닿는 누구나 PLC 메모리를 읽고 쓸 수 있습니다. 그래서 지멘스도 최신 PLC에서는 PUT/GET을 기본으로 꺼 두고 내장 OPC UA 서버를 권합니다. 쓸 수 있다면 OPC UA를, 아니면 쓰기를 최소로 하고 네트워크를 나누는 것을 먼저 생각합니다. 프로토콜이 여럿 섞인 현장에서는 상용 게이트웨이가 모두를 OPC UA로 바꿔 주기도 합니다.
+</Note>
+
+## 정리
+
+- 제조사 프로토콜은 주소를 메모리 영역과 번호로 가리키는 방식(S7, MC, FINS)과 태그 이름으로 가리키는 방식(Logix)으로 나뉘며, 바이트 순서도 다르다
+- S7의 DB 주소는 바이트와 비트, 크기를 담으며, 데이터는 빅 엔디언이고 STRING은 최대 길이와 현재 길이가 앞에 붙는다
+- 지멘스는 Snap7, 로크웰은 libplctag 같은 라이브러리로 읽고, 인증 없는 옛 프로토콜보다 OPC UA를 먼저 고려한다

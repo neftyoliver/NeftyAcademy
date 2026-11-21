@@ -1,0 +1,138 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '폴링 설계: 주기별 묶음, 가까운 레지스터 합치기, 직렬 버스의 시간 예산, 응답 없는 장비와 물러서기';
+
+Modbus나 제조사 프로토콜처럼 요청해야 답하는 장비는 프로그램이 주기적으로 물어보는 수밖에 없습니다. 이것을 **폴링**이라고 합니다. 태그가 몇 개일 때는 아무렇게나 해도 되지만, 수백 개가 되고 느린 직렬선을 여러 장비가 나눠 쓰면 "무엇을, 얼마나 자주, 몇 번의 요청으로" 읽을지가 성능을 결정합니다.
+
+## 묶고 합치기
+
+모든 태그를 같은 주기로 읽을 필요는 없습니다. 압력과 경보는 100ms마다, 온도는 1초마다, 누적 가동 시간이나 버전은 10초마다면 충분합니다. 그리고 주소가 가까운 레지스터는 한 요청으로 읽는 것이 쌉니다. Modbus 요청 하나에는 머리, CRC, 침묵 시간, 장비의 준비 시간이 붙어서, 레지스터를 몇 개 더 읽는 것보다 요청을 하나 더 보내는 것이 훨씬 비싸기 때문입니다. 태그 11개의 폴링 계획을 세우고 9600bps RTU 선에서 1초에 버스를 얼마나 쓰는지 계산했습니다.
+
+```cpp
+// 폴링 계획: 주기별로 묶고, 가까운 레지스터를 합치고, 버스 시간을 계산한다
+#include <algorithm>
+#include <cstdio>
+#include <map>
+#include <vector>
+
+struct Tag { const char* name; int reg; int periodMs; };
+struct Block { int start, count; };
+
+// 정렬된 주소들을 틈이 maxGap 이하이고 길이가 maxLen 이하인 묶음으로 합친다
+std::vector<Block> merge(std::vector<int> regs, int maxGap, int maxLen) {
+    std::sort(regs.begin(), regs.end());
+    std::vector<Block> out;
+    for (int r : regs) {
+        if (!out.empty() && r - (out.back().start + out.back().count) <= maxGap &&
+            r - out.back().start + 1 <= maxLen)
+            out.back().count = r - out.back().start + 1;
+        else
+            out.push_back({r, 1});
+    }
+    return out;
+}
+
+// Modbus RTU 요청 하나의 시간: 요청 8바이트, 응답 5+2n바이트, 문자당 11비트,
+// 프레임마다 3.5문자의 침묵, 장비의 응답 준비 시간 5ms
+double rtuMs(int count, int baud) {
+    const double charMs = 11.0 * 1000 / baud;
+    return (8 + 5 + 2 * count + 2 * 3.5) * charMs + 5.0;
+}
+
+int main() {
+    const std::vector<Tag> tags = {
+        {"압력", 0, 100},     {"유량", 1, 100},     {"경보", 11, 100},
+        {"온도1", 2, 1000},   {"온도2", 3, 1000},   {"온도3", 4, 1000},
+        {"모드", 10, 1000},   {"가동시간", 40, 10000}, {"생산량", 41, 10000},
+        {"레시피", 120, 10000}, {"버전", 200, 10000}};
+
+    std::map<int, std::vector<int>> byPeriod;          // 주기별로 묶는다
+    for (const Tag& t : tags) byPeriod[t.periodMs].push_back(t.reg);
+
+    for (int gap : {-1, 0, 8, 16}) {                   // -1: 하나씩 따로 읽기
+        double busy = 0;                               // 1초 동안 버스를 쓰는 시간
+        if (gap < 0) std::printf("따로:");
+        else std::printf("틈 %2d:", gap);
+        for (const auto& [period, regs] : byPeriod)
+            for (const Block& blk : merge(regs, gap, 125)) {
+                busy += rtuMs(blk.count, 9600) * 1000.0 / period;
+                std::printf(" %d~%d", blk.start, blk.start + blk.count - 1);
+            }
+        std::printf("\n       9600bps에서 버스를 1초에 %.0fms 씀\n", busy);
+    }
+}
+```
+
+```text
+따로: 0~0 1~1 11~11 2~2 3~3 4~4 10~10 40~40 41~41 120~120 200~200
+       9600bps에서 버스를 1초에 1039ms 씀
+틈  0: 0~1 11~11 2~4 10~10 40~41 120~120 200~200
+       9600bps에서 버스를 1초에 701ms 씀
+틈  8: 0~1 11~11 2~10 40~41 120~120 200~200
+       9600bps에서 버스를 1초에 685ms 씀
+틈 16: 0~11 2~10 40~41 120~120 200~200
+       9600bps에서 버스를 1초에 612ms 씀
+```
+
+- **하나씩 따로 읽으면 불가능하다**: 1초에 1039ms가 필요합니다. 버스가 감당할 수 있는 양을 넘었으므로 주기를 지킬 수 없습니다
+- **이어진 주소만 합쳐도** 701ms로 줄고, 사이에 쓰지 않는 레지스터가 몇 개 끼어도 함께 읽도록 틈을 허락하면 더 줄어듭니다. 틈 16에서는 100ms 묶음의 0번과 11번이 한 요청(0~11)이 되었습니다
+- **빠른 묶음이 예산을 정한다**: 10초짜리 태그는 거의 무시해도 되고, 100ms짜리 태그 몇 개가 버스의 대부분을 씁니다. 빠른 태그를 줄이는 것이 가장 효과가 큽니다
+- 틈을 무작정 키우면 안 됩니다. 장비가 없는 주소를 포함한 요청에 예외로 답하면 묶음 전체가 실패하므로, 레지스터 맵을 보고 읽어도 되는 범위 안에서만 합칩니다
+
+## 응답 없는 장비
+
+장비 하나가 꺼지면 그 장비에 보내는 요청은 모두 시간 초과까지 기다렸다가 실패합니다. 같은 선의 다른 장비들은 그동안 아무것도 할 수 없습니다. 그래서 실패할 때마다 다시 묻는 간격을 늘립니다(물러서기, backoff).
+
+```cpp
+// 장비가 2~20초에 꺼져 있을 때: 실패할 때마다 다시 묻는 간격을 두 배로(최대 8초)
+#include <algorithm>
+#include <cstdio>
+
+int main() {
+    const auto online = [](int t) { return t < 2000 || t >= 20000; };
+    int next = 0, retryMs = 1000, timeouts = 0;
+    bool good = true;
+    for (int t = 0; t <= 40000; t += 100) {
+        if (t < next) continue;
+        if (online(t)) {
+            if (!good)
+                std::printf("%5dms 응답 옴 → 태그를 Good으로, 평소 주기로\n", t);
+            good = true;
+            retryMs = 1000;
+            next = t + 1000;                     // 평소에는 1초마다 읽는다
+        } else {
+            if (good) std::printf("%5dms 응답 없음 → 태그를 Bad로\n", t);
+            else std::printf("%5dms 또 응답 없음\n", t);
+            good = false;
+            // 시간 초과(500ms)만큼 버스를 놀린다
+            ++timeouts;
+            next = t + retryMs;
+            retryMs = std::min(retryMs * 2, 8000);
+        }
+    }
+    std::printf("시간 초과 %d번 = 버스 %.1f초 낭비(1초마다 물었다면 18번 = 9초)\n",
+                timeouts, timeouts * 0.5);
+}
+```
+
+```text
+ 2000ms 응답 없음 → 태그를 Bad로
+ 3000ms 또 응답 없음
+ 5000ms 또 응답 없음
+ 9000ms 또 응답 없음
+17000ms 또 응답 없음
+25000ms 응답 옴 → 태그를 Good으로, 평소 주기로
+시간 초과 5번 = 버스 2.5초 낭비(1초마다 물었다면 18번 = 9초)
+```
+
+첫 실패에서 바로 태그를 Bad로 바꿔 화면과 기록이 옛 값을 믿지 않게 합니다. 대가도 있습니다. 장비는 20초에 돌아왔지만 프로그램은 25초에 알았습니다. 최대 간격이 곧 "돌아온 것을 알아채는 최대 지연"이므로, 현장에서 허용할 수 있는 만큼으로 정합니다.
+
+<Note>
+폴링은 보통 장비(또는 직렬선)마다 하나씩 따로 도는 통신 스레드에 맡기고, 결과를 태그 값의 저장소에 써 둡니다. 화면과 제어 논리는 그 저장소를 읽기만 하므로, 통신이 느리거나 멈춰도 함께 멈추지 않습니다. 장비가 바뀐 값만 보내 주는 프로토콜([「OPC UA」](#/read/cpp-industrial/fb-opcua)의 구독, MQTT)을 쓸 수 있다면 폴링보다 그쪽이 버스와 CPU를 훨씬 덜 씁니다.
+</Note>
+
+## 정리
+
+- 태그를 필요한 주기별로 묶고, 주소가 가까운 레지스터는 읽어도 되는 범위 안에서 한 요청으로 합친다
+- 직렬 버스는 요청마다 붙는 고정 비용이 커서 요청 수가 시간 예산을 결정하며, 빠른 주기의 태그가 예산의 대부분을 쓴다
+- 응답 없는 장비는 태그를 즉시 Bad로 바꾸고 다시 묻는 간격을 늘리되, 최대 간격만큼 복구를 늦게 안다는 것을 고려한다
