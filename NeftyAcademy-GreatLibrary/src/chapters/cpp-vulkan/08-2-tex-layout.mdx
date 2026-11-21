@@ -1,0 +1,166 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '레이아웃 전환: 쓰임새마다의 레이아웃, 배리어로 바꾸기, UNDEFINED에서 출발하기, 프로그램이 따라가기';
+
+이미지는 쓰임새에 따라 GPU 안에서 다르게 다뤄질 수 있습니다. 렌더 타깃일 때는 빠르게 지우고 압축해 두는 보조 데이터를 곁들이고, 샘플링할 때는 그것을 풀어 둬야 하는 식입니다. 벌칸은 이 상태를 **이미지 레이아웃**이라 부르고, 이미지를 쓰기 전에 그 쓰임에 맞는 레이아웃으로 바꾸라고 요구합니다. 바꾸는 일은 이미지 배리어가 하며(`vkx::transition`), 앞선 쓰기가 끝나기를 기다리는 일과 함께 이루어집니다. 아래 프로그램은 이미지 둘이 그리는 대상과 읽히는 원본 역할을 번갈아 맡는, 후처리에서 흔한 흐름을 따라갑니다.
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp,vkx_cmd.hpp,vkx_resource.hpp,vkx_bind.hpp,vkx_pipeline.hpp,vkx_draw.hpp
+#include "vkx_bind.hpp"
+#include "vkx_cmd.hpp"
+#include "vkx_draw.hpp"
+#include "vkx_pipeline.hpp"
+
+const char* FS = R"(#version 450
+#extension GL_EXT_samplerless_texture_functions : require   // 샘플러 없이 읽기
+layout(binding = 0) uniform texture2D src;
+layout(location = 0) out float value;
+void main() { value = texelFetch(src, ivec2(gl_FragCoord.xy), 0).r + 0.25; })";
+
+// 레이아웃과, 그 레이아웃일 때 이미지를 만지는 파이프라인 단계와 접근 종류
+struct Use {
+    const char* name;
+    VkImageLayout layout;
+    VkPipelineStageFlags2 stage;
+    VkAccessFlags2 access;
+};
+const Use UNDEFINED{"UNDEFINED", VK_IMAGE_LAYOUT_UNDEFINED,
+                    VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE};
+const Use CLEARING{"TRANSFER_DST_OPTIMAL", VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT};
+const Use SAMPLED{"SHADER_READ_ONLY_OPTIMAL",
+                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT};
+const Use TARGET{"COLOR_ATTACHMENT_OPTIMAL",
+                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT};
+const Use COPYING{"TRANSFER_SRC_OPTIMAL", VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                  VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT};
+
+// 벌칸은 지금 레이아웃을 알려 주지 않으므로 프로그램이 적어 두고 따라간다
+struct Tracked {
+    const char* name;
+    vkx::Image image;
+    Use now = UNDEFINED;
+};
+
+void change(VkCommandBuffer cmd, Tracked& t, const Use& next) {
+    std::printf("%s: %s → %s\n", t.name, t.now.name, next.name);
+    vkx::transition(cmd, t.image, t.now.layout, next.layout, t.now.stage,
+                    t.now.access, next.stage, next.access);
+    t.now = next;
+}
+
+int main() {
+    vkx::Instance inst = vkx::make_instance();
+    vkx::Device dev = vkx::make_device(inst.handle);
+    vkx::Commands cmds = vkx::make_commands(dev);
+    const VkExtent2D SIZE{8, 1};
+    const auto USAGE =
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    Tracked a{"A", vkx::make_image(dev, SIZE, VK_FORMAT_R32_SFLOAT, USAGE)};
+    Tracked b{"B", vkx::make_image(dev, SIZE, VK_FORMAT_R32_SFLOAT, USAGE)};
+    vkx::Buffer pixels =
+        vkx::make_buffer(dev, 8 * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+
+    const auto IMAGE = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    vkx::Bindings read_a = vkx::make_bindings(dev, {IMAGE});
+    vkx::Bindings read_b = vkx::make_bindings(dev, {IMAGE});
+    vkx::bind_image(dev, read_a, 0, IMAGE, a.image.view, SAMPLED.layout);
+    vkx::bind_image(dev, read_b, 0, IMAGE, b.image.view, SAMPLED.layout);
+    VkPipelineLayout layout = vkx::make_layout(dev, {read_a.layout});
+    auto vs = vkx::make_shader(
+        dev, vkx::compile(vkx::FULLSCREEN_VS, shaderc_vertex_shader));
+    auto fs = vkx::make_shader(dev, vkx::compile(FS, shaderc_fragment_shader));
+    VkPipeline pipeline = vkx::make_pipeline(
+        dev, {.vertex = vs, .fragment = fs, .layout = layout,
+              .color = VK_FORMAT_R32_SFLOAT});
+
+    VkCommandBuffer cmd = vkx::begin(cmds);
+    // from을 읽어 0.25를 더한 값을 to에 그린다. 그리기 전에 둘의 레이아웃을 맞춘다
+    auto pass = [&](Tracked& from, VkDescriptorSet reading, Tracked& to) {
+        change(cmd, from, SAMPLED);
+        change(cmd, to, TARGET);
+        VkRenderingAttachmentInfo color{
+            .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .imageView = to.image.view, .imageLayout = TARGET.layout,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+        VkRenderingInfo info{
+            .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+            .renderArea = {{0, 0}, SIZE}, .layerCount = 1,
+            .colorAttachmentCount = 1, .pColorAttachments = &color};
+        vkCmdBeginRendering(cmd, &info);
+        VkViewport viewport{0.0f, 0.0f, 8.0f, 1.0f, 0.0f, 1.0f};
+        vkCmdSetViewport(cmd, 0, 1, &viewport);
+        vkCmdSetScissor(cmd, 0, 1, &info.renderArea);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1,
+                                &reading, 0, nullptr);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+        vkCmdEndRendering(cmd);
+    };
+    change(cmd, a, CLEARING);                 // 이전 내용은 버려도 되는 출발
+    VkClearColorValue quarter{{0.25f}};
+    VkImageSubresourceRange all{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdClearColorImage(cmd, a.image.handle, CLEARING.layout, &quarter, 1, &all);
+    pass(a, read_a.set, b);                   // A(0.25)를 읽어 B에 0.5를
+    pass(b, read_b.set, a);                   // 역할을 바꿔 B를 읽어 A에 0.75를
+    change(cmd, a, COPYING);
+    vkx::copy_to_buffer(cmd, a.image, pixels);
+    vkx::submit_and_wait(dev, cmds);
+    std::printf("A의 값: %g\n", *static_cast<const float*>(pixels.mapped));
+
+    vkDestroyPipeline(dev.handle, pipeline, nullptr);
+    vkDestroyPipelineLayout(dev.handle, layout, nullptr);
+    vkDestroyShaderModule(dev.handle, vs, nullptr);
+    vkDestroyShaderModule(dev.handle, fs, nullptr);
+    for (vkx::Bindings* s : {&read_a, &read_b}) vkx::destroy(dev, *s);
+    for (Tracked* t : {&a, &b}) vkx::destroy(dev, t->image);
+    vkx::destroy(dev, pixels);
+    vkx::destroy(dev, cmds);
+    vkx::destroy(dev);
+    vkx::destroy(inst);
+}
+```
+
+```text
+A: UNDEFINED → TRANSFER_DST_OPTIMAL
+A: TRANSFER_DST_OPTIMAL → SHADER_READ_ONLY_OPTIMAL
+B: UNDEFINED → COLOR_ATTACHMENT_OPTIMAL
+B: COLOR_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL
+A: SHADER_READ_ONLY_OPTIMAL → COLOR_ATTACHMENT_OPTIMAL
+A: COLOR_ATTACHMENT_OPTIMAL → TRANSFER_SRC_OPTIMAL
+A의 값: 0.75
+```
+
+- **프로그램이 따라간다**: 벌칸에는 지금 레이아웃을 묻는 함수가 없습니다. 배리어의 `oldLayout`에 실제와 다른 값을 주면 정의되지 않은 동작이므로, `Tracked`처럼 이미지마다 마지막 레이아웃과 그때의 단계·접근을 적어 둡니다. 틀리면 검증 레이어가 VUID-VkImageMemoryBarrier2-oldLayout-01197로 알립니다
+- **쓰는 쪽에도 적는다**: 디스크립터와 첨부물 정보에도 레이아웃을 적는데, 쓰이는 순간의 실제 레이아웃과 같아야 합니다. `pass`에서 원본을 바꾸는 줄을 빼면 VUID-VkDescriptorImageInfo-imageLayout-00344가 납니다. lavapipe는 레이아웃이 달라도 같은 값을 내므로 검증 레이어 없이는 모르고 지나갑니다
+- **UNDEFINED에서 출발**: `oldLayout`이 UNDEFINED이면 이전 내용을 버려도 된다는 뜻입니다. 전체를 덮어쓸 이미지는 지금 레이아웃이 무엇이든 UNDEFINED에서 바꾸면 드라이버가 내용을 보존하는 일을 건너뜁니다. B의 첫 전환이 그렇습니다
+- **범위마다 따로**: 레이아웃은 밉 수준과 배열 층마다 따로 있어서, 배리어의 `subresourceRange`로 일부만 바꿀 수 있습니다([「밉맵」](#/read/cpp-vulkan/tex-mipmaps)에서 수준마다 다르게 둡니다)
+
+## 레이아웃의 종류
+
+| 레이아웃 | 쓰임 |
+| --- | --- |
+| `UNDEFINED` | 내용을 버려도 되는 출발점. 여기로 바꿀 수는 없다 |
+| `TRANSFER_DST_OPTIMAL`, `TRANSFER_SRC_OPTIMAL` | 복사, 블릿, 지우기의 대상과 원본 |
+| `SHADER_READ_ONLY_OPTIMAL` | 셰이더에서 샘플링 |
+| `COLOR_ATTACHMENT_OPTIMAL` | 색 첨부물로 그리기 |
+| `DEPTH_STENCIL_ATTACHMENT_OPTIMAL` | 깊이·스텐실 첨부물로 그리기 |
+| `PRESENT_SRC_KHR` | 화면에 내보내기([「표면과 스왑체인」](#/read/cpp-vulkan/setup-swapchain)) |
+| `GENERAL` | 어떤 쓰임이든 되지만 최적이 아닐 수 있다. 스토리지 이미지에 쓴다 |
+
+1.3부터는 색과 깊이를 가리지 않는 `ATTACHMENT_OPTIMAL`과 `READ_ONLY_OPTIMAL`도 쓸 수 있습니다. 전환에 실제로 드는 비용은 장치와 포맷에 따라 다르고 아무 일도 안 하는 경우도 많지만, 규칙은 어느 장치에서나 지켜야 합니다.
+
+<Note>
+2025년에 나온 `VK_KHR_unified_image_layouts` 확장을 지원하는 장치는 `GENERAL`을 어디에나 써도 다른 레이아웃만큼 빠르다고 보장합니다. 이 기능을 켜면 내보내기용 `PRESENT_SRC_KHR`과 출발점 UNDEFINED를 빼고는 레이아웃을 `GENERAL` 하나로 두고, 접근 순서를 맞추는 배리어만 남기면 됩니다. 지원하지 않는 장치도 함께 다뤄야 한다면 이 쪽의 방식이 그대로 필요합니다.
+</Note>
+
+## 정리
+
+- 이미지는 쓰임에 맞는 레이아웃에 있어야 하고, 이미지 배리어가 앞선 접근을 기다리며 레이아웃을 바꾼다
+- 지금 레이아웃은 프로그램이 스스로 적어 두고, 배리어의 `oldLayout`과 디스크립터·첨부물에 적는 레이아웃을 실제와 맞춘다
+- 내용을 버려도 되면 UNDEFINED에서 출발하고, 레이아웃은 밉 수준과 층마다 따로 바꿀 수 있다

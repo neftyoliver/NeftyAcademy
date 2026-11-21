@@ -1,0 +1,193 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '밉맵: 밉 사슬과 수준 수, 블릿으로 만들기, 수준마다의 레이아웃, LOD가 정해지는 법, 샘플러의 밉 설정';
+
+텍스처가 화면에 작게 찍히면 한 픽셀에 텍셀 여러 개가 들어갑니다. 그 가운데 하나만 읽으면 무늬가 뭉개져 잡음이 되고, 움직일 때마다 반짝입니다. **밉맵**은 텍스처를 절반씩 줄여 미리 평균해 둔 사슬이고, 샘플러는 찍히는 크기에 맞는 수준을 골라 읽습니다. 수준의 수는 긴 변이 1이 될 때까지 반으로 나눈 횟수에 1을 더한 값(8×8이면 8, 4, 2, 1로 네 개)이고, 사슬 전체는 원본의 약 3분의 1만큼 메모리를 더 씁니다. 아래 프로그램은 밉 사슬을 블릿으로 만들고, 오른쪽으로 갈수록 텍스처가 작게 찍히는 띠에서 무엇이 읽히는지 봅니다.
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp,vkx_cmd.hpp,vkx_resource.hpp,vkx_bind.hpp,vkx_pipeline.hpp,vkx_draw.hpp,vkx_texture.hpp
+#include <algorithm>
+#include "vkx_bind.hpp"
+#include "vkx_draw.hpp"
+#include "vkx_pipeline.hpp"
+#include "vkx_texture.hpp"
+
+// 오른쪽으로 갈수록 텍스처가 더 작게 찍힌다: 픽셀 x에서 텍셀 x/6개가 한 픽셀에
+const char* FS = R"(#version 450
+layout(binding = 0) uniform sampler2D tex;
+layout(location = 0) out float value;
+void main() {
+    float t = gl_FragCoord.x / 48.0;
+    value = texture(tex, vec2(t * t * 24.0, 0.0625)).r;
+})";
+
+const auto READING = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+const auto DST = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+const auto SRC = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+const auto BLIT = VK_PIPELINE_STAGE_2_BLIT_BIT;
+const auto WRITE = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+const auto SAMPLE = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+const auto ANY = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+
+// 밉 수준 first부터 count개만 레이아웃을 바꾼다
+void change(VkCommandBuffer cmd, const vkx::Image& im, uint32_t first,
+            uint32_t count, VkImageLayout from, VkImageLayout to,
+            VkAccessFlags2 src_access, VkPipelineStageFlags2 dst,
+            VkAccessFlags2 dst_access) {
+    VkImageMemoryBarrier2 b{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, .srcStageMask = BLIT,
+        .srcAccessMask = src_access, .dstStageMask = dst,
+        .dstAccessMask = dst_access, .oldLayout = from, .newLayout = to,
+        .image = im.handle, .subresourceRange = {im.aspect, first, count, 0, 1}};
+    VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                         .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b};
+    vkCmdPipelineBarrier2(cmd, &dep);
+}
+
+// 수준 0을 절반씩 줄여 가며 나머지 수준을 채운다. 들어올 때도 나갈 때도 READING
+void generate_mips(VkCommandBuffer cmd, const vkx::Image& im, uint32_t mips) {
+    vkx::transition(cmd, im, READING, DST, ANY, SAMPLE, BLIT, WRITE);
+    int32_t w = int32_t(im.extent.width), h = int32_t(im.extent.height);
+    for (uint32_t level = 1; level < mips; ++level) {
+        change(cmd, im, level - 1, 1, DST, SRC, WRITE, BLIT,
+               VK_ACCESS_2_TRANSFER_READ_BIT);          // 윗수준은 이제 원본
+        int32_t nw = std::max(w / 2, 1), nh = std::max(h / 2, 1);
+        VkImageBlit region{.srcSubresource = {im.aspect, level - 1, 0, 1},
+                           .srcOffsets = {{0, 0, 0}, {w, h, 1}},
+                           .dstSubresource = {im.aspect, level, 0, 1},
+                           .dstOffsets = {{0, 0, 0}, {nw, nh, 1}}};
+        vkCmdBlitImage(cmd, im.handle, SRC, im.handle, DST, 1, &region,
+                       VK_FILTER_LINEAR);               // 네 텍셀의 평균이 된다
+        w = nw, h = nh;
+    }
+    change(cmd, im, 0, mips - 1, SRC, READING, VK_ACCESS_2_TRANSFER_READ_BIT, ANY,
+           SAMPLE);
+    change(cmd, im, mips - 1, 1, DST, READING, WRITE, ANY, SAMPLE);
+}
+
+int main() {
+    vkx::Instance inst = vkx::make_instance();
+    vkx::Device dev = vkx::make_device(inst.handle);
+    vkx::Commands cmds = vkx::make_commands(dev);
+    const uint32_t N = 8, MIPS = 4;           // 8, 4, 2, 1: floor(log2(8)) + 1
+    const auto RGBA = VK_FORMAT_R8G8B8A8_UNORM;
+
+    // 1) 한 텍셀씩 번갈아 0과 1인 체스판을 올리고, 밉 사슬을 만들어 채운다
+    std::vector<uint8_t> texels(N * N * 4, 255);
+    for (uint32_t i = 0; i < N * N; ++i)
+        if ((i % N + i / N) % 2 == 0) texels[i * 4] = 0;
+    vkx::Image checker = vkx::make_texture(dev, cmds, {N, N}, RGBA, texels.data(),
+                                           texels.size(), MIPS);
+    // 2) 수준마다 다른 밝기로 칠한 텍스처: 어느 수준이 뽑히는지 보인다
+    vkx::Image painted = vkx::make_image(
+        dev, {N, N}, RGBA,
+        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, MIPS);
+    VkCommandBuffer cmd = vkx::begin(cmds);
+    generate_mips(cmd, checker, MIPS);
+    vkx::transition(cmd, painted, VK_IMAGE_LAYOUT_UNDEFINED, DST,
+                    VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                    VK_PIPELINE_STAGE_2_CLEAR_BIT, WRITE);
+    for (uint32_t level = 0; level < MIPS; ++level) {
+        VkClearColorValue shade{{(float(level) * 2.0f + 1.5f) / 9.0f}};
+        VkImageSubresourceRange one{VK_IMAGE_ASPECT_COLOR_BIT, level, 1, 0, 1};
+        vkCmdClearColorImage(cmd, painted.handle, DST, &shade, 1, &one);
+    }
+    vkx::transition(cmd, painted, DST, READING, VK_PIPELINE_STAGE_2_CLEAR_BIT,
+                    WRITE, ANY, SAMPLE);
+    vkx::submit_and_wait(dev, cmds);
+
+    const auto NEAR = VK_FILTER_NEAREST;
+    const auto REPEAT = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    VkSamplerCreateInfo sci{.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+                            .maxLod = 0.0f};       // 수준 0만: 밉을 쓰지 않는다
+    VkSampler level0;
+    vkCreateSampler(dev.handle, &sci, nullptr, &level0);
+    VkSampler nearest = vkx::make_sampler(dev, NEAR, REPEAT);
+    VkSampler blend =
+        vkx::make_sampler(dev, NEAR, REPEAT, VK_SAMPLER_MIPMAP_MODE_LINEAR);
+    struct Row { const char* label; VkImageView view; VkSampler sampler; };
+    const Row rows[] = {{"checker, level 0 only", checker.view, level0},
+                        {"checker, mip NEAREST", checker.view, nearest},
+                        {"painted, mip NEAREST", painted.view, nearest},
+                        {"painted, mip LINEAR", painted.view, blend}};
+    const uint32_t W = 48, H = std::size(rows);
+
+    vkx::Image target = vkx::make_image(
+        dev, {W, H}, VK_FORMAT_R32_SFLOAT,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    vkx::Buffer pixels =
+        vkx::make_buffer(dev, W * H * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+    const auto TEXTURE = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    std::vector<vkx::Bindings> binds;
+    for (const Row& r : rows) {
+        binds.push_back(vkx::make_bindings(dev, {TEXTURE}));
+        vkx::bind_image(dev, binds.back(), 0, TEXTURE, r.view, READING, r.sampler);
+    }
+    VkPipelineLayout layout = vkx::make_layout(dev, {binds[0].layout});
+    auto vs = vkx::make_shader(
+        dev, vkx::compile(vkx::FULLSCREEN_VS, shaderc_vertex_shader));
+    auto fs = vkx::make_shader(dev, vkx::compile(FS, shaderc_fragment_shader));
+    VkPipeline pipeline = vkx::make_pipeline(
+        dev, {.vertex = vs, .fragment = fs, .layout = layout,
+              .color = target.format});
+
+    cmd = vkx::begin(cmds);
+    vkx::begin_drawing(cmd, target, {{-1.0f}});
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    for (uint32_t y = 0; y < H; ++y) {
+        VkRect2D line{{0, int32_t(y)}, {W, 1}};      // 시저로 한 줄만 그린다
+        vkCmdSetScissor(cmd, 0, 1, &line);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1,
+                                &binds[y].set, 0, nullptr);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+    }
+    vkx::end_drawing(cmd, target, pixels);
+    vkx::submit_and_wait(dev, cmds);
+
+    auto* v = static_cast<const float*>(pixels.mapped);
+    const char* ramp = ".:-=+*#%@";
+    std::printf("%-22s|%6s0%5s1%11s2%23s3\n", "LOD", "", "", "", "");
+    for (uint32_t y = 0; y < H; ++y) {
+        std::printf("%-22s|", rows[y].label);
+        for (uint32_t x = 0; x < W; ++x)
+            std::putchar(ramp[int(v[y * W + x] * 8.999f)]);
+        std::puts("|");
+    }
+
+    vkDestroyPipeline(dev.handle, pipeline, nullptr);
+    vkDestroyPipelineLayout(dev.handle, layout, nullptr);
+    vkDestroyShaderModule(dev.handle, vs, nullptr);
+    vkDestroyShaderModule(dev.handle, fs, nullptr);
+    for (vkx::Bindings& b : binds) vkx::destroy(dev, b);
+    for (VkSampler s : {level0, nearest, blend})
+        vkDestroySampler(dev.handle, s, nullptr);
+    for (vkx::Image* i : {&checker, &painted, &target}) vkx::destroy(dev, *i);
+    vkx::destroy(dev, pixels);
+    vkx::destroy(dev, cmds);
+    vkx::destroy(dev);
+    vkx::destroy(inst);
+}
+```
+
+```text
+LOD                   |      0     1           2                       3
+checker, level 0 only |...@@.@..@@@@@@..@.@@......@@.@..@@@@@@..@.@@...|
+checker, mip NEAREST  |...@@.@.++++++++++++++++++++++++++++++++++++++++|
+painted, mip NEAREST  |::::::::========******************%%%%%%%%%%%%%%|
+painted, mip LINEAR   |::::::::--====++++++**********############%%%%%%|
+```
+
+- **사슬 만들기**: `generate_mips`는 윗수준을 원본으로, 아랫수준을 대상으로 삼아 `vkCmdBlitImage`를 수준마다 한 번씩 부릅니다. 블릿은 크기를 바꾸며 복사하는 명령이고, 선형 필터로 절반 크기에 찍으면 네 텍셀의 평균이 됩니다. 원본 수준과 대상 수준의 레이아웃이 달라야 하므로 수준 하나씩 따로 전환합니다([「레이아웃 전환」](#/read/cpp-vulkan/tex-layout))
+- **밉이 없을 때**: 첫 줄은 수준 0만 읽었습니다. 텍셀이 번갈아 0과 1인 체스판인데, 여러 텍셀 가운데 걸리는 하나만 읽어서 불규칙한 무늬가 됐습니다. 둘째 줄은 수준 1부터가 평균값 0.5이므로, 축소가 시작되자 고른 회색(`+`)이 됩니다
+- **수준 고르기**: 한 픽셀에 걸친 텍셀 수의 밑이 2인 로그가 LOD입니다. 수준마다 다른 밝기로 칠한 셋째 줄에서, `MIPMAP_MODE_NEAREST`는 LOD에 가장 가까운 수준 하나를 읽어 0.5, 1.5, 2.5에서 수준이 바뀝니다. `LINEAR`(넷째 줄)는 위아래 두 수준을 섞어 경계를 없애며, 축소 필터도 `LINEAR`이면 삼선형 필터가 됩니다
+- **샘플러의 설정**: `minLod`와 `maxLod`는 쓸 수준의 범위를 묶고(`maxLod`가 0이면 밉을 쓰지 않음), `mipLodBias`는 LOD에 더해 더 선명하거나 흐리게 합니다. LOD는 이웃 픽셀과의 좌표 차이로 구하므로 프래그먼트 셰이더에서만 저절로 정해지고, 다른 단계에서는 `textureLod`로 수준을 직접 줍니다
+- **블릿의 조건**: 포맷이 블릿 원본·대상과 선형 필터를 지원해야 합니다(`vkGetPhysicalDeviceFormatProperties`). 압축 포맷은 대개 블릿의 대상이 될 수 없어서, 밉을 미리 만들어 파일에 함께 담습니다([「압축 포맷」](#/read/cpp-vulkan/tex-compressed))
+
+<Note>
+바닥처럼 비스듬히 보이는 면은 한쪽 방향으로만 많이 줄어듭니다. 밉은 가로세로를 함께 줄인 것이라 더 줄어든 쪽에 맞추면 다른 쪽이 흐려집니다. 비등방 필터(`anisotropyEnable`, `maxAnisotropy`)는 길게 늘어난 방향을 따라 여러 번 읽어 선명함을 지키며, 보장되는 최댓값은 16입니다.
+</Note>
+
+## 정리
+
+- 밉맵은 텍스처를 절반씩 줄여 평균해 둔 사슬이고, 축소될 때의 잡음과 반짝임을 없애며 메모리를 3분의 1쯤 더 쓴다
+- 사슬은 `vkCmdBlitImage`로 수준을 내려가며 만들고, 원본 수준과 대상 수준의 레이아웃을 따로 전환한다
+- LOD는 한 픽셀에 걸친 텍셀 수로 정해지고, 샘플러의 밉 모드와 LOD 범위·치우침이 어느 수준을 어떻게 읽을지 정한다

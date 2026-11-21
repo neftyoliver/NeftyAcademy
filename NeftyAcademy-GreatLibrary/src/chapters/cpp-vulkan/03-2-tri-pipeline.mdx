@@ -2,7 +2,7 @@ import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '그래픽 파이프라인: shaderc로 SPIR-V 만들기, 셰이더 모듈, 고정 기능 상태, 동적 상태, 첫 삼각형';
 
-그래픽 파이프라인은 정점이 픽셀이 되기까지 거치는 모든 단계의 설정을 한 객체로 굳힌 것입니다. 셰이더와 고정 기능 설정(정점을 어떻게 모으고, 래스터화하고, 섞을지)을 미리 정해 만들어 두므로, 그리는 순간에 셰이더를 다시 컴파일할 일이 없습니다. 아래 도우미는 GLSL을 SPIR-V로 번역하고, 이 책에서 쓸 설정으로 파이프라인을 만듭니다.
+그래픽 파이프라인은 정점이 픽셀이 되기까지 거치는 모든 단계의 설정을 한 객체로 굳힌 것입니다. 셰이더와 고정 기능 설정을 미리 정해 만들어 두므로, 그리는 순간에 셰이더를 다시 컴파일할 일이 없습니다. 아래 도우미는 GLSL을 SPIR-V로 번역하고, 이 책에서 쓸 설정으로 파이프라인을 만듭니다.
 
 ```cpp vk file=vkx_pipeline.hpp with=vkx_instance.hpp,vkx_device.hpp
 #pragma once
@@ -53,6 +53,7 @@ struct GraphicsDesc {
     const VkPipelineVertexInputStateCreateInfo* vertex_input = nullptr;
     const VkPipelineColorBlendAttachmentState* blend = nullptr;   // 없으면 덮어쓴다
     VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
+    std::vector<VkDynamicState> dynamic;   // 뷰포트·시저 말고 그릴 때 정할 상태
 };
 
 inline VkPipeline make_pipeline(const Device& d, const GraphicsDesc& g) {
@@ -87,10 +88,12 @@ inline VkPipeline make_pipeline(const Device& d, const GraphicsDesc& g) {
     VkPipelineColorBlendStateCreateInfo blend{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
         .attachmentCount = colors, .pAttachments = g.blend ? g.blend : &write_all};
-    VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    std::vector<VkDynamicState> dyn{VK_DYNAMIC_STATE_VIEWPORT,
+                                    VK_DYNAMIC_STATE_SCISSOR};
+    dyn.insert(dyn.end(), g.dynamic.begin(), g.dynamic.end());
     VkPipelineDynamicStateCreateInfo dynamic{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-        .dynamicStateCount = 2, .pDynamicStates = dyn};
+        .dynamicStateCount = uint32_t(dyn.size()), .pDynamicStates = dyn.data()};
     VkPipelineRenderingCreateInfo rendering{   // 렌더 패스 대신 첨부물 포맷
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
         .colorAttachmentCount = colors, .pColorAttachmentFormats = &g.color,
@@ -114,7 +117,7 @@ inline VkPipeline make_pipeline(const Device& d, const GraphicsDesc& g) {
 
 - **셰이더 번역**: 벌칸 드라이버는 GLSL이 아니라 SPIR-V를 받습니다. `compile`은 shaderc 라이브러리로 실행 중에 번역하는데, 실제 프로그램은 대개 빌드할 때 `glslc`로 미리 번역합니다([「glslang과 shaderc」](#/read/cpp-vulkan/spv-compile))
 - **고정 기능 상태**: 정점 입력, 입력 조립(점·선·삼각형), 래스터화(채우기, 뒷면 버리기), 다중 샘플, 깊이 시험, 블렌딩을 구조체마다 적습니다. 뒤 장들이 쓸 정점 버퍼, 깊이, 블렌딩, 샘플 수는 `GraphicsDesc`로 바꿉니다
-- **동적 상태와 렌더링 정보**: 뷰포트와 시저는 굳히지 않고 그릴 때 정하므로, 창 크기가 바뀌어도 파이프라인을 다시 만들지 않습니다. 렌더 패스 객체 대신 `VkPipelineRenderingCreateInfo`로 첨부물 포맷만 알립니다
+- **동적 상태와 렌더링 정보**: 뷰포트와 시저는 굳히지 않고 그릴 때 정하므로, 창 크기가 바뀌어도 파이프라인을 다시 만들지 않습니다. `dynamic`에 적은 상태도 그렇게 남깁니다([「동적 상태」](#/read/cpp-vulkan/ps-dynamic)). 렌더 패스 객체 대신 `VkPipelineRenderingCreateInfo`로 첨부물 포맷만 알립니다
 
 이제 [「GPU 파이프라인」](#/read/cpp-vulkan/vk-gpu-pipeline)에서 CPU로 흉내 낸 삼각형을 GPU로 그립니다. 같은 40×20 크기에 밝기를 32비트 실수(R32_SFLOAT)로 남겨 같은 문자로 찍습니다. 파이프라인 레이아웃은 셰이더가 받을 리소스의 모양인데, 아직 받을 것이 없어 비어 있습니다([「세트와 레이아웃」](#/read/cpp-vulkan/desc-sets)).
 
@@ -236,13 +239,13 @@ int main() {
 
 1.1의 출력과 한 글자도 다르지 않고 프래그먼트 수도 306개로 같습니다. GPU도 픽셀 가운데가 삼각형 안에 드는지 보고, 정점 값을 무게 중심 좌표로 섞기 때문입니다.
 
-- **정점 셰이더**: 정점 버퍼가 없어도 `gl_VertexIndex`(0, 1, 2)로 배열에서 위치를 꺼냅니다. `gl_Position`에 쓴 좌표는 w가 1이라 그대로 정규화 장치 좌표가 되고, 뷰포트 변환을 거쳐 픽셀 좌표가 됩니다(1.1의 `to_screen`과 같은 계산)
+- **정점 셰이더**: 정점 버퍼가 없어도 `gl_VertexIndex`(0, 1, 2)로 배열에서 위치를 꺼냅니다. `gl_Position`에 쓴 좌표는 w가 1이라 그대로 정규화 장치 좌표가 되고, 뷰포트 변환을 거쳐 픽셀 좌표가 됩니다
 - **보간**: 정점 셰이더의 `out`과 프래그먼트 셰이더의 `in`은 같은 location으로 이어지고, 그 사이에서 래스터라이저가 값을 보간합니다
 - **변 위의 픽셀**: 명세는 변을 함께 쓰는 두 삼각형 가운데 정확히 하나만 그 픽셀을 덮으라고 정합니다(Direct3D는 왼쪽 위 규칙으로 못박음). 이 삼각형에는 가운데가 변 위에 놓인 픽셀이 없어서 1.1의 단순한 비교와 결과가 같습니다
-- **그리는 명령**: `vkCmdDraw`의 인자는 정점 수, 인스턴스 수, 첫 정점, 첫 인스턴스입니다. 시저 밖의 픽셀은 버려지므로, 렌더 영역 밖으로 그리지 않게 막는 데에도 시저를 씁니다
+- **그리는 명령**: `vkCmdDraw`의 인자는 정점 수, 인스턴스 수, 첫 정점, 첫 인스턴스입니다
 
 <Note>
-파이프라인을 만들 때 드라이버는 셰이더를 GPU 기계어로 컴파일합니다. 그리는 도중에 만들면 프레임이 끊기므로 로딩할 때 미리 만들고, 파이프라인 캐시에 저장해 다음 실행에 다시 씁니다([「파이프라인 캐시」](#/read/cpp-vulkan/ps-cache)). 상태 조합이 많은 프로그램을 위해 파이프라인 없이 셰이더를 따로 묶는 VK_EXT_shader_object도 있습니다.
+파이프라인을 만들 때 드라이버는 셰이더를 GPU 기계어로 컴파일합니다. 그리는 도중에 만들면 프레임이 끊기므로 로딩할 때 미리 만들고, 파이프라인 캐시에 저장해 다음 실행에 다시 씁니다([「파이프라인 캐시」](#/read/cpp-vulkan/ps-cache)).
 </Note>
 
 ## 정리
