@@ -1,0 +1,233 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '상태를 가진 삭제자, 삭제자의 크기와 타입 지우기, C API의 T**를 받는 out_ptr';
+
+[「unique_ptr」](#/read/cpp-stl/mem-unique)에서 `fclose`를 부르는 삭제자까지 봤습니다. 삭제자는 "사라질 때 할 일"을 타입에 끼워 넣는 자리입니다. 그 자리에 **자료를 가진 객체**를 넣으면 할 수 있는 일이 훨씬 늘어납니다.
+
+## 상태를 가진 삭제자
+
+객체를 `delete`하는 대신 **빌려 온 풀에 되돌리는** 포인터를 만들어 봅니다. 삭제자가 "어느 풀인가"를 기억해야 합니다.
+
+```cpp
+#include <cstddef>
+#include <memory>
+#include <print>
+#include <vector>
+
+struct Sample {
+    int id = 0;
+    double value = 0;
+};
+
+class Pool {
+public:
+    explicit Pool(std::size_t count) : storage_(count)
+    {
+        for (Sample& s : storage_)
+            free_.push_back(&s);
+    }
+
+    // 삭제자: 지우지 않고 풀에 되돌린다
+    struct Returner {
+        Pool* pool;
+        void operator()(Sample* s) const { pool->free_.push_back(s); }
+    };
+    using Handle = std::unique_ptr<Sample, Returner>;
+
+    // 빈 칸이 없으면 빈 Handle 을 준다
+    Handle acquire()
+    {
+        if (free_.empty())
+            return Handle(nullptr, Returner{this});
+        Sample* s = free_.back();
+        free_.pop_back();
+        return Handle(s, Returner{this});
+    }
+    std::size_t available() const { return free_.size(); }
+
+private:
+    std::vector<Sample> storage_;
+    std::vector<Sample*> free_;
+};
+
+int main()
+{
+    Pool pool(2);
+    {
+        Pool::Handle a = pool.acquire();
+        Pool::Handle b = pool.acquire();
+        Pool::Handle c = pool.acquire();
+        std::println("a {} b {} c {} 남은 칸 {}", static_cast<bool>(a),
+                     static_cast<bool>(b), static_cast<bool>(c), pool.available());
+        a.reset();
+        std::println("a 를 놓으면 {}", pool.available());
+    }
+    std::println("블록을 나오면 {}", pool.available());
+}
+```
+
+```text
+a true b true c false 남은 칸 0
+a 를 놓으면 1
+블록을 나오면 2
+```
+
+쓰는 쪽은 보통의 `unique_ptr`처럼 씁니다. `->`로 쓰고, 옮기고, 블록을 나가면 저절로 돌아갑니다. 돌려주는 것을 잊을 수 없고, 예외가 지나가도 돌아갑니다. 연결 풀, 버퍼 풀, 그래픽 자원처럼 **만드는 값이 비싸서 돌려 쓰는** 것에 이 꼴을 씁니다.
+
+지킬 것이 하나 있습니다. `Handle`은 풀의 주소를 들고 있으므로 **풀이 `Handle`보다 오래 살아야** 합니다. 위에서는 `pool`을 먼저 선언해서 나중에 사라지게 했습니다.
+
+## 삭제자의 크기
+
+삭제자는 `unique_ptr` 객체 **안에** 들어갑니다. 무엇을 넣느냐에 따라 크기가 달라집니다.
+
+```cpp
+#include <cstdio>
+#include <functional>
+#include <memory>
+#include <print>
+
+struct Sample {
+    int id = 0;
+};
+struct Closer {
+    void operator()(std::FILE* f) const { std::fclose(f); }
+};
+struct PoolReturner {
+    void* pool;
+    void operator()(Sample*) const {}
+};
+
+int main()
+{
+    using Raw = void (*)(Sample*);
+    using Erased = std::function<void(Sample*)>;
+    std::println("기본          {}", sizeof(std::unique_ptr<Sample>));
+    std::println("멤버 없는 것  {}", sizeof(std::unique_ptr<std::FILE, Closer>));
+    std::println("포인터 하나   {}", sizeof(std::unique_ptr<Sample, PoolReturner>));
+    std::println("함수 포인터   {}", sizeof(std::unique_ptr<Sample, Raw>));
+    std::println("std::function {}", sizeof(std::unique_ptr<Sample, Erased>));
+}
+```
+
+```text
+기본          8
+멤버 없는 것  8
+포인터 하나   16
+함수 포인터   16
+std::function 40
+```
+
+멤버가 없는 삭제자는 자리를 차지하지 않습니다. 빈 클래스도 `sizeof`는 1인데 `unique_ptr`가 8 그대로인 것은, 라이브러리가 빈 삭제자를 **빈 기반 클래스**로 물려받아 자리를 0으로 만들기 때문입니다(C++20부터는 멤버에 `[[no_unique_address]]`를 붙여 같은 일을 합니다). "삭제자를 써도 값이 들지 않는다"는 말은 이 경우에만 맞습니다.
+
+## 삭제자의 타입 지우기
+
+삭제자는 `unique_ptr`의 **타입의 일부**입니다. 삭제자가 다르면 타입이 달라서 한 컨테이너에 담을 수 없습니다. 삭제자 자리에 `std::function`을 두면 타입이 하나로 모입니다.
+
+```cpp
+#include <functional>
+#include <memory>
+#include <print>
+#include <vector>
+
+struct Sample {
+    int id = 0;
+};
+
+using AnySample = std::unique_ptr<Sample, std::function<void(Sample*)>>;
+
+int main()
+{
+    static Sample fixed{2};         // 정적 객체. 지우면 안 된다
+    std::vector<AnySample> samples;
+
+    samples.emplace_back(new Sample{1}, [](Sample* s) {
+        std::println("  {}번: delete", s->id);
+        delete s;
+    });
+    samples.emplace_back(&fixed, [](Sample* s) {
+        std::println("  {}번: 아무것도 하지 않는다", s->id);
+    });
+    std::println("비운다");
+    samples.clear();
+}
+```
+
+```text
+비운다
+  1번: delete
+  2번: 아무것도 하지 않는다
+```
+
+힙에서 온 것과 정적 객체를 같은 타입으로 다뤘습니다. 값은 치릅니다. 포인터가 40바이트가 되고, 캡처가 크면 `std::function`이 [힙을 한 번 더 씁니다](#/read/cpp-stl/voc-function). 지우는 방법까지 기억하는 포인터가 필요하면 [`shared_ptr`](#/read/cpp-advanced/sp-shared)가 처음부터 그렇게 생겼습니다. `shared_ptr`는 삭제자를 제어 블록에 두므로 타입에 드러나지 않습니다.
+
+| 삭제자를 두는 곳 | 타입에 드러나나 | 크기 | 쓰는 곳 |
+| --- | --- | --- | --- |
+| 템플릿 인자 (멤버 없음) | 드러난다 | 8 | 대부분. `FILE*`, C 라이브러리의 핸들 |
+| 템플릿 인자 (상태 있음) | 드러난다 | 16부터 | 풀, 아레나, 문맥이 필요한 해제 |
+| `std::function` | 하나로 모인다 | 40 | 지우는 방법이 섞인 컨테이너 |
+| `shared_ptr`의 제어 블록 | 안 드러난다 | 16과 제어 블록 | 주인이 여럿이거나 타입을 숨겨야 할 때 |
+
+삭제자가 타입에 드러난다는 것은 **인터페이스에 새어 나온다**는 뜻이기도 합니다. 헤더에서 `std::unique_ptr<Image, ImageDeleter>`를 돌려주면 삭제자를 바꾸는 것이 ABI를 깨는 변경이 됩니다. `using ImagePtr = ...;`로 이름을 붙여 두고 쓰는 쪽이 그 이름만 쓰게 합니다.
+
+## C API의 `T**`
+
+C 라이브러리는 만든 객체를 **이중 포인터**로 돌려주는 일이 많습니다. `int create(Thing** out)` 같은 꼴입니다. 맨 포인터 변수를 거쳐 `reset`하는 대신 C++23의 `std::out_ptr`를 씁니다.
+
+```cpp
+#include <cstdlib>
+#include <memory>
+#include <print>
+
+// C 라이브러리를 흉내 낸 것
+struct Sensor {
+    int address;
+};
+int sensor_open(int address, Sensor** out)
+{
+    if (address > 0x7f)
+        return -1;
+    *out = static_cast<Sensor*>(std::malloc(sizeof(Sensor)));
+    (*out)->address = address;
+    return 0;
+}
+void sensor_close(Sensor* s)
+{
+    std::println("  sensor_close({:#x})", s->address);
+    std::free(s);
+}
+
+struct SensorCloser {
+    void operator()(Sensor* s) const { sensor_close(s); }
+};
+using SensorPtr = std::unique_ptr<Sensor, SensorCloser>;
+
+int main()
+{
+    SensorPtr sensor;
+    // 함수가 써 넣은 포인터가 이 문장이 끝날 때 sensor 로 들어간다
+    const int status = sensor_open(0x48, std::out_ptr(sensor));
+    std::println("status {} 열렸나 {}", status, static_cast<bool>(sensor));
+
+    SensorPtr bad;
+    const int failed = sensor_open(0x90, std::out_ptr(bad));
+    std::println("status {} 열렸나 {}", failed, static_cast<bool>(bad));
+}
+```
+
+```text
+status 0 열렸나 true
+status -1 열렸나 false
+  sensor_close(0x48)
+```
+
+`std::out_ptr(sensor)`는 임시 객체를 만들어 `Sensor**`로 바뀌어 넘어가고, 문장이 끝날 때 받은 포인터로 `sensor.reset()`을 부릅니다. 이미 가진 것을 넘겼다가 바뀐 것을 돌려받는 `T**`(재할당하는 함수)에는 `std::inout_ptr`를 씁니다. 둘 다 GCC 14에 있습니다.
+
+<Note kind="warn">
+`std::unique_ptr<Base>`에 `Derived`를 담으면 삭제자는 `delete static_cast<Base*>(p)`를 합니다. `Base`의 소멸자가 [가상](#/read/cpp-syntax/inh-dtor)이 아니면 정의되지 않은 동작입니다. `unique_ptr`의 삭제자는 "원래 무슨 타입으로 만들어졌는지"를 기억하지 않습니다. `shared_ptr`는 기억합니다. 그 차이를 [다음 페이지](#/read/cpp-advanced/sp-shared)에서 봅니다.
+</Note>
+
+## 정리
+
+- 삭제자에 자료를 두면 `unique_ptr`가 풀에 되돌리기 같은 일을 맡는다. 그 자료가 가리키는 것은 포인터보다 오래 살아야 한다
+- 멤버 없는 삭제자는 크기를 늘리지 않고, 상태가 있으면 그만큼 커진다. 삭제자는 타입의 일부라서 인터페이스에 드러난다
+- 삭제자를 `std::function`으로 두면 타입이 모이지만 크고 느려진다. C의 `T**` 출력 인자에는 `std::out_ptr`를 쓴다

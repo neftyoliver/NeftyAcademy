@@ -1,0 +1,263 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '내 타입이 자원을 물려받게 하기, 한도를 거는 자원 만들기, 자원이 따라가지 않는 자리, 잰 값';
+
+`std::pmr`의 자원을 쓰는 법과, 요청을 세는 작은 자원을 만드는 법은 [「allocator와 pmr」](#/read/cpp-stl/mem-allocator)에서 봤습니다. 여기서는 설계 쪽을 봅니다. **내가 만든 타입**이 컨테이너의 자원을 물려받게 하는 법, 쓸모 있는 자원을 만드는 법, 그리고 자원이 조용히 빠져나가는 자리입니다.
+
+## 내 타입이 자원을 물려받게 한다
+
+`std::pmr::vector<std::pmr::string>`에서는 벡터의 자원이 문자열로 전해졌습니다. 내 구조체를 원소로 넣으면 어떨까요.
+
+```cpp
+#include <array>
+#include <cstddef>
+#include <cstdlib>
+#include <memory_resource>
+#include <new>
+#include <print>
+#include <string>
+#include <utility>
+#include <vector>
+
+static int heap_allocations = 0;
+void* operator new(std::size_t size)
+{
+    ++heap_allocations;
+    if (void* p = std::malloc(size))
+        return p;
+    throw std::bad_alloc();
+}
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+// libstdc++의 기본 자원은 정렬을 적은 갈래를 부른다. 그것도 센다
+void* operator new(std::size_t size, std::align_val_t align)
+{
+    ++heap_allocations;
+    const auto a = static_cast<std::size_t>(align);
+    if (void* p = std::aligned_alloc(a, (size + a - 1) / a * a))
+        return p;
+    throw std::bad_alloc();
+}
+void operator delete(void* p, std::align_val_t) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t, std::align_val_t) noexcept
+{
+    std::free(p);
+}
+
+// 자원을 받을 줄 모르는 타입
+struct PlainReading {
+    std::pmr::string name;
+    std::pmr::vector<double> samples;
+
+    explicit PlainReading(const char* n) : name(n) { samples.resize(8); }
+};
+
+// 자원을 받을 줄 아는 타입
+struct Reading {
+    using allocator_type = std::pmr::polymorphic_allocator<>;
+
+    std::pmr::string name;
+    std::pmr::vector<double> samples;
+
+    explicit Reading(const char* n, allocator_type alloc = {})
+        : name(n, alloc), samples(alloc)
+    {
+        samples.resize(8);
+    }
+    // 복사와 이동에도 할당자를 덧붙인 판을 둔다
+    Reading(const Reading& other, allocator_type alloc)
+        : name(other.name, alloc), samples(other.samples, alloc)
+    {
+    }
+    Reading(Reading&& other, allocator_type alloc)
+        : name(std::move(other.name), alloc),
+          samples(std::move(other.samples), alloc)
+    {
+    }
+    Reading(const Reading&) = default;
+    Reading(Reading&&) = default;
+};
+
+template <typename T>
+void fill(const char* what)
+{
+    std::array<std::byte, 16384> buffer;
+    std::pmr::monotonic_buffer_resource arena(buffer.data(), buffer.size(),
+                                              std::pmr::null_memory_resource());
+    heap_allocations = 0;
+    std::pmr::vector<T> readings(&arena);
+    for (int i = 0; i < 20; ++i)
+        readings.emplace_back("kitchen-window-north-temperature");
+    std::println("{}: 힙 할당 {}번", what, heap_allocations);
+}
+
+int main()
+{
+    fill<PlainReading>("자원을 받을 줄 모르는 타입");
+    fill<Reading>("allocator_type을 가진 타입");
+}
+```
+
+```text
+자원을 받을 줄 모르는 타입: 힙 할당 40번
+allocator_type을 가진 타입: 힙 할당 0번
+```
+
+`PlainReading`의 멤버는 `pmr` 타입인데도 힙으로 갔습니다. 벡터는 원소가 **자원을 받는 타입인지**를 묻고, 그 답은 멤버가 아니라 타입 자신이 해야 하기 때문입니다. 약속은 둘입니다.
+
+| 약속 | 뜻 |
+| --- | --- |
+| `using allocator_type = std::pmr::polymorphic_allocator<>;` | "나는 할당자를 받는다"는 표시 |
+| 생성자의 **마지막 인자**로 `allocator_type`을 받는 판 | 컨테이너가 원소를 만들 때 자기 자원을 그 자리에 넣어 부른다 |
+
+복사와 이동에도 할당자를 덧붙인 판이 필요합니다. 벡터가 자라며 원소를 옮길 때 그것을 부릅니다. 받은 할당자는 멤버들에게 **그대로 넘기는 것**이 전부입니다.
+
+<Note kind="warn">
+이 예제를 처음 돌렸을 때 GCC에서는 첫 줄도 0번으로 나왔습니다. 틀린 답입니다. libstdc++의 기본 자원은 정렬이 작아도 `operator new(size, align_val_t)` 갈래를 부르는데, [그 갈래를 바꾸지 않아](#/read/cpp-advanced/mm-new) 세지 못한 것입니다. libc++에서는 40번이 나와 어긋난 것을 보고 찾았습니다. 할당을 셀 때는 정렬을 적은 갈래도 함께 바꿉니다.
+</Note>
+
+## 한도를 거는 자원
+
+자원을 직접 만드는 일은 가상 함수 셋을 채우는 것입니다. 쓸모 있는 자원은 대개 **위쪽 자원에 무엇을 덧붙이는** 얇은 층입니다. 요청 하나가 쓸 수 있는 메모리에 끝을 두는 자원을 만듭니다.
+
+```cpp
+#include <algorithm>
+#include <cstddef>
+#include <memory_resource>
+#include <new>
+#include <print>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+// 쓸 수 있는 양에 끝을 두고, 가장 많이 쓴 때를 기억하는 자원
+class Limited : public std::pmr::memory_resource {
+public:
+    Limited(std::size_t limit, std::pmr::memory_resource* upstream)
+        : limit_(limit), upstream_(upstream)
+    {
+    }
+    std::size_t peak() const { return peak_; }
+
+private:
+    void* do_allocate(std::size_t bytes, std::size_t align) override
+    {
+        if (used_ + bytes > limit_)
+            throw std::bad_alloc();
+        void* p = upstream_->allocate(bytes, align);
+        used_ += bytes;
+        peak_ = std::max(peak_, used_);
+        return p;
+    }
+    void do_deallocate(void* p, std::size_t bytes, std::size_t align) override
+    {
+        used_ -= bytes;
+        upstream_->deallocate(p, bytes, align);
+    }
+    bool do_is_equal(const memory_resource& other) const noexcept override
+    {
+        return this == &other;
+    }
+
+    std::size_t limit_;
+    std::size_t used_ = 0;
+    std::size_t peak_ = 0;
+    std::pmr::memory_resource* upstream_;
+};
+
+// 요청 하나를 줄 단위로 나눈다. 쓰는 메모리는 모두 budget에서 나온다
+bool handle(std::string_view request, std::pmr::memory_resource* budget)
+{
+    try {
+        std::pmr::vector<std::pmr::string> lines(budget);
+        while (!request.empty()) {
+            const auto end = request.find('\n');
+            lines.emplace_back(request.substr(0, end));
+            request.remove_prefix(end == std::string_view::npos ? request.size()
+                                                               : end + 1);
+        }
+        return true;
+    } catch (const std::bad_alloc&) {
+        return false;
+    }
+}
+
+int main()
+{
+    const std::string small =
+        "GET /sensors/kitchen-window-north/temperature\nAccept: text/plain";
+    std::string huge;
+    for (int i = 0; i < 200; ++i)
+        huge += "X-Padding-Header-" + std::to_string(i) + ": aaaaaaaaaaaaaaaa\n";
+
+    const std::string_view requests[] = {small, huge};
+    for (std::string_view request : requests) {
+        Limited budget(2048, std::pmr::new_delete_resource());
+        const bool ok = handle(request, &budget);
+        std::println("{}바이트 요청: {}", request.size(),
+                     ok ? "처리함" : "한도를 넘어 거절함");
+    }
+
+    // 기본 자원을 막아 두면, 자원을 빠뜨린 자리가 예외로 드러난다
+    std::pmr::set_default_resource(std::pmr::null_memory_resource());
+    Limited budget(4096, std::pmr::new_delete_resource());
+    std::pmr::vector<int> numbers(100, 7, &budget);
+    try {
+        std::pmr::vector<int> copy = numbers;   // 자원을 적지 않은 복사
+        std::println("복사됨");
+    } catch (const std::bad_alloc&) {
+        std::println("자원을 적지 않은 복사: 기본 자원으로 가려다 막힘");
+    }
+    std::pmr::vector<int> copy(numbers, &budget);
+    std::pmr::vector<int> moved = std::move(numbers);
+    std::println("자원을 적은 복사와 이동 생성: 됨 ({}개, {}개)", copy.size(),
+                 moved.size());
+    std::pmr::set_default_resource(nullptr);
+}
+```
+
+```text
+64바이트 요청: 처리함
+7690바이트 요청: 한도를 넘어 거절함
+자원을 적지 않은 복사: 기본 자원으로 가려다 막힘
+자원을 적은 복사와 이동 생성: 됨 (100개, 100개)
+```
+
+악의적으로 큰 요청 하나가 프로세스의 메모리를 다 먹지 못하게 하는 층입니다. 잰 꼭대기(`peak()`)는 한도를 얼마로 잡을지 정하는 데 씁니다. 같은 모양으로 "n번째에 실패하는 자원"을 만들면 [앞 페이지의 시험](#/read/cpp-advanced/mm-allocator)을 템플릿 없이 할 수 있습니다.
+
+## 자원이 따라가지 않는 자리
+
+예제의 뒷부분이 보여 주듯, `pmr` 컨테이너를 **복사 생성하면 자원을 물려받지 않습니다.** 새 컨테이너는 기본 자원, 곧 힙을 씁니다. 두 표준 라이브러리에서 확인한 것입니다.
+
+| 하는 일 | 새 컨테이너의 자원 |
+| --- | --- |
+| `auto copy = source;` | **기본 자원.** 아레나에 있던 것의 사본이 힙에 생긴다 |
+| `auto moved = std::move(source);` | `source`의 자원. 버퍼를 그대로 받는다 |
+| `std::pmr::vector<int> copy(source, &arena);` | 적어 준 자원 |
+| `a = b;`, `a = std::move(b);` | `a`의 자원 그대로. 자원이 다르면 [원소를 하나씩 옮긴다](#/read/cpp-advanced/mm-allocator) |
+| `std::pmr::string c = a + "글";` | 기본 자원. 연산이 만든 임시 객체가 그렇다 |
+
+실수를 잡는 방법이 `std::pmr::set_default_resource(std::pmr::null_memory_resource())`입니다. 시험 코드의 맨 앞에서 기본 자원을 막아 두면, 자원을 빠뜨린 자리마다 `bad_alloc`이 납니다. 조용히 힙으로 새는 것을 눈에 보이는 실패로 바꾸는 것입니다.
+
+## 잰 값
+
+32바이트를 잡고 바로 푸는 한 쌍의 값입니다. x86-64, `-O2`입니다.
+
+| 자원 | libstdc++ 14 | libc++ 20 |
+| --- | --- | --- |
+| `std::allocator` (견줌) | 11 ns | 12 ns |
+| `new_delete_resource()` | 14 ns | 13 ns |
+| `unsynchronized_pool_resource` | 19 ns | 5.8 ns |
+| `synchronized_pool_resource` | 40 ns | 19 ns |
+| `monotonic_buffer_resource` (잡기만) | 2.1 ns | 2.1 ns |
+
+가상 함수를 거치는 값은 2 ns 안팎입니다. 눈에 띄는 것은 풀 자원입니다. libstdc++의 것은 `malloc`보다 **느렸습니다.** 풀 자원의 값어치는 속도가 아니라 [위쪽 자원에서 덩어리로 받아 와 다시 쓴다](#/read/cpp-stl/mem-allocator)는 데 있습니다. `map<int, int>`에 20만 개를 넣고 버리는 일은 기본 할당자 117 ns, 단조 자원 115~124 ns, 풀 자원 96~104 ns로 거의 같았습니다. 나무를 타고 내려가는 값이 할당보다 훨씬 크기 때문입니다.
+
+`pmr`를 쓰는 까닭은 빠르기보다 **어디서, 얼마까지** 쓰는지를 정할 수 있어서입니다.
+
+## 정리
+
+- 내 타입이 자원을 물려받으려면 `allocator_type`을 선언하고, 생성자의 마지막 인자로 할당자를 받아 멤버에게 넘긴다
+- 자원은 위쪽 자원에 한도, 세기, 실패 주입 같은 일을 덧붙이는 얇은 층으로 만든다
+- 복사 생성과 연산의 결과는 기본 자원으로 간다. 시험할 때 기본 자원을 막아 두면 빠뜨린 자리가 드러난다

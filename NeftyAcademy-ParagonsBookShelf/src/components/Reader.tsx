@@ -1,9 +1,27 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType } from 'react';
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react';
 import { bookColor, useBook } from '../context';
 import { buildIndex, canPaint, caretAt, findOccurrence, occurrenceBefore, offsetOf, paint, rangeOf } from '../marks';
 import { href } from '../router';
 import { NotFound } from './BookPage';
 import { ScrollRail, type RailSection } from './ScrollRail';
+
+/**
+ * 띄어쓰기 없는 긴 식별자(`enable_shared_from_this`, `std::chrono::duration`)가
+ * 좁은 화면에서 `_`와 `::` 뒤에서 끊기게 한다. 끊을 자리가 없는 제목은 그대로 돌려준다.
+ */
+function breakable(text: string): ReactNode {
+  if (!/_|::/.test(text)) return text;
+  return text.split(/(_|::)/).map((part, i) =>
+    part === '_' || part === '::' ? (
+      <Fragment key={i}>
+        {part}
+        <wbr />
+      </Fragment>
+    ) : (
+      part
+    ),
+  );
+}
 
 /** 본문은 한 번 그린 뒤 Reader의 상태가 바뀌어도 다시 그리지 않는다(줄치기 Range가 흔들리지 않게). */
 const Body = memo(function Body({ Content }: { Content: ComponentType }) {
@@ -185,7 +203,7 @@ export function Reader({ bookId, chapterId, section }: { bookId: string; chapter
           </a>
           <h1>
             <span className="bf-chapter-num">{label}</span>
-            {chapter.title}
+            <span className="bf-chapter-title">{breakable(chapter.title)}</span>
           </h1>
           {chapter.summary ? <p className="bf-lead">{chapter.summary}</p> : null}
         </header>
@@ -221,7 +239,9 @@ export function Reader({ bookId, chapterId, section }: { bookId: string; chapter
           {prev ? (
             <a href={href({ name: 'read', bookId, chapterId: prev.chapter.id })} className="bf-pager-prev">
               <small>이전</small>
-              {prev.label}. {prev.chapter.title}
+              <span>
+                {prev.label}. {breakable(prev.chapter.title)}
+              </span>
             </a>
           ) : (
             <span />
@@ -229,7 +249,9 @@ export function Reader({ bookId, chapterId, section }: { bookId: string; chapter
           {next ? (
             <a href={href({ name: 'read', bookId, chapterId: next.chapter.id })} className="bf-pager-next">
               <small>다음</small>
-              {next.label}. {next.chapter.title}
+              <span>
+                {next.label}. {breakable(next.chapter.title)}
+              </span>
             </a>
           ) : null}
         </nav>

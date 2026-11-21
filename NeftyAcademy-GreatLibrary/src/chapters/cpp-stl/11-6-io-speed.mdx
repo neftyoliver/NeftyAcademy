@@ -1,0 +1,220 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '쓰기와 읽기를 재어 본 수치, 느려지는 까닭 넷(endl, stdio 동기화, tie, 스트림 만들기), 바꿔 쓸 것들';
+
+"`iostream`은 느리다"는 말은 반쯤 맞습니다. 기본 설정으로 쓰면 느리고, 까닭을 알고 고치면 `printf`만큼 나옵니다. 그보다 더 빨라야 하면 스트림을 쓰지 않습니다. 먼저 수치를 봅니다.
+
+## 재어 보기
+
+정수 두 개씩 든 줄 100만 개(14.7MB)를 표준 출력으로 쓰고, 그것을 표준 입력으로 다시 읽어 합을 구했습니다. x86-64 서버, GCC 14 `-O2`, 출력과 입력은 파일로 돌렸습니다.
+
+| 쓰는 방법 | 시간 | 쓰기 호출 수 |
+| --- | --- | --- |
+| `std::cout << a << ' ' << b << std::endl` | 340 ms | 1,000,001 |
+| `std::cout << a << ' ' << b << '\n'` | 70 ms | 3,598 |
+| 위와 같고 `sync_with_stdio(false)` | 65 ms | 1,798 |
+| `std::printf("%d %d\n", a, b)` | 60 ms | 3,598 |
+| `std::println("{} {}", a, b)` | 120 ms | 3,598 |
+| `std::format_to`로 문자열에 모아 한 번에 쓰기 | 87 ms | |
+| `std::to_chars`로 문자열에 모아 한 번에 쓰기 | 20 ms | |
+
+| 읽는 방법 | 시간 |
+| --- | --- |
+| `std::cin >> a >> b` | 337 ms |
+| 위와 같고 `sync_with_stdio(false)` | 57 ms |
+| `std::ifstream`에서 `in >> a >> b` | 57 ms |
+| `std::scanf("%ld %ld", &a, &b)` | 75 ms |
+| `std::getline` 뒤 줄마다 `std::istringstream` | 298 ms |
+| `std::getline` 뒤 `std::from_chars` | 32 ms |
+| 통째로 읽고 `std::from_chars` | 30 ms |
+
+같은 `std::cout`이 340ms에서 65ms까지, 같은 `std::cin`이 337ms에서 57ms까지 달라집니다. 느린 것은 스트림 자체가 아니라 **설정과 쓰는 법**입니다.
+
+## 까닭 1: endl
+
+`std::endl`은 줄바꿈을 쓰고 버퍼를 비웁니다. 비울 때마다 운영체제의 `write`를 부릅니다. 위 표에서 쓰기 호출 수(`strace`로 센 `write`와 `writev`)가 100만 번과 3,598번으로 갈립니다. [스트림 버퍼](#/read/cpp-stl/io-streams)를 직접 만들어 비우기 요청을 세어 보면 눈으로 볼 수 있습니다.
+
+```cpp
+#include <cstddef>
+#include <ostream>
+#include <print>
+#include <streambuf>
+#include <string>
+
+// 받은 글자를 문자열에 모으고, 비우라는 요청을 센다
+class CountingBuf : public std::streambuf {
+public:
+    int flushes = 0;
+    std::string text;
+
+protected:
+    int_type overflow(int_type ch) override
+    {
+        if (ch != traits_type::eof())
+            text.push_back(static_cast<char>(ch));
+        return ch;
+    }
+    std::streamsize xsputn(const char* s, std::streamsize n) override
+    {
+        text.append(s, static_cast<std::size_t>(n));
+        return n;
+    }
+    int sync() override
+    {
+        ++flushes;
+        return 0;
+    }
+};
+
+int main()
+{
+    CountingBuf with_endl;
+    std::ostream a(&with_endl);
+    for (int i = 0; i < 1000; ++i)
+        a << i << std::endl;
+
+    CountingBuf with_newline;
+    std::ostream b(&with_newline);
+    for (int i = 0; i < 1000; ++i)
+        b << i << '\n';
+
+    std::println("endl 비우기 {}번, 글자 {}", with_endl.flushes,
+                 with_endl.text.size());
+    std::println("\\n   비우기 {}번, 글자 {}", with_newline.flushes,
+                 with_newline.text.size());
+}
+```
+
+```text
+endl 비우기 1000번, 글자 3890
+\n   비우기 0번, 글자 3890
+```
+
+나간 글자는 같고 비우기만 1000번 더 했습니다. 스트림 버퍼를 만드는 데 필요한 것이 가상 함수 셋(`overflow`, `xsputn`, `sync`)뿐이라는 것도 함께 보입니다. 로그를 UART나 네트워크로 보내는 스트림을 이렇게 만듭니다.
+
+## 까닭 2: stdio와의 동기화
+
+`std::cout`과 `std::printf`를 섞어 써도 순서가 맞는 것은, 기본 상태의 `std::cout`이 **자기 버퍼 없이** 글자를 C의 `stdout`에 그대로 넘기기 때문입니다. `std::cin`도 `stdin`에서 한 글자씩 받아 옵니다. 읽기에서 차이가 여섯 배 나는 까닭이 이것입니다.
+
+```cpp nocheck
+int main()
+{
+    std::ios::sync_with_stdio(false);   // 입출력을 하기 전에, 맨 먼저
+    std::cin.tie(nullptr);              // cin 을 읽을 때마다 cout 을 비우지 않게
+
+    long a = 0;
+    long b = 0;
+    long long sum = 0;
+    while (std::cin >> a >> b)
+        sum += a + b;
+    std::cout << sum << '\n';
+}
+```
+
+동기화를 끄면 `std::cin`과 `std::cout`이 자기 버퍼를 가집니다. 값을 치릅니다. 그 뒤로는 C++ 스트림과 C의 입출력을 **섞으면 안 됩니다.** `std::print`와 `std::println`도 C의 `stdout`에 쓰므로 섞으면 안 되는 쪽입니다.
+
+```cpp
+#include <iostream>
+#include <print>
+
+int main()
+{
+    std::ios::sync_with_stdio(false);
+    std::cout << "1 cout\n";
+    std::println("2 println");
+    std::cout << "3 cout\n";
+    std::println("4 println");
+}
+```
+
+```text nocheck
+1 cout
+3 cout
+2 println
+4 println
+```
+
+출력을 파일로 돌렸을 때의 결과입니다. 터미널에서는 `2 4 1 3` 순서로 나옵니다. 두 버퍼가 따로 비워지기 때문이고, 어느 쪽이든 쓴 순서가 아닙니다. 한 프로그램 안에서는 한 가지만 씁니다.
+
+## 까닭 3: tie
+
+`std::cin`은 [`std::cout`에 묶여](#/read/cpp-stl/io-streams) 있어서, 읽을 때마다 `std::cout`을 먼저 비웁니다. 묻고 답하는 프로그램에는 필요한 동작이고, 입력 100만 줄을 읽으며 중간중간 출력하는 프로그램에는 `std::endl`과 같은 짐입니다. 위 코드의 `std::cin.tie(nullptr)`이 그 묶음을 풉니다.
+
+## 까닭 4: 스트림을 만드는 값과 `<<` 한 번의 값
+
+표의 `getline` 뒤 줄마다 `istringstream`을 만드는 방법이 298ms입니다. 같은 줄을 `from_chars`로 풀면 32ms입니다. [스트림을 만드는 일](#/read/cpp-stl/io-string)이 비싸서, 루프 안에서 만들면 그 값이 줄 수만큼 곱해집니다.
+
+만들지 않아도 `<<`와 `>>` 한 번에는 하는 일이 많습니다. 상태를 확인하고, 묶인 스트림을 비우고, 로캘의 가상 함수를 불러 숫자를 바꿉니다. 그래서 설정을 다 고친 `ifstream`(57ms)도 `from_chars`(30ms)의 절반 속도입니다.
+
+GCC 14에서는 `std::println`이 `std::printf`보다 느리게 나왔습니다(120ms와 60ms). 이 버전의 구현은 서식을 임시 `std::string`에 먼저 만든 다음 내보내고, 결과가 15자를 넘으면 그 문자열 때문에 힙도 한 번 씁니다. 표준이 정한 동작이 아니라 구현의 사정이므로 버전이 오르면 달라질 수 있습니다. 대부분의 프로그램에서는 줄당 0.06마이크로초의 차이가 문제가 되지 않고, 타입 검사와 읽기 쉬움이 더 값집니다.
+
+## 빨라야 할 때 쓰는 것
+
+| 일 | 방법 |
+| --- | --- |
+| 줄을 많이 쓴다 | `'\n'`을 쓰고, 끝에서 한 번만 비운다 |
+| 아주 많이 쓴다 | 큰 `std::string`에 [`std::format_to`](#/read/cpp-stl/str-format)나 [`std::to_chars`](#/read/cpp-stl/str-convert)로 모아 `write` 한 번 |
+| `std::cin`으로 많이 읽는다 | `sync_with_stdio(false)`와 `cin.tie(nullptr)` |
+| 형식이 정해진 숫자를 많이 읽는다 | [파일을 통째로 읽고](#/read/cpp-stl/io-file) `std::from_chars`로 훑는다 |
+| 줄마다 풀어야 한다 | `std::getline`과 `std::from_chars`. 루프 안에서 스트림을 만들지 않는다 |
+
+통째로 읽어 훑는 코드는 길지 않습니다.
+
+```cpp
+#include <charconv>
+#include <print>
+#include <string>
+#include <string_view>
+#include <system_error>
+
+// 공백과 줄바꿈으로 나뉜 정수를 모두 더한다
+long long sum_numbers(std::string_view text)
+{
+    long long sum = 0;
+    const char* p = text.data();
+    const char* const end = p + text.size();
+    while (p < end) {
+        long value = 0;
+        const auto [next, ec] = std::from_chars(p, end, value);
+        if (ec == std::errc{}) {
+            sum += value;
+            p = next;
+        } else {
+            ++p;            // 숫자가 아닌 글자는 건너뛴다
+        }
+    }
+    return sum;
+}
+
+int main()
+{
+    const std::string text = "0 0\n1 7\n2 14\n3 21\n";
+    std::println("{}", sum_numbers(text));
+}
+```
+
+```text
+48
+```
+
+## 크기도 값이다
+
+속도 말고 하나 더 있습니다. 한 줄을 찍는 프로그램을 정적 링크해 크기를 쟀습니다(x86-64, glibc, `-Os`, `strip` 뒤).
+
+| 쓴 것 | 정적 링크 | 동적 링크 |
+| --- | --- | --- |
+| `std::printf` | 715 KB | 14 KB |
+| `std::cout` | 1,928 KB | 14 KB |
+| `std::println` | 2,023 KB | 72 KB |
+
+`<iostream>`을 쓰면 로캘과 모든 스트림 타입의 코드가 함께 딸려 옵니다. GCC 14의 `std::println`도 안에서 로캘 코드를 끌어옵니다. 리눅스가 도는 보드에서는 라이브러리가 공유되므로 상관없지만, 플래시가 수백 KB인 마이크로컨트롤러에서는 이 때문에 `iostream`을 아예 쓰지 않습니다. 그쪽 사정은 [「쓰지 않는 기능」](#/read/cpp-embedded/why-avoid)에서 다룹니다.
+
+<Note>
+재지 않고 고치지 않습니다. 입출력이 프로그램 시간의 1%라면 무엇을 써도 됩니다. 로그 한 줄, 설정 파일 하나에는 읽기 쉬운 쪽을 고르고, 100만 줄을 다루는 곳에서만 이 페이지의 방법을 씁니다.
+</Note>
+
+## 정리
+
+- 스트림이 느린 까닭의 대부분은 설정이다. `std::endl`은 줄마다 `write`를 부르고, 기본 상태의 `cin`과 `cout`은 자기 버퍼 없이 C의 입출력에 한 글자씩 넘긴다
+- `sync_with_stdio(false)`와 `cin.tie(nullptr)`로 여섯 배 빨라지지만, 그 뒤로는 `printf`나 `std::print`와 섞지 않는다
+- 더 빨라야 하면 스트림을 쓰지 않는다. 통째로 읽어 `from_chars`로 풀고, `to_chars`로 모아 한 번에 쓴다

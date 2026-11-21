@@ -1,0 +1,143 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'async가 안에서 하는 일, 함수와 future를 묶는 packaged_task, 일을 한 줄에 세우기';
+
+`std::async`는 편하지만 [부를 때마다 35 µs](#/read/cpp-advanced/asy-future)가 듭니다. 왜 그런지, 그리고 **언제 어디서 돌릴지를 내가 정하는** `std::packaged_task`를 봅니다. 뒤의 것이 [스레드 풀](#/read/cpp-advanced/asy-pool)의 부품입니다.
+
+## async가 하는 일
+
+| 물은 것 | GCC 14 | Clang 20 |
+| --- | --- | --- |
+| `std::async(f)`처럼 방식을 생략하면 | 새 스레드에서 돈다 | 새 스레드에서 돈다 |
+| `std::launch::async`로 100번 부르면 만들어지는 스레드 | 100개 | 100개 |
+| 한 번의 값 | 35 µs | 35 µs |
+
+`strace`로 스레드를 만드는 시스템 호출을 세어 확인한 결과입니다. 두 구현 모두 `std::async`는 **일마다 스레드를 새로 만들고, 끝나면 버립니다.** 재사용은 없습니다. 방식을 생략했을 때 새 스레드에서 도는 것도 두 구현이 그렇게 골랐을 뿐이고, 표준은 `deferred`를 골라도 된다고 합니다. 그래서 [`std::launch::async`를 늘 적습니다](#/read/cpp-stl/conc-future).
+
+`std::async`가 하는 일을 풀어 쓰면 이렇습니다.
+
+1. 함수와 인자를 [복사해 둔다](#/read/cpp-advanced/thr-args)
+2. [공유 상태](#/read/cpp-advanced/asy-future)를 만들고 `future`를 돌려준다
+3. 새 스레드에서 함수를 부르고, 돌려준 값이나 예외를 공유 상태에 넣는다
+4. `future`가 사라질 때 그 스레드를 기다린다
+
+1부터 3까지를 "스레드를 만든다"만 빼고 해 주는 것이 `packaged_task`입니다.
+
+## packaged_task
+
+```cpp
+#include <chrono>
+#include <deque>
+#include <functional>
+#include <future>
+#include <print>
+#include <stdexcept>
+#include <thread>
+#include <utility>
+
+using namespace std::chrono_literals;
+
+int parse(int raw)
+{
+    if (raw < 0) throw std::invalid_argument("음수는 받지 않는다");
+    return raw * 2;
+}
+
+int main()
+{
+    // 1. 함수와 future 를 묶어 둔다. 아직 아무 일도 일어나지 않는다
+    std::packaged_task<int(int)> task(parse);
+    std::future<int> result = task.get_future();
+    bool ready = result.wait_for(0s) == std::future_status::ready;
+    std::println("만든 직후: 준비됐나 {}", ready);
+
+    // 2. 부르는 순간, 부른 스레드에서 돈다
+    task(21);
+    std::println("부른 뒤: {}", result.get());
+
+    // 3. 다시 쓰려면 reset. 예외도 future 로 간다
+    task.reset();
+    result = task.get_future();
+    task(-1);
+    try {
+        result.get();
+    } catch (const std::exception& e) {
+        std::println("예외: {}", e.what());
+    }
+
+    // 4. 옮겨서 다른 스레드에 넘긴다. future 는 이쪽에 남는다
+    std::packaged_task<int()> remote([] { return 7; });
+    std::future<int> from_thread = remote.get_future();
+    std::jthread worker(std::move(remote));
+    std::println("다른 스레드에서: {}", from_thread.get());
+
+    // 5. 서로 다른 일을 한 줄에 세운다
+    std::deque<std::move_only_function<void()>> queue;
+    std::packaged_task<int()> first([] { return 1; });
+    std::packaged_task<double()> second([] { return 2.5; });
+    std::future<int> a = first.get_future();
+    std::future<double> b = second.get_future();
+    // 반환 타입이 달라도 void() 로 담긴다
+    queue.emplace_back(std::move(first));
+    queue.emplace_back(std::move(second));
+    while (!queue.empty()) {
+        queue.front()();
+        queue.pop_front();
+    }
+    int got_a = a.get();
+    double got_b = b.get();
+    std::println("줄에서 꺼내 돌린 결과: {} {}", got_a, got_b);
+
+    // 6. async 의 future 와 달리, 사라질 때 기다리지 않는다
+    auto start = std::chrono::steady_clock::now();
+    {
+        std::packaged_task<void()> slow([] { std::this_thread::sleep_for(50ms); });
+        std::future<void> ignored = slow.get_future();
+    }   // 돌리지도 않았고, 기다리지도 않는다
+    bool at_once = std::chrono::steady_clock::now() - start < 20ms;
+    std::println("바로 지나갔나: {}", at_once);
+}
+```
+
+```text
+만든 직후: 준비됐나 false
+부른 뒤: 42
+예외: 음수는 받지 않는다
+다른 스레드에서: 7
+줄에서 꺼내 돌린 결과: 1 2.5
+바로 지나갔나: true
+```
+
+`packaged_task<R(Args...)>`는 부를 수 있는 객체입니다. 부르면 안의 함수를 돌리고, **돌려준 값을 호출한 쪽에 주지 않고 `future`에 넣습니다.** 그래서 `task(21)` 자체는 `void`입니다. 어디서 부르든 결과는 `future`를 쥔 쪽으로 갑니다.
+
+5번이 이 타입의 쓸모입니다. `int`를 돌려주는 일과 `double`을 돌려주는 일은 타입이 다르지만, 둘 다 "인자 없이 부르면 되는 것"으로는 같습니다. 결과가 저마다의 `future`로 따로 빠져나가므로, 줄에는 `void()` 꼴로 나란히 세울 수 있습니다. 일꾼 스레드는 꺼내서 부르기만 하면 됩니다.
+
+줄의 타입이 `std::function`이 아니라 C++23의 `std::move_only_function`인 데에 까닭이 있습니다. `packaged_task`는 `future`와 한 쌍이라 복사가 안 되고, `std::function`은 복사되는 것만 받습니다.
+
+```text
+error: static assertion failed: std::function target must be copy-constructible
+```
+
+`std::move_only_function`은 GCC 12부터 있고 Clang 20의 libc++에는 없습니다. 없는 곳에서는 `packaged_task`를 `std::shared_ptr`에 넣어 람다로 잡은 뒤 `std::function`에 담습니다.
+
+## 셋을 견준다
+
+| | `std::async` | `std::packaged_task` | `std::promise` |
+| --- | --- | --- | --- |
+| 값을 넣는 것 | 함수가 돌려준 값을 저절로 | 함수가 돌려준 값을 저절로 | 내가 `set_value`를 부른다 |
+| 도는 곳 | 새 스레드 (라이브러리가 만든다) | 내가 부르는 곳 | 내가 정한다 |
+| `future`가 사라질 때 | **기다린다** | 기다리지 않는다 | 기다리지 않는다 |
+| 한 번의 값 (한 스레드에서) | 35 µs | 230 ns | 215 ns |
+| 맞는 자리 | 밀리초 넘게 걸리는 일 몇 개 | 일을 줄에 세워 일꾼에게 넘긴다 | 콜백으로 끝나는 일, 함수 하나로 안 되는 일 |
+
+셋째 줄이 `std::async`만의 성질입니다. 결과를 받지 않고 `std::async(…);`만 적으면 [그 줄에서 끝날 때까지 기다린다](#/read/cpp-stl/conc-future)는 함정이 거기서 나옵니다. `packaged_task`에서 얻은 `future`는 그냥 사라집니다. 대신 일을 **돌리지 않고** 버리면 기다리던 쪽이 `broken_promise`를 받습니다.
+
+<Note>
+`std::async`가 스레드를 재사용하지 않는 것은 표준의 요구에 가깝습니다. `thread_local` 변수가 일마다 새로 만들어지고 끝날 때 사라지는 것처럼 보여야 하기 때문입니다. 마이크로소프트의 구현은 스레드 풀을 쓰는 것으로 알려져 있는데, 이 책을 쓰며 돌려 보지는 못했습니다. 어느 쪽이든 "작은 일 수천 개"에는 맞지 않습니다.
+</Note>
+
+## 정리
+
+- `std::async`는 일마다 스레드를 만들고 버린다. 35 µs의 대부분이 그것이다
+- `packaged_task`는 함수와 `future`를 묶는다. 부른 곳에서 돌고, 결과는 `future`로 간다
+- 반환 타입이 다른 일들도 `void()`로 한 줄에 세울 수 있다. 복사가 안 되므로 `std::move_only_function`에 담는다

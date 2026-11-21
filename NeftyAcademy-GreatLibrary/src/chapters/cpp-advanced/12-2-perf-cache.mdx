@@ -1,0 +1,149 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '데이터의 크기와 읽는 순서가 정하는 값. 차례로, 무작위로, 따라가며 읽기를 재고 cachegrind로 확인한다';
+
+[「객체 배치와 캐시」](#/read/cpp-advanced/mm-layout)에서 "데이터가 캐시보다 크면"이라는 조건이 붙었습니다. 여기서는 그 조건을 숫자로 봅니다. 얼마나 커야 큰 것인지, 그리고 같은 데이터를 **어떤 순서로 읽는가**에 따라 값이 얼마나 달라지는지입니다.
+
+## 크기와 읽는 순서
+
+8바이트 정수의 배열을 세 가지 방법으로 읽습니다.
+
+```cpp nosan flags=-O2
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
+#include <numeric>
+#include <print>
+#include <random>
+#include <vector>
+
+template <typename F>
+double ns_each(std::size_t count, F work)
+{
+    const auto start = std::chrono::steady_clock::now();
+    work();
+    const auto end = std::chrono::steady_clock::now();
+    return std::chrono::duration<double, std::nano>(end - start).count()
+           / static_cast<double>(count);
+}
+
+int main()
+{
+    std::mt19937_64 rng(1);
+    std::println("     크기   차례로   무작위   따라가며");
+    for (std::size_t kb : {16, 128, 1024, 4096, 65536}) {
+        const std::size_t n = kb * 1024 / 8;
+
+        // data[i]는 "다음에 갈 곳"이다. 모든 칸을 한 번씩 지나는 한 바퀴로 섞는다
+        std::vector<std::uint64_t> data(n);
+        std::iota(data.begin(), data.end(), 0);
+        for (std::size_t i = n - 1; i > 0; --i)
+            std::swap(data[i], data[rng() % i]);
+
+        // 읽을 순서를 미리 섞어 둔 번호표
+        std::vector<std::uint32_t> order(n);
+        std::iota(order.begin(), order.end(), 0);
+        std::shuffle(order.begin(), order.end(), rng);
+
+        const std::size_t steps = std::max<std::size_t>(n, 8'000'000);
+        std::uint64_t sink = 0;
+
+        const double in_order = ns_each(steps, [&] {
+            for (std::size_t round = 0; round < steps / n; ++round)
+                for (std::size_t i = 0; i < n; ++i)
+                    sink += data[i];
+        });
+        const double shuffled = ns_each(steps, [&] {
+            for (std::size_t round = 0; round < steps / n; ++round)
+                for (std::size_t i = 0; i < n; ++i)
+                    sink += data[order[i]];   // 주소를 미리 안다
+        });
+        const double chasing = ns_each(steps, [&] {
+            std::uint64_t at = 0;
+            for (std::size_t i = 0; i < steps; ++i)
+                at = data[at];                // 읽어야 다음 주소를 안다
+            sink += at;
+        });
+        std::println("{:7}KB {:6.2f}ns {:6.2f}ns {:7.2f}ns{}", kb, in_order,
+                     shuffled, chasing, sink == 0 ? "?" : "");
+    }
+}
+```
+
+```text nocheck
+     크기   차례로   무작위   따라가며
+     16KB   0.27ns   0.26ns    1.32ns
+    128KB   0.27ns   0.32ns    3.25ns
+   1024KB   0.27ns   0.42ns    5.25ns
+   4096KB   0.44ns   2.49ns   40.35ns
+  65536KB   0.96ns   8.92ns  182.02ns
+```
+
+x86-64, GCC 14 `-O2`입니다. 더 큰 배열까지 잰 것을 합치면 이렇습니다. 원소 하나를 읽는 값입니다.
+
+| 배열의 크기 | 차례로 | 무작위로 | 따라가며 |
+| --- | --- | --- | --- |
+| 16 KB, 32 KB | 0.26 ns | 0.26 ns | 1.3 ns |
+| 128 KB | 0.26 ns | 0.31 ns | 3.2 ns |
+| 1 MB | 0.29 ns | 0.58 ns | 5.6 ns |
+| 4 MB | 0.42 ns | 2.2 ns | 39 ns |
+| 32 MB | 0.97 ns | 4.8 ns | 174 ns |
+| 1 GB | 0.98 ns | 20 ns | 239 ns |
+
+- **차례로 읽으면 크기가 거의 상관없습니다.** 1 GB에서도 1 ns입니다. CPU가 다음에 읽을 줄을 미리 가져오기 때문입니다.
+- **무작위로 읽되 주소를 미리 알면** 20배쯤 듭니다. 여러 읽기를 동시에 내보낼 수 있어서 그나마 이 정도입니다.
+- **읽어야 다음 주소를 알면** 하나가 끝나야 다음을 시작합니다. 1 GB에서 239 ns, 차례로 읽기의 **240배**입니다. 연결 리스트와 나무를 따라가는 일이 이 꼴입니다.
+
+오른쪽 열이 계단을 이룹니다. 이 기계의 L1 캐시는 48 KB, L2는 2 MB입니다. 32 KB까지 1.3 ns, 1 MB까지 3~6 ns, 그 뒤로는 메모리까지 가는 값입니다. `lscpu`는 L3가 504 MB라고 알려 주었지만 잰 값은 32 MB에서 이미 174 ns였습니다. 가상 머신이라 적힌 대로 쓰지 못하는 것으로 보입니다. **캐시의 크기는 적힌 값이 아니라 잰 값**을 믿습니다.
+
+## 같은 일, 다른 순서
+
+4,096×4,096 정수 격자(64 MB)의 합입니다.
+
+| 도는 순서 | 걸린 시간 |
+| --- | --- |
+| 행을 따라 (`grid[r * side + c]`에서 `c`가 안쪽 루프) | 15 ms |
+| 열을 따라 (`r`이 안쪽 루프) | 152 ms |
+
+명령의 수는 같은데 열 배가 듭니다. [cachegrind](#/read/cpp-advanced/perf-measure)로 2,048×2,048 격자를 돌리면 까닭이 숫자로 보입니다.
+
+```text nocheck
+행을 따라    I refs: 33,483,827    D1 misses: 274,506 rd   (D1 miss rate  5.8%)
+열을 따라    I refs: 33,487,921    D1 misses: 4,206,665 rd (D1 miss rate 89.2%)
+```
+
+행을 따라가면 캐시 줄 하나(정수 16개)에 한 번만 놓칩니다. 열을 따라가면 읽을 때마다 8 KB 떨어진 곳으로 뛰어, 거의 매번 놓칩니다.
+
+## 포인터를 따라가는 자료구조
+
+64바이트 객체 200만 개를 한 번씩 읽었습니다. [스마트 포인터의 값](#/read/cpp-advanced/sp-cost)에서 "힙이 흩어지면 차이가 더 벌어진다"고 한 것을 잰 것입니다.
+
+| 담은 방법 | 걸린 시간 | 하나에 |
+| --- | --- | --- |
+| `vector<Item>` | 9 ms | 4.6 ns |
+| `vector<unique_ptr<Item>>`, 객체가 만든 순서대로 놓여 있다 | 13 ms | 6.4 ns |
+| 같은 포인터들, 가리키는 순서가 섞였다 | 26 ms | 13 ns |
+| 연결 리스트, 노드가 만든 순서대로 놓여 있다 | 23 ms | 12 ns |
+| 연결 리스트, 노드가 섞였다 | 380~430 ms | 190~215 ns |
+
+같은 객체, 같은 개수인데 맨 위와 맨 아래가 **40배** 차이입니다. 새로 띄운 프로그램에서 잰 연결 리스트는 둘째 줄에 가깝습니다. 넣고 빼기를 오래 한 프로그램의 것은 맨 아래로 갑니다. 벤치마크에서 멀쩡하던 자료구조가 실제 서비스에서 느린 까닭이 흔히 이것입니다.
+
+## 지킬 것
+
+| 규칙 | 뜻 | 본 곳 |
+| --- | --- | --- |
+| 붙여 둔다 | 따로 할당한 객체들보다 배열 하나 | 위의 표 |
+| 차례로 읽는다 | 도는 순서를 메모리에 놓인 순서에 맞춘다 | 행과 열 |
+| 사슬을 끊는다 | 포인터 대신 번호로 가리키고, 미리 알 수 있는 주소는 배열에 모아 둔다 | 첫 표의 둘째와 셋째 열 |
+| 작게 만든다 | 캐시에 들어가면 순서가 덜 중요해진다 | [배치](#/read/cpp-advanced/mm-layout) |
+| 캐시보다 큰 것은 덩어리로 나눠 한 덩어리를 끝내고 넘어간다 | 같은 줄을 다시 가져오지 않는다 | 재지 않았다 |
+
+<Note>
+`std::map`과 `std::list`가 [느리다는 평](#/read/cpp-stl/ov-complexity)을 듣는 까닭이 이 페이지의 셋째 열입니다. 복잡도는 같아도 노드마다 따라가야 합니다. 정렬된 `vector`에서 이진 탐색을 하거나 [`flat_map`](#/read/cpp-stl/assoc-flat)을 쓰면 같은 일을 붙어 있는 메모리에서 합니다. 다만 중간에 넣고 빼는 일이 잦으면 이야기가 달라지므로, 고르기 전에 잽니다.
+</Note>
+
+## 정리
+
+- 차례로 읽으면 1 GB에서도 원소 하나에 1 ns다. 읽어야 다음 주소를 아는 꼴은 239 ns가 든다
+- 같은 계산도 메모리에 놓인 순서를 거슬러 돌면 열 배가 든다. cachegrind가 놓친 횟수를 세어 보여 준다
+- 포인터로 이은 자료구조는 힙이 흩어질수록 느려진다. 붙여 두고, 차례로 읽고, 사슬을 끊는다

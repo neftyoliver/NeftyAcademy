@@ -1,0 +1,196 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'create_directories, copy_file과 선택지, rename으로 바꿔치기, remove_all 조심하기, 남은 공간 묻기';
+
+[`path`](#/read/cpp-stl/fs-path)는 글자일 뿐이고, 디스크를 바꾸는 것은 `fs::` 아래의 자유 함수입니다. 자주 쓰는 것을 한 번씩 돌려 봅니다.
+
+## 만들고, 복사하고, 지우기
+
+```cpp
+#include <filesystem>
+#include <fstream>
+#include <print>
+#include <system_error>
+
+namespace fs = std::filesystem;
+
+int main()
+{
+    const fs::path root = fs::temp_directory_path() / "na-ops";
+    fs::remove_all(root);
+    std::error_code ec;
+
+    std::println("create_directory   {}", fs::create_directory(root));
+    std::println("한 번 더           {}", fs::create_directory(root));
+    const fs::path deep = root / "logs" / "2026" / "11";
+    std::println("create_directories {}", fs::create_directories(deep));
+    fs::create_directory(root / "a" / "b", ec);
+    std::println("부모가 없으면      {}", ec.message());
+
+    const fs::path config = root / "config.txt";
+    const fs::path backup = root / "config.bak";
+    std::ofstream(config) << "rate=10\n";
+    std::println("copy_file          {}", fs::copy_file(config, backup));
+    fs::copy_file(config, backup, ec);
+    std::println("이미 있으면        {}", ec.message());
+    const auto skip = fs::copy_options::skip_existing;
+    std::println("skip_existing      {}", fs::copy_file(config, backup, skip));
+    const auto over = fs::copy_options::overwrite_existing;
+    std::println("overwrite_existing {}", fs::copy_file(config, backup, over));
+
+    fs::copy(root / "logs", root / "logs-copy", fs::copy_options::recursive);
+    std::println("폴더째 복사        {}", fs::exists(root / "logs-copy" / "2026"));
+
+    std::println("remove(있는 것)    {}", fs::remove(backup));
+    std::println("remove(없는 것)    {}", fs::remove(backup));
+    fs::remove(root / "logs", ec);
+    std::println("비지 않은 폴더     {}", ec.message());
+    std::println("remove_all         {}", fs::remove_all(root));
+}
+```
+
+```text
+create_directory   true
+한 번 더           false
+create_directories true
+부모가 없으면      No such file or directory
+copy_file          true
+이미 있으면        File exists
+skip_existing      false
+overwrite_existing true
+폴더째 복사        true
+remove(있는 것)    true
+remove(없는 것)    false
+비지 않은 폴더     Directory not empty
+remove_all         8
+```
+
+돌려주는 `bool`은 "성공했는가"가 아니라 <strong>"실제로 무엇인가를 했는가"</strong>입니다. 이미 있는 디렉터리를 만들라고 하거나 없는 파일을 지우라고 하는 것은 오류가 아니고 `false`입니다. 그래서 "있으면 두고 없으면 만든다"를 `exists`로 미리 확인하지 않고 한 줄로 씁니다.
+
+| 함수 | 하는 일 | 알아 둘 것 |
+| --- | --- | --- |
+| `create_directory(p)` | 한 단계를 만든다 | 부모가 없으면 오류 |
+| `create_directories(p)` | 중간 단계까지 만든다 | `mkdir -p` |
+| `copy_file(a, b)` | 파일 하나를 복사한다 | `b`가 있으면 오류. 선택지로 바꾼다 |
+| `copy(a, b, 선택지)` | 파일, 디렉터리, 링크를 복사한다 | `recursive`를 줘야 아래까지 간다 |
+| `rename(a, b)` | 이름을 바꾸거나 옮긴다 | `b`가 파일이면 덮어쓴다 |
+| `remove(p)` | 파일이나 **빈** 디렉터리 하나 | 없으면 `false` |
+| `remove_all(p)` | 아래까지 모두 | 지운 개수를 준다 |
+| `resize_file(p, n)` | 크기를 `n`으로 | 줄이면 잘리고 늘리면 0으로 찬다 |
+
+## rename으로 바꿔치기
+
+[「파일 스트림」](#/read/cpp-stl/io-file)에서, 깨지면 안 되는 파일은 임시 파일에 다 쓴 다음 이름을 바꿔 덮는다고 했습니다. `rename`은 같은 파일 시스템 안에서 **한순간에** 일어나기 때문입니다. 읽는 쪽은 옛 내용 전체 아니면 새 내용 전체를 봅니다. 반만 쓰인 파일을 보는 일이 없습니다.
+
+```cpp
+#include <filesystem>
+#include <fstream>
+#include <print>
+#include <string_view>
+#include <system_error>
+
+namespace fs = std::filesystem;
+
+// 옆에 임시 파일로 쓴 다음 이름을 바꿔 덮는다
+bool save_atomically(const fs::path& target, std::string_view text)
+{
+    fs::path temp = target;
+    temp += ".tmp";                 // 같은 디렉터리에 둔다
+    {
+        std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+        out << text;
+        out.flush();
+        if (!out)
+            return false;
+    }
+    std::error_code ec;
+    fs::rename(temp, target, ec);
+    if (ec) {
+        fs::remove(temp, ec);
+        return false;
+    }
+    return true;
+}
+
+int main()
+{
+    const fs::path root = fs::temp_directory_path() / "na-save";
+    fs::create_directories(root);
+    const fs::path config = root / "config.txt";
+
+    std::ofstream(config) << "rate=10\n";
+    std::println("{}", save_atomically(config, "rate=200\n"));
+    std::println("크기 {}, 임시 파일이 남았나 {}", fs::file_size(config),
+                 fs::exists(root / "config.txt.tmp"));
+    fs::remove_all(root);
+}
+```
+
+```text
+true
+크기 9, 임시 파일이 남았나 false
+```
+
+임시 파일을 **같은 디렉터리**에 두는 것이 요점입니다. `/tmp`에 쓰고 옮기려 하면, `/tmp`가 다른 파일 시스템일 때 `rename`이 `Invalid cross-device link` 오류로 실패합니다. 라즈베리 파이 OS처럼 `/tmp`를 메모리에 두는 시스템에서 흔합니다. 다른 파일 시스템으로 옮길 때는 `copy_file`한 뒤 `remove`하며, 그것은 한순간이 아닙니다.
+
+## remove_all을 조심해서
+
+`remove_all`은 묻지 않고 아래까지 지웁니다. 경로를 조립하는 코드가 틀리면 엉뚱한 곳이 지워집니다.
+
+```cpp nocheck
+const fs::path cache = base / name;     // name 이 빈 문자열이면 cache 는 base 자체
+fs::remove_all(cache);                  // base 가 통째로 사라진다
+```
+
+| 지우기 전에 볼 것 | 까닭 |
+| --- | --- |
+| 조립에 쓴 조각이 비어 있지 않은가 | 위의 경우. `base / ""`는 `base/`다 |
+| 결과가 [의도한 디렉터리 아래인가](#/read/cpp-stl/fs-path) | `..`이나 절대 경로가 섞였을 수 있다 |
+| 환경 변수에서 온 경로가 비어 있지 않은가 | 빈 경로에 이름을 이으면 현재 디렉터리 기준의 상대 경로가 된다 |
+
+심볼릭 링크를 `remove_all`하면 링크만 지우고 가리키는 곳은 건드리지 않습니다. 이것은 안전한 쪽입니다.
+
+<Note kind="warn">
+`fs::exists(p)`로 확인하고 그다음 줄에서 여는 코드는 그 사이에 다른 프로그램이 끼어들 수 있습니다. 확인한 뒤에 파일이 지워지거나, 없다는 것을 확인한 뒤에 누가 만들 수 있습니다. 확인하고 하지 말고 **그냥 하고, 실패를 받습니다.** 파일을 새로 만들 때는 [`std::ios::noreplace`](#/read/cpp-stl/io-file)가, 디렉터리는 `create_directory`의 반환값이 그 일을 한 번에 해 줍니다.
+</Note>
+
+## 정보 묻기
+
+| 함수 | 주는 것 |
+| --- | --- |
+| `fs::exists(p)`, `fs::is_regular_file(p)`, `fs::is_directory(p)` | 있는가, 무엇인가 |
+| `fs::file_size(p)` | 바이트 수 |
+| `fs::last_write_time(p)` | 마지막으로 고친 때. [`file_clock`의 시각](#/read/cpp-stl/chr-clocks) |
+| `fs::space(p)` | 그 경로가 있는 파일 시스템의 전체·빈·쓸 수 있는 바이트 |
+| `fs::temp_directory_path()` | 임시 파일을 둘 곳 |
+| `fs::current_path()` | 현재 작업 디렉터리. 인자를 주면 바꾼다 |
+
+SD 카드에 로그를 쌓는 기기는 가득 차기 전에 멈추거나 옛 파일을 지워야 합니다.
+
+```cpp
+#include <filesystem>
+#include <print>
+
+namespace fs = std::filesystem;
+
+int main()
+{
+    const fs::space_info info = fs::space(fs::temp_directory_path());
+    std::println("전체 {} GB, 쓸 수 있는 {} GB", info.capacity >> 30,
+                 info.available >> 30);
+    if (info.available < (100u << 20))
+        std::println("100MB 아래. 옛 로그를 지운다");
+}
+```
+
+```text nocheck
+전체 251 GB, 쓸 수 있는 27 GB
+```
+
+`free`는 관리자 몫으로 남겨 둔 것까지 센 값이고, `available`이 보통 프로그램이 실제로 쓸 수 있는 값입니다. 현재 작업 디렉터리는 프로그램을 어디서 실행했느냐에 따라 달라지고 스레드가 모두 함께 쓰므로, 설정이나 자료의 위치를 상대 경로로 두고 `current_path`에 기대는 코드는 서비스로 띄우는 순간 깨집니다. 기준 디렉터리를 인자나 설정으로 받아 `path`로 들고 다닙니다.
+
+## 정리
+
+- 만들기와 지우기 함수의 `bool`은 "실제로 했는가"다. 이미 있거나 이미 없는 것은 오류가 아니다
+- 깨지면 안 되는 파일은 같은 디렉터리의 임시 파일에 쓰고 `rename`으로 덮는다. 다른 파일 시스템으로는 `rename`이 되지 않는다
+- `remove_all`에 넘길 경로는 비어 있지 않은지, 의도한 디렉터리 아래인지 확인한다. 있는지 미리 묻지 말고 하고 나서 실패를 받는다

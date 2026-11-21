@@ -1,0 +1,176 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '프로그램이 자기 구조를 묻는 기능. 지금 쓰는 우회, C++26 초안의 문법, 이 책에서 확인한 범위';
+
+이 챕터의 기법들은 한 가지 결핍을 메우려던 것입니다. C++ 프로그램은 **자기 자신의 구조를 물을 수 없었습니다.** 열거형의 값 이름을 글로 얻거나, 구조체의 멤버를 차례로 도는 일이 언어에 없었습니다. C++26 초안의 정적 리플렉션이 그것을 줍니다. "정적"은 컴파일할 때라는 뜻입니다. [`std::execution`](#/read/cpp-advanced/asy-execution)처럼 이 페이지도 **초안의 코드를 돌려 보지 못했습니다.**
+
+## 지금의 사정
+
+| 때 | 일어난 일 |
+| --- | --- |
+| 2025년&nbsp;6월 | 리플렉션 제안서 일곱 편이 C++26 초안에 들어갔다. 중심이 P2996이다 |
+| 2026년&nbsp;4월 | GCC 16.1이 실험 기능으로 실었다. `-std=c++26 -freflection`으로 켠다 |
+| 2026년&nbsp;11월 | [C++26은 아직 발행되지 않았다](#/read/cpp-syntax/ver-26). 이 책의 GCC 14와 Clang 20에는 없다 |
+
+```cpp std26
+#include <print>
+#include <version>
+
+int main()
+{
+#ifdef __cpp_lib_reflection
+    std::println("리플렉션 라이브러리: {}", __cpp_lib_reflection);
+#else
+    std::println("리플렉션 라이브러리: 없음");
+#endif
+}
+```
+
+```text
+리플렉션 라이브러리: 없음
+```
+
+두 컴파일러 모두 이렇게 답합니다. 초안이 정한 값은 `202506`입니다. Clang 쪽은 블룸버그가 제안서와 함께 공개한 갈래(clang-p2996)가 있고, 본가에 들어왔는지는 이 글을 쓰면서 확인하지 못했습니다.
+
+## 지금 쓰는 우회
+
+리플렉션 없이 이름을 얻는 방법은 **컴파일러가 찍어 주는 글을 빌리는 것**입니다. GCC와 Clang은 `__PRETTY_FUNCTION__`에 템플릿 인자의 값을 적어 줍니다.
+
+```cpp
+#include <array>
+#include <cstddef>
+#include <print>
+#include <string_view>
+#include <utility>
+
+enum class Mode { idle, heating, cooling };
+
+// 컴파일러가 함수 이름에 템플릿 인자를 적어 주는 것을 빌린다
+template <auto Value>
+constexpr std::string_view raw_signature()
+{
+    return __PRETTY_FUNCTION__;
+}
+
+template <auto Value>
+constexpr std::string_view name_of_value()
+{
+    std::string_view text = raw_signature<Value>();
+    text.remove_prefix(text.find("Value = ") + 8);
+    text = text.substr(0, text.find_first_of(";]"));
+    if (auto colons = text.rfind("::"); colons != std::string_view::npos)
+        text.remove_prefix(colons + 2);
+    return text;
+}
+
+// 0번부터 Count개의 이름을 표로 만든다
+template <typename E, std::size_t Count>
+constexpr auto names_of = [] {
+    return []<std::size_t... I>(std::index_sequence<I...>) {
+        return std::array{name_of_value<static_cast<E>(I)>()...};
+    }(std::make_index_sequence<Count>{});
+}();
+
+constexpr std::string_view to_string(Mode mode)
+{
+    return names_of<Mode, 3>[static_cast<std::size_t>(mode)];
+}
+
+static_assert(to_string(Mode::heating) == "heating");
+
+int main()
+{
+    std::println("{} / {} / {}", to_string(Mode::idle), to_string(Mode::heating),
+                 to_string(Mode::cooling));
+    std::println("없는 값: {}", name_of_value<static_cast<Mode>(7)>());
+}
+```
+
+```text
+idle / heating / cooling
+없는 값: (Mode)7
+```
+
+돌기는 합니다. 그러나 무엇에 기대고 있는지를 보면 오래 쓸 것이 아닙니다.
+
+| 기대는 것 | 실제 |
+| --- | --- |
+| `__PRETTY_FUNCTION__`의 글 모양 | GCC 14는 `… [with auto Value = Mode::heating; …]`, Clang 20은 `… [Value = Mode::heating]`. 표준이 정한 것이 아니다 |
+| 값이 몇 개인지 | 알 길이 없다. 위에서는 3을 손으로 적었다 |
+| 값이 0부터 이어진다는 것 | 건너뛴 값이나 큰 값은 표에 담지 못한다 |
+| 컴파일 시간 | 값마다 함수 템플릿이 하나씩 만들어진다 |
+
+magic_enum 같은 라이브러리가 이 방법을 다듬은 것입니다. 구조체의 멤버는 더 어렵습니다. Boost.PFR은 멤버의 수를 "중괄호 초기화가 인자 몇 개까지 되는가"로 세고 [구조적 바인딩](#/read/cpp-syntax/types-binding)으로 풀어냅니다. 그 밖에는 매크로로 멤버를 한 번 더 적어 주거나, 코드 생성기를 빌드에 끼웁니다.
+
+## C++26 초안의 모습
+
+아래 코드는 제안서 P2996R13의 예제 꼴을 따라 쓴 것이고, 이 책의 환경에서 **컴파일해 보지 못했습니다.**
+
+```cpp nocheck
+#include <meta>
+#include <print>
+#include <string_view>
+
+enum class Mode { idle, heating, cooling };
+
+template <typename E>
+constexpr std::string_view to_string(E value)
+{
+    // ^^E: 타입 E를 가리키는 값(std::meta::info)을 얻는다
+    template for (constexpr auto item :
+                  std::define_static_array(std::meta::enumerators_of(^^E))) {
+        if (value == [:item:])               // [: :]: 그 값을 다시 코드로 꺼낸다
+            return std::meta::identifier_of(item);
+    }
+    return "?";
+}
+
+struct Reading {
+    int id;
+    double celsius;
+    bool valid;
+};
+
+template <typename T>
+void dump(const T& object)
+{
+    constexpr auto who = std::meta::access_context::current();
+    template for (constexpr auto member : std::define_static_array(
+                      std::meta::nonstatic_data_members_of(^^T, who))) {
+        std::println("{} = {}", std::meta::identifier_of(member),
+                     object.[:member:]);
+    }
+}
+```
+
+| 조각 | 하는 일 |
+| --- | --- |
+| `^^X` | 타입, 변수, 함수, 이름공간 `X`를 가리키는 값을 만든다. 그 값의 타입은 하나, `std::meta::info`다 |
+| `[: r :]` | `info` 값을 다시 프로그램의 한 조각으로 꺼낸다. 타입 자리, 식 자리, 멤버 자리에 쓴다 |
+| `<meta>`의 함수들 | `enumerators_of`, `nonstatic_data_members_of`, `identifier_of`, `type_of`, `offset_of` 따위. 모두 `consteval`이다 |
+| `template for` | 컴파일할 때 도는 루프. 바퀴마다 본문이 따로 만들어져서 `item`의 타입이 바퀴마다 달라도 된다 |
+| `define_static_array` | 컴파일할 때 만든 `vector`를 [밖으로 꺼낼 수 있는 배열](#/read/cpp-advanced/tmp-strings)로 바꾼다 |
+| `access_context` | 어느 자리의 권한으로 묻는지. `private` 멤버가 보이는지가 여기에 달렸다 |
+
+타입 계산이 **보통 코드**가 된다는 점이 큽니다. `info`는 값이라서 `std::vector<std::meta::info>`에 담고 `std::ranges::sort`로 줄 세울 수 있습니다. [타입 리스트](#/read/cpp-advanced/tmp-typelist)에서 재귀와 부분 특수화로 하던 일입니다.
+
+## 달라지는 것과 그대로인 것
+
+| 하던 일 | 지금까지 | 리플렉션으로 |
+| --- | --- | --- |
+| 열거형 값과 글 사이를 오간다 | 표를 손으로 맞추거나 위의 우회 | `enumerators_of`와 `identifier_of` |
+| 구조체를 JSON이나 바이트로 풀고 묶는다 | 멤버마다 손으로, 또는 매크로 | 멤버를 돌며 한 번만 쓴다 |
+| 명령행 옵션, 설정 항목을 구조체에서 만든다 | 이름을 문자열로 한 번 더 적는다 | 멤버의 이름이 곧 옵션 이름 |
+| 타입들의 목록을 다룬다 | 타입 리스트와 재귀 템플릿 | `info`의 `vector`와 보통 알고리즘 |
+
+그대로인 것도 있습니다. 실행 중에 타입을 묻는 기능이 **아닙니다.** 타입 정보가 실행 파일에 저절로 남지 않고, 필요한 표는 위의 `to_string`처럼 컴파일할 때 내가 만들어 넣습니다. 쓰지 않으면 값을 치르지 않는다는 원칙이 지켜지는 대신, 플러그인이 넘겨준 낯선 객체의 멤버를 실행 중에 뒤지는 일은 여전히 안 됩니다. 코드를 만들어 넣는 쪽도 좁습니다. 초안이 허락하는 것은 멤버 목록을 주고 구조체를 완성하는 `define_aggregate` 정도입니다.
+
+<Note kind="warn">
+이 페이지에서 돌려 확인한 것은 첫 예제(두 컴파일러에 아직 없다)와 둘째 예제(지금의 우회)뿐입니다. 셋째 코드는 초안이 바뀌면 틀릴 수 있고, [C++26 자체의 앞날](#/read/cpp-syntax/ver-26)도 정해지지 않았습니다. 다만 다툼의 대상은 계약이고 리플렉션은 아닙니다. 새 코드에 위의 우회를 깊이 심지는 말고, 이름을 얻는 자리를 함수 하나 뒤에 모아 두면 나중에 갈아 끼우기 쉽습니다.
+</Note>
+
+## 정리
+
+- 정적 리플렉션은 컴파일할 때 타입의 이름, 멤버, 열거값을 묻고 그것으로 코드를 만든다. C++26 초안에 있고 GCC 16.1이 실험적으로 싣고 있다
+- 지금의 우회는 `__PRETTY_FUNCTION__`의 글 모양에 기댄다. 컴파일러마다 다르고 값의 개수는 손으로 적어야 한다
+- 초안의 문법은 `^^`로 가리키고 `[: :]`로 꺼낸다. 이 책에서는 돌려 보지 못했다

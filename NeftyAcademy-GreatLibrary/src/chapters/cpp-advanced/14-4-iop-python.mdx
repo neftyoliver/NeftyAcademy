@@ -1,0 +1,192 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'ctypes와 pybind11로 파이썬에서 C++을 부른다. 틀린 타입이 내는 조용한 쓰레기, 경계를 넘는 값, GIL';
+
+파이썬 프로그램의 느린 곳을 C++로 옮기거나, 이미 있는 C++ 라이브러리를 파이썬에서 쓰게 하는 일입니다. 길이 둘 있습니다. [C로 내놓은 인터페이스](#/read/cpp-advanced/iop-c-abi)를 파이썬에서 그대로 부르거나, C++ 타입을 파이썬의 타입으로 보이게 하는 모듈을 만듭니다. 이 페이지의 숫자는 파이썬 3.13과 pybind11 3.1로 쟀습니다.
+
+## ctypes: C 인터페이스를 그대로
+
+파이썬에 들어 있는 `ctypes`는 공유 라이브러리를 올려 그 안의 C 함수를 부릅니다. 앞에서 만든 `thermo`를 `libthermo.so`로 빌드해 두면 컴파일러 없이 됩니다.
+
+```python
+# use_ctypes.py: 컴파일 없이 C 인터페이스를 부른다
+import ctypes
+
+lib = ctypes.CDLL("./libthermo.so")
+
+# 함수마다 인자와 반환의 타입을 적어 준다. 헤더를 손으로 옮기는 셈이다
+lib.thermo_create.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
+lib.thermo_add.argtypes = [ctypes.c_void_p, ctypes.c_double]
+lib.thermo_average.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_double)]
+lib.thermo_destroy.argtypes = [ctypes.c_void_p]
+lib.thermo_destroy.restype = None
+lib.thermo_last_error.restype = ctypes.c_char_p
+
+room = ctypes.c_void_p()
+lib.thermo_create("거실".encode(), ctypes.byref(room))
+average = ctypes.c_double()
+if lib.thermo_average(room, ctypes.byref(average)) != 0:
+    print("오류:", lib.thermo_last_error().decode())
+
+lib.thermo_add(room, 21.5)
+lib.thermo_add(room, 31.0)
+lib.thermo_average(room, ctypes.byref(average))
+print("평균", average.value)
+lib.thermo_destroy(room)
+```
+
+```text nocheck
+오류: thermo_average: no samples
+평균 26.25
+```
+
+`ctypes`는 헤더를 읽지 않습니다. **적어 준 타입을 그대로 믿습니다.** 빠뜨리거나 틀리게 적어 봤습니다.
+
+| 한 일 | 일어난 일 |
+| --- | --- |
+| `argtypes` 없이 `thermo_add(room, 21.5)` | `ArgumentError`. 실수를 어떻게 넘길지 모른다 |
+| `restype` 없이 `thermo_last_error()` | 글이 아니라 정수 249847928. 포인터가 `int`로 잘렸다 |
+| `double` 자리를 `c_int`로 적었다 | 오류 없이 성공. 평균은 `1.04e-322` |
+
+셋째가 가장 나쁩니다. 헤더가 바뀌면 이 선언들도 손으로 따라 고쳐야 하고, 어긋나도 알려 주는 것이 없습니다.
+
+## pybind11: C++ 타입을 그대로
+
+pybind11은 헤더뿐인 C++ 라이브러리입니다. 클래스와 함수를 등록하는 코드를 쓰면 파이썬이 `import`하는 모듈이 됩니다.
+
+```cpp nocheck
+// pythermo.cpp: C++ 클래스를 파이썬 모듈로 만든다
+#include <pybind11/numpy.h>
+#include <pybind11/pybind11.h>
+
+#include <chrono>
+#include <numeric>
+#include <stdexcept>
+#include <vector>
+
+namespace py = pybind11;
+
+class Thermo {
+public:
+    void add(double celsius) { samples_.push_back(celsius); }
+    void add_array(py::array_t<double, py::array::c_style | py::array::forcecast> a)
+    {
+        const auto view = a.unchecked<1>();     // numpy의 메모리를 복사 없이 본다
+        samples_.insert(samples_.end(), view.data(0), view.data(0) + view.shape(0));
+    }
+    double average() const
+    {
+        if (samples_.empty()) throw std::invalid_argument("no samples");
+        return std::accumulate(samples_.begin(), samples_.end(), 0.0)
+               / static_cast<double>(samples_.size());
+    }
+
+private:
+    std::vector<double> samples_;
+};
+
+// 오래 걸리는 계산. 파이썬 객체를 만지지 않는 동안 GIL을 놓는다
+double burn(double seconds, bool release)
+{
+    const auto work = [seconds] {
+        using clock = std::chrono::steady_clock;
+        const auto end = clock::now() + std::chrono::duration<double>(seconds);
+        double x = 0;
+        while (clock::now() < end) x += 1e-9;
+        return x;
+    };
+    if (!release) return work();
+    py::gil_scoped_release unlocked;
+    return work();
+}
+
+PYBIND11_MODULE(pythermo, m)
+{
+    py::class_<Thermo>(m, "Thermo")
+        .def(py::init<>())
+        .def("add", &Thermo::add)
+        .def("add_array", &Thermo::add_array)
+        .def("average", &Thermo::average);
+    m.def("burn", &burn);
+}
+```
+
+```text nocheck
+$ g++ -std=c++23 -O2 -shared -fPIC $(python3 -m pybind11 --includes) pythermo.cpp \
+      -o pythermo$(python3-config --extension-suffix)
+```
+
+```python
+import numpy as np
+import pythermo
+
+room = pythermo.Thermo()
+room.add(21.5)
+room.add_array(np.array([31.0, 22.0]))
+print("평균", room.average())
+
+try:
+    pythermo.Thermo().average()
+except ValueError as e:              # std::invalid_argument가 ValueError로 왔다
+    print("ValueError:", e)
+try:
+    room.add("뜨겁다")
+except TypeError:                    # 타입이 맞지 않으면 부르기 전에 걸린다
+    print("TypeError")
+```
+
+```text nocheck
+평균 24.833333333333332
+ValueError: no samples
+TypeError
+```
+
+핸들도 오류 번호도 없습니다. C++의 예외가 파이썬의 예외로 건너오고, 인자의 타입은 부르기 전에 검사됩니다. 타입은 C++의 선언에서 한 번만 적습니다.
+
+## 경계를 넘는 값
+
+값 100만 개를 넣는 일을 여러 방법으로 쟀습니다.
+
+| 방법 | 값 하나에 |
+| --- | --- |
+| 파이썬으로 쓴 클래스의 `add()`를 하나씩 | 43 ns |
+| `ctypes`로 `thermo_add`를 하나씩 | 320~360 ns |
+| pybind11의 `add()`를 하나씩 | 87~91 ns |
+| `std::vector<double>`을 받는 함수에 `list`를 한 번에 | 15 ns |
+| `add_array`에 numpy 배열을 한 번에 | 1.6~2.1 ns |
+
+**하나씩 넘기면 C++로 옮긴 쪽이 파이썬보다 느립니다.** 넘을 때마다 파이썬 객체를 풀어 C++ 값으로 바꾸고 돌아올 때 다시 싸야 하기 때문입니다. `ctypes`는 그 일을 실행 중에 해석해서 하므로 네 배 더 듭니다. 얻는 것은 **한 번 넘어가서 오래 일할 때**입니다. 100만 개의 평균은 파이썬의 `sum()`으로 값 하나에 5.5 ns, C++ 쪽에서 1.0 ns였습니다.
+
+`list`를 `std::vector`로 받으면 원소를 하나씩 꺼내 복사합니다(15 ns). numpy 배열은 `double`이 연달아 놓인 메모리여서 [그대로 볼 수 있습니다](#/read/cpp-stl/seq-span). 경계의 설계는 "몇 번 넘는가"와 "넘을 때 복사하는가"로 정해집니다.
+
+## GIL
+
+파이썬 인터프리터는 한 번에 한 스레드만 파이썬 코드를 돌리도록 [자물쇠(GIL)](#/read/py-advanced/pm-gil)를 쥡니다. C++ 함수가 불린 동안에도 쥔 채입니다. 위의 `burn`으로 0.5초짜리 계산을 스레드 둘에서 돌렸습니다.
+
+| | 걸린 시간 |
+| --- | --- |
+| GIL을 쥐고 (`release=False`) | 1.00 s |
+| `py::gil_scoped_release`로 놓고 | 0.50 s |
+
+놓으면 다른 파이썬 스레드가 그동안 돕니다. 대신 놓은 동안에는 **파이썬 객체를 만지면 안 됩니다.** 인자를 C++ 값으로 다 꺼낸 다음에 놓고, 돌려줄 값을 만들기 전에 다시 쥡니다. `gil_scoped_release`의 소멸자가 그 일을 합니다. 거꾸로 C++가 만든 스레드에서 파이썬 콜백을 부를 때는 `py::gil_scoped_acquire`로 먼저 쥡니다.
+
+## 어느 쪽을
+
+| | `ctypes` | pybind11 |
+| --- | --- | --- |
+| 필요한 것 | C 인터페이스를 가진 공유 라이브러리 | C++ 컴파일러와 파이썬 헤더 |
+| 타입이 어긋나면 | 조용히 틀린다 | 컴파일 오류나 `TypeError` |
+| 파이썬 버전 | 가리지 않는다 | 버전마다 빌드한다. 파일 이름이 `pythermo.cpython-313-x86_64-linux-gnu.so`다 |
+| 빌드 | 없다 | 위의 파일 하나에 7.9초 |
+
+함수 몇 개를 급히 불러야 하고 C 인터페이스가 이미 있으면 `ctypes`, 클래스와 컨테이너와 예외가 오가는 제대로 된 모듈이면 pybind11입니다. 둘째 줄의 "버전마다"는 [ABI 안정성](#/read/cpp-advanced/iop-abi-stable)의 문제입니다. 모듈은 파이썬 인터프리터의 ABI에 묶입니다.
+
+<Note>
+파이썬 쪽에서 본 같은 이야기는 [「C 확장으로 넘기기」](#/read/py-advanced/ppf-native)에, 모듈을 포장해 `pip`으로 나눠 주는 법은 [「휠과 배포」](#/read/py-advanced/pkg-wheels)에 있습니다. 여기서 기억할 것은 C++ 쪽의 책임입니다. 예외를 경계 밖으로 흘리지 않고, 넘어온 메모리의 수명을 따지고, 오래 걸리는 동안 GIL을 놓습니다.
+</Note>
+
+## 정리
+
+- `ctypes`는 C 인터페이스를 컴파일 없이 부르지만 적어 준 타입을 검사하지 않는다. 틀리면 오류 없이 쓰레기가 나온다
+- pybind11은 C++ 클래스와 예외를 그대로 건넨다. 값 하나씩 넘기면 87 ns로 파이썬(43 ns)보다 느리고, 배열을 한 번에 넘기면 2 ns다
+- 오래 걸리는 C++ 계산은 GIL을 놓는다. 스레드 둘이 1.00초에서 0.50초가 됐다

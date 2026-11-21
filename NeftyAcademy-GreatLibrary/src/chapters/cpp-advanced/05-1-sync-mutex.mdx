@@ -1,0 +1,148 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '뮤텍스 여섯 가지, 잠금이 커널에 가는 때, 다툴 때의 값, 스핀락을 쓰지 않는 까닭, 재귀 잠금';
+
+`std::mutex`와 `lock_guard`로 자료를 지키는 법은 [「mutex와 lock」](#/read/cpp-stl/conc-mutex)에서 봤습니다. 이 챕터는 그 도구들의 안쪽입니다. 먼저 뮤텍스가 몇 가지이고, 잠근다는 것이 기계에서 무슨 일이며, 얼마가 드는지를 봅니다.
+
+## 여섯 가지
+
+| 타입 | 더해지는 것 | 크기 |
+| --- | --- | --- |
+| `std::mutex` | 기본 | 40 |
+| `std::timed_mutex` | 시간을 정해 기다린다: `try_lock_for`, `try_lock_until` | 40 |
+| `std::recursive_mutex` | 쥐고 있는 스레드가 또 잠글 수 있다 | 40 |
+| `std::recursive_timed_mutex` | 위의 둘 다 | 40 |
+| [`std::shared_mutex`](#/read/cpp-advanced/sync-shared) | 읽는 쪽 여럿이 함께 들어온다 | 56 |
+| `std::shared_timed_mutex` | 거기에 시간 정해 기다리기 | 56 |
+
+x86-64 리눅스, GCC 14의 값입니다. AArch64에서는 앞의 넷이 48바이트이고, Clang의 libc++에서는 `timed_mutex`가 96, `shared_mutex`가 144바이트입니다. 어느 것도 **복사도 이동도 되지 않습니다.** 그래서 뮤텍스를 멤버로 둔 클래스는 컴파일러가 복사와 이동을 만들어 주지 않습니다.
+
+```cpp
+#include <chrono>
+#include <mutex>
+#include <print>
+#include <thread>
+
+using namespace std::chrono_literals;
+
+// 공개 함수가 서로를 부르는 클래스
+class Ledger {
+public:
+    void add(int amount)
+    {
+        std::lock_guard lock(guard_);
+        add_unlocked(amount);
+    }
+
+    void add_twice(int amount)
+    {
+        std::lock_guard lock(guard_);       // 한 번만 잠그고
+        add_unlocked(amount);               // 잠그지 않는 속 함수를 두 번 부른다
+        add_unlocked(amount);
+    }
+
+    int total()
+    {
+        std::lock_guard lock(guard_);
+        return total_;
+    }
+
+private:
+    // guard_ 를 쥔 채로만 부른다
+    void add_unlocked(int amount) { total_ += amount; }
+
+    std::mutex guard_;
+    int total_ = 0;
+};
+
+int main()
+{
+    std::timed_mutex door;
+    door.lock();
+    {
+        std::jthread visitor([&] {
+            bool at_once = door.try_lock();             // 기다리지 않는다
+            bool in_time = door.try_lock_for(20ms);     // 그만큼만 기다린다
+            std::println("try_lock {} / 20 ms 기다리기 {}", at_once, in_time);
+        });
+    }
+    door.unlock();
+
+    std::recursive_mutex again;
+    {
+        std::lock_guard outer(again);
+        std::lock_guard inner(again);       // 같은 스레드는 또 잠글 수 있다
+        std::println("recursive_mutex 를 두 번 잠갔다");
+    }
+
+    Ledger ledger;
+    ledger.add(5);
+    ledger.add_twice(10);
+    std::println("합계 {}", ledger.total());
+}
+```
+
+```text
+try_lock false / 20 ms 기다리기 false
+recursive_mutex 를 두 번 잠갔다
+합계 25
+```
+
+`recursive_mutex`가 필요해 보이는 때는 대개 **공개 함수가 다른 공개 함수를 부를 때**입니다. `add_twice`가 `add`를 두 번 부르면 `std::mutex`로는 자기 자신을 기다리게 됩니다. `Ledger`처럼 고칩니다. 공개 함수는 잠그기만 하고, 일은 잠그지 않는 속 함수가 합니다. 이렇게 하면 "지금 잠겨 있는가"가 함수 이름에서 보이고, 잠금 하나 안에서 두 번 더하므로 그 사이에 다른 스레드가 끼어들지도 않습니다. `recursive_mutex`는 잠금의 범위가 어디까지인지를 흐리게 만들어서, 남의 코드를 고칠 수 없을 때의 마지막 수단입니다.
+
+## 잠근다는 것
+
+리눅스의 뮤텍스는 정수 하나입니다. 잠그기는 그 정수를 0에서 1로 바꾸는 [원자적 연산](#/read/cpp-advanced/atm-atomic) 한 번이고, **성공하면 커널에 가지 않습니다.** 실패했을 때만 `futex` 시스템 호출로 "이 정수가 바뀌면 깨워 달라"고 맡기고 잠듭니다. 푸는 쪽은 기다리는 스레드가 있을 때만 커널을 불러 깨웁니다.
+
+| 잠그고 풀기를 스레드마다 100만 번 | `futex` 호출 수 |
+| --- | --- |
+| 스레드 1개 | 0번 |
+| 스레드 2개 | 1,000번쯤 |
+| 스레드 4개 (코어는 2개) | 1,400번쯤 |
+
+`strace -f -c -e trace=futex`로 센 값입니다. 다투더라도 대부분은 커널 없이 끝납니다. 짧은 구간이라 기다리던 스레드가 잠들기도 전에 풀리기 때문입니다.
+
+| 잠그고 풀기 한 번 | 잰 값 |
+| --- | --- |
+| 스레드를 한 번도 만들지 않은 프로세스 | 7 ns |
+| 스레드가 있지만 다투지 않을 때 | 20 ns |
+| 두 스레드가 다툴 때 | 55~75 ns |
+| 잠든 스레드를 깨워 넘겨줄 때 | 1~12 µs |
+
+x86-64 서버 VM(코어 2개), GCC 14 `-O2`에서 잰 값입니다. 마지막 줄은 조건 변수로 두 스레드가 차례를 주고받게 해서 잰 것으로, 같은 코어 안에서는 1 µs, 다른 코어에서 자는 스레드를 깨우면 12 µs였습니다. 첫 줄은 glibc가 스레드가 하나뿐임을 알면 원자적 연산을 보통 연산으로 바꾸기 때문에 나옵니다. [`shared_ptr`의 계수](#/read/cpp-advanced/sp-shared)에서 본 것과 같은 일입니다. 종류별로는 `recursive_mutex`가 `mutex`와 거의 같고, `shared_mutex`는 혼자 쓸 때도 30 ns로 더 듭니다.
+
+`std::mutex`는 **공평하지 않습니다.** 두 스레드가 200만 번씩 잠그게 하고 세어 보면, 한 스레드가 연달아 수만 번에서 수십만 번을 가져갔습니다. 방금 푼 스레드가 깨어나고 있는 스레드보다 먼저 다시 잠그기 때문입니다. 처리량에는 이쪽이 낫지만, 한 스레드가 잠금을 쥐고 놓자마자 다시 쥐는 루프를 돌면 다른 스레드는 오래 굶습니다.
+
+## 스핀락을 쓰지 않는 까닭
+
+잠들지 않고 될 때까지 돌며 확인하는 잠금이 스핀락입니다. `std::atomic_flag` 몇 줄로 만들 수 있고, 혼자 쓸 때는 뮤텍스보다 빠릅니다.
+
+| 스레드 수 (코어 2개) | `std::mutex` | `atomic_flag` 스핀락 |
+| --- | --- | --- |
+| 1 | 18 ns | 9 ns |
+| 2 | 54 ns | 48 ns |
+| 4 | 64 ns | 86 ns |
+| 8 | 62 ns | 155 ns |
+
+같은 VM에서 잰, 잠그고 풀기 한 번의 값입니다. 스레드가 코어보다 많아지면 스핀락은 스레드 수만큼 느려집니다. **잠금을 쥔 스레드가 CPU에서 밀려나면** 나머지는 그 스레드가 다시 돌 때까지 자기 차례를 헛바퀴로 다 씁니다. 뮤텍스는 그때 잠들어 CPU를 내줍니다. 스핀락은 스레드가 밀려나지 않는 곳(커널, 인터럽트를 막은 펌웨어)의 도구입니다. 운영체제 위의 프로그램에서는 잠들 줄 아는 `std::mutex`를 씁니다.
+
+## 지켜야 하는 것
+
+| 하는 일 | 결과 |
+| --- | --- |
+| 같은 스레드가 `std::mutex`를 두 번 잠근다 | 정의되지 않은 동작. glibc에서는 영원히 기다린다 |
+| 잠그지 않은 스레드가 푼다 | 정의되지 않은 동작 |
+| 잠긴 채로 뮤텍스가 사라진다 | 정의되지 않은 동작 |
+| 잠근 채로 스레드가 끝난다 | 그 뮤텍스는 영영 풀리지 않는다 |
+
+둘째 줄 때문에 뮤텍스는 "다른 스레드에게 신호를 보내는" 데 쓸 수 없습니다. 그 일은 [세마포어](#/read/cpp-advanced/sync-semaphore)가 합니다. 앞의 세 가지는 ThreadSanitizer가 잡아 줍니다.
+
+<Note>
+우선순위가 다른 스레드가 잠금을 나눠 쓰면, 낮은 스레드가 쥔 잠금을 높은 스레드가 기다리는 동안 중간 우선순위의 스레드가 끼어들어 높은 스레드가 한없이 밀릴 수 있습니다(우선순위 역전). 리눅스의 pthread 뮤텍스에는 이것을 막는 우선순위 상속 설정이 있지만 `std::mutex`로는 켤 수 없습니다. 실시간 스레드를 쓰는 장치 프로그램에서는 그 부분만 pthread 뮤텍스를 직접 씁니다.
+</Note>
+
+## 정리
+
+- 뮤텍스는 여섯 가지다. 시간을 정해 기다리려면 `timed`, 읽는 쪽이 많으면 `shared`를 고르고, `recursive`는 속 함수로 나눠서 피한다
+- 다투지 않는 잠금은 원자적 연산 한 번이라 20 ns쯤이고 커널에 가지 않는다. 다툴 때 비싸진다
+- 스핀락은 스레드가 코어보다 많아지면 무너진다. 운영체제 위에서는 `std::mutex`를 쓴다

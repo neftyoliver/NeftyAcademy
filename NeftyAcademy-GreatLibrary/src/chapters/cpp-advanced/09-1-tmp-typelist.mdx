@@ -1,0 +1,151 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '타입을 원소로 하는 리스트, 특수화로 하는 재귀, 재귀가 컴파일 시간에 치르는 값과 피하는 길';
+
+템플릿은 타입을 받아 타입을 돌려주는 함수처럼 쓸 수 있습니다. [타입 특성](#/read/cpp-stl/tr-type-traits)이 그런 함수였습니다. 함수가 있으면 자료구조도 필요해집니다. 가장 기본이 타입을 늘어놓은 **타입 리스트**입니다. `std::tuple`과 `std::variant`가 속에 들고 있는 것이 이것입니다.
+
+## 타입 리스트와 연산
+
+```cpp
+#include <array>
+#include <cstddef>
+#include <print>
+#include <string_view>
+#include <type_traits>
+
+template <typename... Ts>
+struct TypeList {};
+
+// I번째 타입: 머리를 하나씩 떼어 내는 재귀
+template <std::size_t I, typename List>
+struct At;
+template <std::size_t I, typename Head, typename... Tail>
+struct At<I, TypeList<Head, Tail...>> : At<I - 1, TypeList<Tail...>> {};
+template <typename Head, typename... Tail>
+struct At<0, TypeList<Head, Tail...>> {
+    using type = Head;
+};
+template <std::size_t I, typename List>
+using At_t = typename At<I, List>::type;
+
+// T가 몇 번째인가: 재귀 없이 접기 식으로 센다
+template <typename T, typename List>
+struct IndexOf;
+template <typename T, typename... Ts>
+struct IndexOf<T, TypeList<Ts...>> {
+    static constexpr std::size_t value = [] {
+        std::size_t index = 0;
+        bool found = false;
+        ((found || std::is_same_v<T, Ts> ? found = true : ++index), ...);
+        return index;
+    }();
+};
+
+// 원소마다 메타함수를 먹인다: 묶음을 무늬째 펼친다
+template <template <typename> class F, typename List>
+struct Transform;
+template <template <typename> class F, typename... Ts>
+struct Transform<F, TypeList<Ts...>> {
+    using type = TypeList<typename F<Ts>::type...>;
+};
+
+struct Ping {
+    static constexpr std::string_view name = "ping";
+};
+struct Move {
+    static constexpr std::string_view name = "move";
+    int dx, dy;
+};
+struct Text {
+    static constexpr std::string_view name = "text";
+    char body[32];
+};
+
+using Messages = TypeList<Ping, Move, Text>;
+
+static_assert(std::is_same_v<At_t<1, Messages>, Move>);
+static_assert(IndexOf<Text, Messages>::value == 2);
+static_assert(std::is_same_v<Transform<std::add_pointer, Messages>::type,
+                             TypeList<Ping*, Move*, Text*>>);
+
+// 타입 리스트에서 실행 시간의 표를 만든다
+struct Info {
+    std::string_view name;
+    std::size_t size;
+};
+template <typename... Ts>
+constexpr std::array<Info, sizeof...(Ts)> table_of(TypeList<Ts...>)
+{
+    return {Info{Ts::name, sizeof(Ts)}...};
+}
+constexpr auto message_table = table_of(Messages{});
+
+template <typename T>
+constexpr std::size_t id_of = IndexOf<T, Messages>::value;
+
+int main()
+{
+    for (std::size_t id = 0; id < message_table.size(); ++id)
+        std::println("{}번 {} {}바이트", id, message_table[id].name,
+                     message_table[id].size);
+    std::println("Move의 번호는 {}", id_of<Move>);
+}
+```
+
+```text
+0번 ping 1바이트
+1번 move 8바이트
+2번 text 32바이트
+Move의 번호는 1
+```
+
+`TypeList`에는 멤버가 없습니다. 타입들을 **템플릿 인자로 들고 있는 것**이 전부입니다. 연산은 모두 같은 틀로 씁니다. 선언만 해 두고, [부분 특수화](#/read/cpp-syntax/tpl-special)의 무늬로 리스트를 뜯어 봅니다.
+
+| 연산 | 방법 | 인스턴스화 횟수 |
+| --- | --- | --- |
+| `At` | `TypeList<Head, Tail...>`로 머리를 떼고 `I - 1`로 자기를 다시 쓴다 | `I`에 비례 |
+| `IndexOf` | [접기 식](#/read/cpp-syntax/tpl-variadic)으로 한 번에 센다 | 1 |
+| `Transform` | `F<Ts>::type...`로 묶음을 무늬째 펼친다 | 원소 수 |
+
+`At`이 옛 방식입니다. 템플릿에는 루프가 없으므로 **자기 자신을 다시 쓰는 것**으로 되풀이하고, `At<0, …>`의 특수화가 멈추는 자리입니다. 결과를 `type`이나 `value`라는 멤버에 두고 `_t`, `_v` 별칭으로 꺼내는 것은 표준 라이브러리와 같은 [약속](#/read/cpp-syntax/tpl-alias)입니다.
+
+아래쪽이 쓰임새입니다. 메시지 타입을 리스트 **한 곳에만** 적으면 번호(`id_of`)와 이름·크기의 표가 거기서 만들어집니다. 타입을 하나 더하면 둘 다 따라옵니다. 번호표와 `switch`를 손으로 맞추는 일이 없어집니다.
+
+## 재귀가 치르는 값
+
+`At<I>`를 한 번 쓰면 `At<I-1>`, `At<I-2>`…가 줄줄이 만들어집니다. 타입 N개의 리스트에서 N개를 모두 꺼내면 인스턴스가 N²/2개이고, 인스턴스마다 이름에 남은 타입들이 다 적힙니다. 타입 N개에 `static_assert` N개를 둔 파일을 컴파일하는 데 든 시간과 메모리입니다.
+
+| N | 재귀 `At`, GCC 14 | 재귀 `At`, Clang 20 | `std::tuple_element_t`, GCC 14 |
+| --- | --- | --- | --- |
+| 100 | 0.26초, 114 MB | 0.60초, 210 MB | 0.08초, 39 MB |
+| 200 | 1.2초, 583 MB | 3.5초, 1,014 MB | |
+| 400 | 8.2초, 4,072 MB | 6 GB를 넘겨 실패 | 0.17초, 70 MB |
+| 800 | 재지 않았다 | 재지 않았다 | 0.50초, 161 MB |
+
+N이 두 배가 될 때마다 시간과 메모리가 다섯 배에서 일곱 배가 됩니다. 깊이에도 끝이 있습니다. 타입 1,000개의 리스트에서 마지막 것을 꺼내면 GCC 14는 이렇게 멈춥니다.
+
+```text nocheck
+fatal error: template instantiation depth exceeds maximum of 900
+(use '-ftemplate-depth=' to increase the maximum)
+```
+
+Clang 20의 한계는 1,024여서 이 파일은 통과했습니다. 옵션으로 한계를 올릴 수는 있지만, 고칠 것은 재귀입니다.
+
+| 재귀 대신 | 예 | 쓸 수 있는 곳 |
+| --- | --- | --- |
+| 묶음 펼치기, 접기 식 | 위의 `IndexOf`, `Transform`, `table_of` | C++17 |
+| 표준 라이브러리에 맡기기 | `std::tuple_element_t<I, std::tuple<Ts...>>` | 어디서나. 컴파일러 내장 기능으로 꺼낸다 |
+| 묶음 인덱싱 | `Ts...[I]` | C++26. Clang 20은 되고 GCC 14는 안 된다 |
+| `constexpr` 함수에서 값으로 계산 | 번호를 `std::array`에 담아 보통 루프로 | [C++20](#/read/cpp-syntax/ct-constexpr) |
+
+표의 오른쪽 열이 둘째 줄의 효과입니다. 같은 일을 하는데 400개에서 쉰 배 빠릅니다. 묶음 인덱싱은 Clang 20에서 800개에 0.77초였습니다.
+
+<Note>
+타입 리스트를 직접 만들 일은 많지 않습니다. `std::tuple<Ts...>`를 리스트로 쓰고 `std::tuple_element_t`와 `std::tuple_size_v`로 다루면 대부분 됩니다. Boost.Mp11은 이 페이지의 연산들을 다듬어 모아 둔 라이브러리입니다. 직접 만들 때는 [리플렉션](#/read/cpp-advanced/tmp-reflection)이 들어오면 사라질 코드라는 것도 염두에 둡니다.
+</Note>
+
+## 정리
+
+- 타입 리스트는 타입을 템플릿 인자로 들고 있는 빈 구조체다. 연산은 부분 특수화의 무늬로 뜯어 가며 쓴다
+- 재귀는 인스턴스를 N²개 만든다. 400개에서 8초와 4 GB였다. 깊이의 한계는 GCC 900, Clang 1,024다
+- 묶음 펼치기와 접기 식으로 재귀를 없애고, 꺼내기는 `std::tuple_element_t`에 맡긴다

@@ -1,0 +1,225 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '"유효하지만 정해지지 않은"의 뜻, 표준 타입이 남기는 것, 내 타입의 옮겨진 상태 정하기';
+
+[「이동 생성과 이동 대입」](#/read/cpp-syntax/sm-move)에서 옮겨진 객체는 "소멸자가 탈 없이 돌 수 있는 상태"여야 한다고 했습니다. C++의 이동은 원본을 없애지 않습니다. 원본은 남아서 범위가 끝날 때 소멸되고, 그 사이에 누군가 다시 쓸 수도 있습니다. 그 **남은 것**이 이 쪽의 주제입니다.
+
+## 유효하지만 정해지지 않은
+
+표준 라이브러리의 타입은 따로 적혀 있지 않으면 옮겨진 뒤 "유효하지만 정해지지 않은(valid but unspecified)" 상태가 됩니다. 두 낱말이 각각 뜻하는 바가 있습니다.
+
+| | 뜻 | 그래서 |
+| --- | --- | --- |
+| 유효하다 | 그 타입이 지키는 약속은 깨지지 않았다 | **전제 조건이 없는 함수**는 불러도 된다 |
+| 정해지지 않았다 | 어떤 값이 들었는지는 모른다 | **전제 조건이 있는 함수**는 상태를 알고 나서 부른다 |
+
+전제 조건이 없는 함수는 `size()`, `empty()`, `clear()`, 대입, `assign`, `reset`, 그리고 소멸입니다. 전제 조건이 있는 함수는 `front()`, `back()`, `pop_back()`, `v[0]`, `*opt`, `*ptr`처럼 "비어 있지 않을 것"을 요구하는 것들입니다. "옮긴 뒤에는 쓰면 안 된다"가 아니라 <strong>"값을 믿으면 안 된다"</strong>입니다.
+
+## 표준 타입이 남기는 것
+
+```cpp
+#include <memory>
+#include <optional>
+#include <print>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
+
+int main()
+{
+    auto unique = std::make_unique<int>(1);
+    auto unique2 = std::move(unique);
+    std::optional<std::string> maybe = "값";
+    auto maybe2 = std::move(maybe);
+    std::thread worker([] {});
+    std::thread worker2 = std::move(worker);
+    int number = 5;
+    int number2 = std::move(number);
+
+    std::println("unique_ptr 는 비었다:          {}", unique == nullptr);
+    std::println("optional 은 여전히 값이 있다:  {}", maybe.has_value());
+    std::println("thread 는 쥔 것이 없다:        {}", !worker.joinable());
+    std::println("int 는 그대로다:               {} {}", number, number2);
+    worker2.join();
+
+    // 컨테이너를 옮기면 원소를 가리키던 포인터는 새 컨테이너의 원소를 가리킨다
+    std::vector<int> numbers = {1, 2, 3};
+    std::string long_text = "a string that is long enough to live on the heap";
+    std::string short_text = "short";
+    const int* p_numbers = numbers.data();
+    const char* p_long = long_text.data();
+    const char* p_short = short_text.data();
+    std::vector<int> numbers2 = std::move(numbers);
+    std::string long2 = std::move(long_text);
+    std::string short2 = std::move(short_text);
+    std::println("vector 의 포인터가 따라왔다:   {}", p_numbers == numbers2.data());
+    std::println("긴 글자열의 포인터:            {}", p_long == long2.data());
+    std::println("짧은 글자열의 포인터:          {}", p_short == short2.data());
+}
+```
+
+```text
+unique_ptr 는 비었다:          true
+optional 은 여전히 값이 있다:  true
+thread 는 쥔 것이 없다:        true
+int 는 그대로다:               5 5
+vector 의 포인터가 따라왔다:   true
+긴 글자열의 포인터:            true
+짧은 글자열의 포인터:          false
+```
+
+| 타입 | 표준이 말하는 것 | GCC 14와 Clang 20에서 본 것 |
+| --- | --- | --- |
+| `unique_ptr`, `shared_ptr`, `weak_ptr` | 비어 있다 | 같다 |
+| `thread`, `future`, `unique_lock` | 아무것도 쥐고 있지 않다 | 같다 |
+| `optional`, `variant` | **값이 든 채로** 남는다. 그 값이 옮겨진 상태다 | `has_value()`가 `true`, 안의 글자열은 빔 |
+| `string` | 정해지지 않았다 | 둘 다 빈 글자열 |
+| `vector` 같은 컨테이너 | 원소는 새 컨테이너의 것이 된다 | 둘 다 크기 0, 용량 0 |
+| `function` | 정해지지 않았다 | libstdc++는 빔. libc++는 **여전히 부를 수 있었다** |
+| `any` | 정해지지 않았다 | 둘 다 빔 |
+| `pair`, `tuple`, 구조체 | 멤버마다 따로 | `string` 멤버는 빔, `int` 멤버는 그대로 |
+| `int`, 포인터, `enum` | 이동이 곧 복사다 | 그대로 |
+
+`optional`은 `if (maybe)`로 옮겨졌는지 알 수 없습니다. `function`은 구현에 따라 답이 다릅니다. 오른쪽 칸을 믿고 쓴 코드는 다른 컴파일러에서 다르게 돕니다.
+
+포인터 쪽은 반대로 보장이 있습니다. 컨테이너를 이동 **생성**하면 원소가 통째로 넘어가므로 원소를 가리키던 포인터와 반복자는 계속 쓸 수 있고, 이제 새 컨테이너의 것입니다. 원소를 하나씩 옮기는 `std::array`와, 글자를 객체 안에 담는 [짧은 글자열](#/read/cpp-stl/impl-sso)은 그렇지 않습니다.
+
+## 자기 자신에게 이동 대입
+
+`v = std::move(v);`라고 직접 쓰는 사람은 없지만(`-Wall`의 `-Wself-move`가 잡습니다), `items[i] = std::move(items[j]);`에서 `i`와 `j`가 같아지는 일은 생깁니다.
+
+| `x = std::move(x)` 뒤 | GCC 14와 Clang 20에서 본 것 |
+| --- | --- |
+| `std::vector<int>{1, 2, 3}` | 크기 0. 원소가 사라졌다 |
+| 긴 `std::string` | 크기 0 |
+| `std::unique_ptr<int>` | 그대로 |
+
+표준 컨테이너는 이 경우에도 "유효하지만 정해지지 않은" 상태만 약속하고, 두 구현은 실제로 내용을 버립니다. 내 타입의 이동 대입 연산자는 아래처럼 `this != &other`를 확인합니다.
+
+## 내 타입의 옮겨진 상태
+
+컴파일러가 만드는 이동은 멤버를 하나씩 옮깁니다. `bool`, 정수, 맨 포인터는 **옮겨도 복사**이므로, 그런 멤버가 "쥐고 있다"는 뜻을 가지면 원본과 새것이 둘 다 쥐고 있다고 믿게 됩니다.
+
+```cpp
+#include <cassert>
+#include <print>
+#include <string>
+#include <utility>
+
+struct LooseSession {                   // 이동을 컴파일러에 맡겼다
+    std::string user;
+    bool open = false;
+};
+
+class Session {
+public:
+    explicit Session(std::string user) : user_(std::move(user)), open_(true) {}
+
+    Session(Session&& other) noexcept
+        : user_(std::move(other.user_)), open_(std::exchange(other.open_, false)) {}
+
+    Session& operator=(Session&& other) noexcept
+    {
+        if (this != &other) {                   // 자기 대입이면 건드리지 않는다
+            user_ = std::move(other.user_);
+            open_ = std::exchange(other.open_, false);
+        }
+        return *this;
+    }
+
+    // 전제 조건 없음: 언제든 물어도 된다
+    bool is_open() const { return open_; }
+    const std::string& user() const             // 전제 조건: 열려 있을 것
+    {
+        assert(open_ && "닫힌 Session 의 user() 를 불렀다");
+        return user_;
+    }
+
+private:
+    std::string user_;
+    bool open_;
+};
+
+int main()
+{
+    LooseSession a{"kim", true};
+    LooseSession b = std::move(a);
+    std::println("맡긴 이동: 원본이 열려 있다고 한다 {} / 새것 {}", a.open, b.open);
+
+    Session c("lee");
+    Session d = std::move(c);
+    std::println("직접 쓴 이동: 원본 {} / 새것 {} ({})", c.is_open(), d.is_open(),
+                 d.user());
+    // 옮겨진 객체에 새 값을 대입해 다시 쓴다
+    c = Session("park");
+    std::println("다시 채운 뒤: {} ({})", c.is_open(), c.user());
+}
+```
+
+```text
+맡긴 이동: 원본이 열려 있다고 한다 true / 새것 true
+직접 쓴 이동: 원본 false / 새것 true (lee)
+다시 채운 뒤: true (park)
+```
+
+`open`이 파일 디스크립터였다면 둘 다 닫으려 들었을 것입니다. 그 이야기는 [「RAII 래퍼 만들기」](#/read/cpp-advanced/res-wrapper)에서 이어집니다. 옮겨진 상태를 정하는 길은 셋입니다.
+
+| 길 | 방법 | 표준의 예 |
+| --- | --- | --- |
+| 빈 상태를 정식 상태로 둔다 | 물어볼 함수(`is_open`)를 주고, 나머지 함수의 전제 조건에 적는다 | `unique_ptr`, `thread`, `fstream` |
+| 옮긴 뒤에는 대입과 소멸만 허용한다 | 문서에 적고 `assert`로 지킨다 | 대부분의 값 타입 |
+| 이동을 없앤다 | 빈 상태가 말이 안 되는 타입. 옮겨야 하면 `unique_ptr`에 담는다 | `mutex`, `atomic` |
+
+## 옮긴 뒤에 다시 쓰기
+
+옮겨진 객체를 다시 쓰려면 **전제 조건이 없는 함수로 상태를 먼저 정합니다.** 대입하거나 `clear()`를 부릅니다.
+
+```cpp
+#include <algorithm>
+#include <memory>
+#include <print>
+#include <utility>
+#include <vector>
+
+int main()
+{
+    std::vector<std::vector<int>> batches;
+    std::vector<int> batch;
+    for (int value = 1; value <= 7; ++value) {
+        batch.push_back(value);
+        if (batch.size() == 3) {
+            batches.push_back(std::move(batch));
+            batch.clear();              // 이제 "비어 있다"는 것을 안다
+        }
+    }
+    std::println("묶음 {}개, 남은 것 {}개", batches.size(), batch.size());
+
+    // remove_if 는 지우지 않는다. 남길 것을 앞으로 옮길 뿐이다
+    std::vector<std::unique_ptr<int>> items;
+    for (int value = 1; value <= 6; ++value)
+        items.push_back(std::make_unique<int>(value));
+    auto tail = std::remove_if(items.begin(), items.end(),
+                               [](const auto& item) { return *item % 2 == 1; });
+    std::println("크기 {}, 남길 것 {}개, 뒤쪽의 nullptr {}개", items.size(),
+                 tail - items.begin(), std::count(tail, items.end(), nullptr));
+    items.erase(tail, items.end());
+}
+```
+
+```text
+묶음 2개, 남은 것 1개
+크기 6, 남길 것 3개, 뒤쪽의 nullptr 2개
+```
+
+`remove_if`가 돌려준 자리 뒤쪽은 옮겨진 원소와 손대지 않은 원소가 섞여 있습니다. 그래서 반드시 `erase`가 뒤따르고, C++20의 `std::erase_if(items, 조건)`이 그 둘을 한 번에 합니다. 실수로 옮긴 뒤에 쓰는 것은 clang-tidy의 `bugprone-use-after-move`가 "'a' used after it was moved"로 알려 줍니다. 위 `Session` 예제의 `a.open`과 `c.is_open()`을 둘 다 짚습니다. 뒤의 것은 일부러 물은 것이지만 도구는 구별하지 못합니다.
+
+<Note>
+Rust의 이동은 원본을 **없앱니다.** 옮긴 변수는 컴파일러가 쓰지 못하게 막고 소멸도 시키지 않습니다. C++에는 그런 이동이 아직 없습니다. 원소를 옮기면서 원본의 소멸까지 끝내는 "재배치(relocation)"가 C++26에 들어가기로 했다가 2025년 11월 회의에서 빠졌고, 다음 표준을 목표로 다시 논의되고 있습니다.
+</Note>
+
+## 정리
+
+- 옮겨진 표준 객체에는 전제 조건이 없는 함수만 부른다. 값을 믿지 않는다
+- 스마트 포인터와 `thread`는 비고, `optional`은 값이 든 채 남고, 나머지는 구현마다 다를 수 있다
+- 내 타입에서는 `bool`·정수·포인터 멤버를 `std::exchange`로 비우고, 옮겨진 상태가 무엇인지 정해 둔다

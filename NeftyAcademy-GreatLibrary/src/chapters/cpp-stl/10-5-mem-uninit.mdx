@@ -1,0 +1,241 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '메모리와 객체를 따로 다루는 함수들, construct_at과 destroy, 고정 용량 벡터를 직접 만들어 보기';
+
+[「new, delete, placement new」](#/read/cpp-syntax/life-new)에서 "메모리를 얻는 일"과 "객체를 만드는 일"이 따로라는 것을 봤습니다. `vector`의 `reserve`가 얻어 둔 자리처럼 **메모리는 있는데 객체는 아직 없는** 곳을 다루는 함수들이 `<memory>`에 있습니다. 컨테이너를 만드는 쪽에서 쓰는 도구입니다.
+
+## 대입과 생성은 다르다
+
+빈 자리에 값을 넣을 때 `std::copy`를 쓰면 안 됩니다. `std::copy`는 **대입**(`=`)을 하고, 대입은 왼쪽에 이미 객체가 있다고 믿습니다. `std::string`의 대입은 왼쪽이 쥐고 있던 옛 버퍼를 먼저 정리하는데, 객체가 없는 자리에는 쓰레기 값만 있습니다. 빈 자리에는 대입이 아니라 **생성**을 해야 합니다.
+
+```cpp
+#include <memory>
+#include <print>
+#include <string>
+#include <utility>
+
+struct Reading {
+    std::string label;
+
+    explicit Reading(std::string l) : label(std::move(l))
+    {
+        std::println("  {} 생성", label);
+    }
+    Reading(const Reading& other) : label(other.label)
+    {
+        std::println("  {} 복사 생성", label);
+    }
+    ~Reading() { std::println("  {} 소멸", label); }
+};
+
+int main()
+{
+    std::allocator<Reading> memory;
+    Reading* slots = memory.allocate(3);    // 자리 셋. 객체는 아직 없다
+    std::println("자리를 얻었다");
+
+    std::construct_at(slots, "temp");       // 0번 자리에 만든다
+    std::construct_at(slots + 1, "humid");
+
+    std::println("uninitialized_copy_n");
+    // 0번을 2번 자리에 복사 "생성" 한다
+    std::uninitialized_copy_n(slots, 1, slots + 2);
+
+    std::println("destroy");
+    std::destroy(slots, slots + 3);         // 소멸자만 부른다
+    memory.deallocate(slots, 3);            // 메모리를 돌려준다
+    std::println("끝");
+}
+```
+
+```text
+자리를 얻었다
+  temp 생성
+  humid 생성
+uninitialized_copy_n
+  temp 복사 생성
+destroy
+  temp 소멸
+  humid 소멸
+  temp 소멸
+끝
+```
+
+`std::allocator<T>::allocate(n)`은 `T` `n`개가 들어갈 메모리만 얻습니다. 생성자는 하나도 불리지 않았습니다. 그 뒤의 네 단계(얻기, 만들기, 없애기, 돌려주기)를 [`new`와 `delete`](#/read/cpp-syntax/life-new)는 둘씩 묶어서 하고, 여기서는 하나씩 따로 합니다.
+
+## 도구 목록
+
+| 함수 | 하는 일 |
+| --- | --- |
+| `std::construct_at(p, 인자...)` | `p` 자리에 객체를 만든다. placement new와 같고 `constexpr` 함수 안에서도 된다 |
+| `std::destroy_at(p)` | 소멸자만 부른다 |
+| `std::destroy(first, last)`, `std::destroy_n(first, n)` | 구간의 소멸자를 부른다 |
+| `std::uninitialized_copy`, `uninitialized_move`, `uninitialized_fill` | 빈 자리에 복사·이동·채우기로 만든다. 각각 `_n`이 붙은 것이 있다 |
+| `std::uninitialized_value_construct` | 빈 자리에 값 초기화로 만든다. `int`는 0이 된다 |
+| `std::uninitialized_default_construct` | 빈 자리에 기본 초기화로 만든다. `int`는 건드리지 않는다 |
+
+모두 `std::ranges::` 판이 있습니다. 마지막 둘의 차이는 [`make_unique`와 `make_unique_for_overwrite`](#/read/cpp-stl/mem-make)의 차이와 같습니다.
+
+## 고정 용량 벡터 만들기
+
+이 도구들로 "용량은 타입에 정해져 있고 길이만 변하는" 벡터를 만들어 봅니다. 힙을 쓰지 않으므로 [할당이 실패해서는 안 되는 곳](#/read/cpp-syntax/tpl-nontype)에서 쓰는 형태입니다.
+
+```cpp
+#include <cstddef>
+#include <memory>
+#include <print>
+#include <stdexcept>
+#include <string>
+#include <utility>
+
+template <typename T, std::size_t N>
+class StaticVector {
+public:
+    StaticVector() = default;
+    StaticVector(const StaticVector& other) : size_(other.size_)
+    {
+        std::uninitialized_copy_n(other.data(), size_, data());
+    }
+    StaticVector& operator=(const StaticVector&) = delete;
+    ~StaticVector() { std::destroy_n(data(), size_); }
+
+    template <typename... Args>
+    T& emplace_back(Args&&... args)
+    {
+        if (size_ == N)
+            throw std::length_error("가득 찼다");
+        T* slot = data() + size_;
+        T* made = std::construct_at(slot, std::forward<Args>(args)...);
+        ++size_;                    // 생성자가 성공한 뒤에 센다
+        return *made;
+    }
+    void pop_back() { std::destroy_at(data() + --size_); }
+
+    T& operator[](std::size_t i) { return data()[i]; }
+    std::size_t size() const { return size_; }
+    T* begin() { return data(); }
+    T* end() { return data() + size_; }
+
+private:
+    T* data() { return reinterpret_cast<T*>(storage_); }
+    const T* data() const { return reinterpret_cast<const T*>(storage_); }
+
+    // T 가 N 개 들어갈 자리. 객체는 만들지 않는다
+    alignas(T) std::byte storage_[N * sizeof(T)];
+    std::size_t size_ = 0;
+};
+
+int main()
+{
+    StaticVector<std::string, 4> names;
+    std::println("sizeof {}", sizeof names);
+
+    names.emplace_back("temp");
+    names.emplace_back(3, 'x');         // string(3, 'x')
+    names.emplace_back("pressure");
+    names.pop_back();                   // "pressure" 의 소멸자가 불린다
+    for (const auto& name : names)
+        std::println("{}", name);
+
+    auto copy = names;
+    copy[0] = "changed";
+    std::println("{} {}", names[0], copy[0]);
+
+    try {
+        for (int i = 0; i < 5; ++i)
+            names.emplace_back("more");
+    } catch (const std::length_error& e) {
+        std::println("{} (size {})", e.what(), names.size());
+    }
+}
+```
+
+```text
+sizeof 136
+temp
+xxx
+temp changed
+가득 찼다 (size 4)
+```
+
+`std::array<std::string, 4>`와 다른 점은 **쓰지 않는 칸에는 객체가 없다**는 것입니다. `array`는 넷을 모두 기본 생성해 두지만, 이 벡터는 `emplace_back`이 불릴 때 그 자리에 만들고 `pop_back`에서 없앱니다. 기본 생성자가 없는 타입도 담을 수 있습니다.
+
+눈여겨볼 곳이 셋입니다.
+
+- **`alignas(T) std::byte storage_[...]`**: `T`의 [정렬](#/read/cpp-syntax/life-alignment)에 맞춘 바이트 배열입니다. `T storage_[N]`이라고 쓰면 생성자 `N`개가 불려 버립니다
+- **`++size_`의 자리**: 생성자가 예외를 던지면 `size_`는 그대로이고, 소멸자는 만들어지지 않은 칸을 건드리지 않습니다
+- **소멸자와 복사 생성자**: 컴파일러가 만들어 주는 것은 바이트 배열을 그대로 베낄 뿐이므로 [직접 써야](#/read/cpp-syntax/sm-rules) 합니다. 여기서는 대입을 막아 두었고, 제대로 만들려면 대입과 이동도 채웁니다
+
+크기 136은 `std::string` 넷(libstdc++에서 32바이트씩)에 `size_` 8바이트입니다. 문자열이 길면 **원소가** 힙을 쓰는 것은 그대로입니다. 힙을 쓰지 않는 것은 벡터 자신입니다.
+
+<Note>
+C++26의 `std::inplace_vector<T, N>`이 바로 이 형태의 표준 컨테이너입니다. GCC 14에는 아직 없어서 이 책에서는 돌려 보지 못했습니다. 그 전까지는 위와 같은 클래스를 직접 두거나 ETL의 `etl::vector`, Boost의 `static_vector`를 씁니다.
+</Note>
+
+## 중간에 실패하면
+
+네 개를 복사해 만들다가 셋째에서 예외가 나면, 앞의 둘은 누가 없앨까요. `uninitialized_` 함수들이 스스로 치웁니다.
+
+```cpp
+#include <exception>
+#include <memory>
+#include <print>
+#include <stdexcept>
+#include <vector>
+
+struct Fragile {
+    int id;
+
+    explicit Fragile(int i) : id(i) {}
+    Fragile(const Fragile& other) : id(other.id)
+    {
+        if (id == 3)
+            throw std::runtime_error("3 은 복사할 수 없다");
+        std::println("  {} 복사", id);
+    }
+    ~Fragile() { std::println("  {} 소멸", id); }
+};
+
+int main()
+{
+    std::vector<Fragile> source;
+    source.reserve(4);
+    for (int i = 1; i <= 4; ++i)
+        source.emplace_back(i);
+
+    std::allocator<Fragile> memory;
+    Fragile* slots = memory.allocate(4);
+    try {
+        std::uninitialized_copy(source.begin(), source.end(), slots);
+    } catch (const std::exception& e) {
+        std::println("예외: {}", e.what());
+    }
+    memory.deallocate(slots, 4);
+    std::println("source 를 버린다");
+}
+```
+
+```text
+  1 복사
+  2 복사
+  1 소멸
+  2 소멸
+예외: 3 은 복사할 수 없다
+source 를 버린다
+  1 소멸
+  2 소멸
+  3 소멸
+  4 소멸
+```
+
+예외가 밖으로 나오기 전에 이미 만든 1과 2가 없어졌습니다. 예외를 받은 쪽에서 보면 `slots`는 다시 "객체가 하나도 없는 메모리"이므로 그대로 돌려주면 됩니다. `construct_at`을 루프로 직접 돌리면 이 뒷정리를 손으로 써야 합니다. `vector`가 자랄 때 [강한 보장](#/read/cpp-syntax/exc-safety)을 지킬 수 있는 것도 이 덕분입니다.
+
+<Note kind="warn">
+이 함수들은 틀려도 컴파일러가 알려 주지 않습니다. 객체가 있는 자리에 또 만들면 앞의 객체는 소멸자 없이 덮이고, 없는 자리를 `destroy`하면 쓰레기 값으로 소멸자가 돕니다. 일반 코드에서는 `std::vector`, `std::optional`, `std::array`가 이 일을 대신하게 두고, 풀이나 고정 버퍼 컨테이너처럼 꼭 필요한 클래스 안에만 가둬 둡니다. `-fsanitize=address`가 실수의 상당수를 잡아 줍니다.
+</Note>
+
+## 정리
+
+- 객체가 없는 메모리에는 대입(`std::copy`)이 아니라 생성(`construct_at`, `uninitialized_copy`)을 한다. 없앨 때는 `destroy`로 소멸자만 부른다
+- 바이트 배열과 길이 하나, 그리고 이 함수들로 힙을 쓰지 않는 벡터를 만들 수 있다. C++26의 `inplace_vector`가 그 표준판이다
+- `uninitialized_` 함수는 중간에 예외가 나면 그때까지 만든 것을 스스로 없앤다

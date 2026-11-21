@@ -1,0 +1,158 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '전해지는 것을 정확히 적기, 설치해서 find_package로 찾게 하기, 다른 CPU용 빌드, 빌드 시간 줄이기';
+
+[「CMake로 프로젝트 꾸리기」](#/read/cpp-syntax/mod-cmake)에서 타깃, 빌드 명령, 프리셋까지 봤습니다. 프로젝트가 자라면 네 가지가 더 필요해집니다. 타깃 사이에 무엇이 전해지는지 정확히 적는 일, 내 라이브러리를 남이 가져다 쓰게 하는 일, 다른 CPU용으로 빌드하는 일, 그리고 빌드 시간입니다. CMake 3.28과 Ninja로 돌렸습니다.
+
+## 쓰는 쪽에 무엇이 전해지는가
+
+```cmake
+cmake_minimum_required(VERSION 3.28)
+project(sensorkit VERSION 1.2.0 LANGUAGES CXX)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# 경고와 표준은 "옵션 타깃"에 담아 두고, 원하는 타깃이 가져다 쓴다
+add_library(sensorkit_options INTERFACE)
+target_compile_features(sensorkit_options INTERFACE cxx_std_23)
+target_compile_options(sensorkit_options INTERFACE -Wall -Wextra -Wpedantic)
+
+add_library(sensorkit src/filter.cpp src/detail.cpp)
+add_library(sensorkit::sensorkit ALIAS sensorkit)    # 설치한 뒤와 같은 이름
+target_include_directories(sensorkit
+    PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:include>
+    PRIVATE src)
+target_compile_definitions(sensorkit
+    PUBLIC  SENSORKIT_MAX_TAPS=8                      # 헤더가 쓴다
+    PRIVATE SENSORKIT_VERSION="${PROJECT_VERSION}")   # 구현만 쓴다
+target_link_libraries(sensorkit PRIVATE $<BUILD_INTERFACE:sensorkit_options>)
+
+add_executable(monitor apps/monitor.cpp)
+target_link_libraries(monitor PRIVATE sensorkit::sensorkit sensorkit_options)
+
+enable_testing()
+add_executable(test_filter tests/test_filter.cpp)
+target_link_libraries(test_filter PRIVATE sensorkit::sensorkit sensorkit_options)
+add_test(NAME filter COMMAND test_filter)
+```
+
+`sensorkit`의 헤더는 `SENSORKIT_MAX_TAPS`로 배열의 크기를 정하고, 버전 문자열은 `.cpp`만 씁니다. 빌드한 뒤 `compile_commands.json`에서 파일마다 붙은 옵션을 뽑았습니다.
+
+| 파일 | 붙은 것 |
+| --- | --- |
+| `src/filter.cpp` | `-DSENSORKIT_MAX_TAPS=8 -DSENSORKIT_VERSION="1.2.0" -Iinclude -Isrc` |
+| `apps/monitor.cpp` | `-DSENSORKIT_MAX_TAPS=8 -Iinclude` |
+
+`PUBLIC`으로 적은 것만 `monitor`로 건너갔습니다. 규칙은 하나입니다. **헤더가 쓰는 것은 `PUBLIC`, 구현만 쓰는 것은 `PRIVATE`.** 어긋나면 한쪽은 배열이 8칸이라고, 다른 쪽은 16칸이라고 믿는 [정의가 갈린 프로그램](#/read/cpp-syntax/mod-headers)이 됩니다.
+
+- **옵션 타깃.** 경고와 표준을 `add_compile_options`로 전체에 걸지 않고 `INTERFACE` 타깃에 담았습니다. 가져다 쓴 타깃에만 붙고, 이 프로젝트를 하위 폴더로 넣은 남의 프로젝트에는 번지지 않습니다.
+- **별칭.** `sensorkit::sensorkit`은 설치한 뒤 쓰는 쪽이 부를 이름입니다. 안에서도 같은 이름을 쓰면 어느 쪽으로 가져오든 `CMakeLists.txt`가 같아집니다.
+- **`$<…>`.** 빌드 파일을 만들 때 풀리는 식입니다. 헤더 경로가 빌드할 때는 소스 폴더, 설치한 뒤에는 `include`입니다.
+
+## 설치하고 찾게 하기
+
+같은 파일의 뒷부분입니다.
+
+```cmake
+# ---- 설치: 다른 프로젝트가 find_package(sensorkit)로 찾게 한다 ----
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
+install(TARGETS sensorkit EXPORT sensorkitTargets)
+install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(EXPORT sensorkitTargets NAMESPACE sensorkit::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/sensorkit)
+write_basic_package_version_file(sensorkitConfigVersion.cmake
+        COMPATIBILITY SameMajorVersion)
+install(FILES cmake/sensorkitConfig.cmake
+              ${CMAKE_CURRENT_BINARY_DIR}/sensorkitConfigVersion.cmake
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/sensorkit)
+```
+
+```text nocheck
+$ cmake --install build --prefix /opt/sensorkit
+-- Installing: lib/libsensorkit.a
+-- Installing: include/sensorkit/filter.h
+-- Installing: lib/cmake/sensorkit/sensorkitTargets.cmake
+-- Installing: lib/cmake/sensorkit/sensorkitTargets-release.cmake
+-- Installing: lib/cmake/sensorkit/sensorkitConfig.cmake
+-- Installing: lib/cmake/sensorkit/sensorkitConfigVersion.cmake
+```
+
+`sensorkitTargets.cmake`에는 타깃의 `PUBLIC` 성질(헤더 경로와 `SENSORKIT_MAX_TAPS=8`)이 적혀 나갑니다. `cmake/sensorkitConfig.cmake`는 그 파일을 `include`하는 한 줄입니다. 쓰는 프로젝트는 이렇게 됩니다.
+
+```cmake
+cmake_minimum_required(VERSION 3.28)
+project(station LANGUAGES CXX)
+
+find_package(sensorkit 1.2 REQUIRED)        # 1.2 이상, 2.0 미만을 찾는다
+
+add_executable(station main.cpp)
+target_compile_features(station PRIVATE cxx_std_23)
+target_link_libraries(station PRIVATE sensorkit::sensorkit)
+```
+
+```text nocheck
+$ cmake -S . -B build -DCMAKE_PREFIX_PATH=/opt/sensorkit && cmake --build build
+$ ./build/station
+1.5 (sensorkit 1.2.0)
+```
+
+헤더 경로도 매크로도 적지 않았습니다. 버전도 맞춰 봅니다. `find_package(sensorkit 2.0 REQUIRED)`로 바꾸자 `Could not find a configuration file for package "sensorkit" that is compatible with requested version "2.0"`으로 설정이 멈췄습니다.
+
+## 다른 CPU용으로 빌드하기
+
+컴파일러와 대상 시스템은 `CMakeLists.txt`가 아니라 **툴체인 파일**에 적습니다.
+
+```cmake
+# cmake/aarch64.cmake: 64비트 ARM 리눅스용으로 빌드한다
+set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_PROCESSOR aarch64)
+set(CMAKE_CXX_COMPILER aarch64-linux-gnu-g++-14)
+
+# 찾을 때: 도구는 이 기계의 것, 라이브러리와 헤더는 대상의 것만
+set(CMAKE_FIND_ROOT_PATH /usr/aarch64-linux-gnu)
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+
+# 테스트는 에뮬레이터를 거쳐 돌린다
+set(CMAKE_CROSSCOMPILING_EMULATOR qemu-aarch64-static -L /usr/aarch64-linux-gnu)
+```
+
+```text nocheck
+$ cmake -S . -B build-arm -G Ninja --toolchain cmake/aarch64.cmake
+$ cmake --build build-arm && file build-arm/monitor
+build-arm/monitor: ELF 64-bit LSB pie executable, ARM aarch64
+$ ./build-arm/monitor
+bash: ./build-arm/monitor: cannot execute binary file: Exec format error
+$ ctest --test-dir build-arm
+1/1 Test #1: filter ...........................   Passed    0.48 sec
+```
+
+프로젝트 파일은 한 줄도 고치지 않았습니다. x86-64에서 바로는 못 돌리지만, 마지막 줄 덕에 `ctest`가 에뮬레이터를 거쳐 ARM용 테스트를 돌립니다. 보드가 없어도 [대상 CPU의 코드](#/read/cpp-embedded/etc-cross)로 테스트가 돕니다.
+
+## 빌드 시간
+
+파일 21개짜리 프로젝트를 코어 둘에서 빌드한 시간입니다(GCC 14, `Release`).
+
+| 설정 | 전부 빌드 | 파일 하나 고친 뒤 |
+| --- | --- | --- |
+| 기본 | 8.1 s | 0.6 s |
+| `-DCMAKE_CXX_SCAN_FOR_MODULES=OFF` | 7.1 s | 0.6 s |
+| 위에 더해 `target_precompile_headers` | 5.5 s | 0.4 s |
+| 위에 더해 `-DCMAKE_UNITY_BUILD=ON` (PCH 없이) | 3.7 s | 1.1 s |
+
+- **모듈 살피기.** CMake 3.28은 C++20 이상의 소스마다 `import`가 있는지 먼저 살핍니다. 빌드 단계가 22개에서 44개가 됩니다. [모듈](#/read/cpp-syntax/mod-modules)을 쓰지 않으면 끕니다.
+- **미리 컴파일한 헤더.** `<vector>`, `<string>`, `<map>` 같은 헤더를 한 번만 읽어 둡니다.
+- **유니티 빌드.** 소스 여럿을 한 파일로 이어 붙여 컴파일합니다. 전부 빌드는 가장 빠르지만 하나를 고치면 묶음 전체를 다시 컴파일하고, 파일마다 따로 있던 `static` 함수의 이름이 겹치면 깨집니다. CI의 전체 빌드에 어울립니다.
+
+<Note>
+빌드를 빠르게 하는 가장 큰 손잡이는 여전히 소스 쪽에 있습니다. [헤더를 가볍게](#/read/cpp-syntax/mod-pimpl) 하고 템플릿의 구현을 `.cpp`로 내리는 것입니다. 위의 설정은 그다음입니다.
+</Note>
+
+## 정리
+
+- 헤더가 쓰는 것은 `PUBLIC`, 구현만 쓰는 것은 `PRIVATE`로 적는다. 경고와 표준은 `INTERFACE` 타깃에 담는다
+- `install(EXPORT)`와 설정 파일 둘이면 다른 프로젝트가 `find_package` 한 줄로 헤더 경로와 매크로까지 받는다
+- 툴체인 파일로 다른 CPU용 빌드를, `CMAKE_CROSSCOMPILING_EMULATOR`로 그 테스트를 돌린다. 유니티 빌드로 8.1초가 3.7초가 됐다

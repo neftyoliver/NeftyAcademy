@@ -1,0 +1,200 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'system_clock과 steady_clock을 가르는 기준, 시계가 뛸 때 생기는 일, 눈금과 호출 비용, 그 밖의 시계';
+
+[시각](#/read/cpp-stl/chr-duration)은 언제나 어떤 **시계**의 것입니다. 시계는 `now()` 하나를 가진 타입이고, 어느 시계를 고르느냐에 따라 코드가 맞기도 하고 가끔 틀리기도 합니다.
+
+## 두 시계
+
+| 시계 | 재는 것 | 뒤로 가거나 뛸 수 있나 |
+| --- | --- | --- |
+| `system_clock` | 달력의 시각. 1970년 1월 1일 0시(UTC)부터 센다 | **있다** |
+| `steady_clock` | 어떤 시점(보통 부팅)부터 한결같이 흐른 시간 | 없다 |
+| `high_resolution_clock` | 위 둘 가운데 하나의 다른 이름 | 구현마다 다르다 |
+
+```cpp
+#include <chrono>
+#include <print>
+#include <type_traits>
+
+using namespace std::chrono;
+
+int main()
+{
+    std::println("system_clock is_steady {}", system_clock::is_steady);
+    std::println("steady_clock is_steady {}", steady_clock::is_steady);
+    std::println("눈금은 1/{}초", steady_clock::period::den);
+
+    const bool alias = std::is_same_v<high_resolution_clock, system_clock>;
+    std::println("high_resolution_clock 은 system_clock 인가 {}", alias);
+}
+```
+
+```text
+system_clock is_steady false
+steady_clock is_steady true
+눈금은 1/1000000000초
+high_resolution_clock 은 system_clock 인가 true
+```
+
+`system_clock`은 사람이 보는 시각입니다. 그래서 **맞춰집니다.** NTP가 시각을 고치고, 사용자가 날짜를 바꾸고, 기기가 처음 네트워크에 붙으면서 몇 년을 건너뜁니다. `steady_clock`은 지금이 몇 시인지 모르는 대신 절대로 뒤로 가지 않습니다.
+
+고르는 기준은 하나입니다.
+
+| 하려는 일 | 시계 |
+| --- | --- |
+| 걸린 시간 재기, 타임아웃, 주기 맞추기, 재시도 간격 | `steady_clock` |
+| 로그에 찍는 시각, 파일에 적는 시각, 사람에게 보여 줄 시각 | `system_clock` |
+
+`high_resolution_clock`은 쓰지 않습니다. libstdc++에서는 위처럼 `system_clock`이고 libc++와 MSVC에서는 `steady_clock`이라서, 같은 코드가 플랫폼에 따라 뛰는 시계가 되기도 하고 아니기도 합니다. 눈금이 더 잔 것도 아닙니다.
+
+## 시계가 뛰면
+
+```cpp nocheck
+// 틀린 코드: 걸린 시간을 달력 시계로 잰다
+const auto start = system_clock::now();
+do_work();
+const auto took = system_clock::now() - start;   // 음수가 나올 수 있다
+
+// 틀린 코드: 타임아웃을 달력 시계로 정한다
+const auto deadline = system_clock::now() + 5s;
+while (system_clock::now() < deadline)           // 한 시간 뒤에야 끝날 수 있다
+    poll();
+```
+
+그 사이에 시각이 한 시간 뒤로 맞춰지면 첫 코드는 음수를, 둘째 코드는 한 시간 넘는 대기를 만듭니다. 책상 위의 PC에서는 드문 일이지만 작은 보드에서는 흔합니다. 라즈베리 파이 4까지는 전원이 꺼진 동안 시각을 지켜 주는 RTC가 없어서, 켜지면 마지막으로 저장된 옛 시각에서 시작했다가 네트워크가 붙는 순간 지금으로 뜁니다(파이 5는 RTC가 있지만 전지를 따로 달아야 합니다). 부팅 직후에 시작한 타이머가 이 도약을 그대로 맞습니다.
+
+같은 까닭으로 `std::this_thread::sleep_until`이나 [조건 변수](#/read/cpp-stl/conc-mutex)의 `wait_until`에 넘기는 마감 시각도 `steady_clock`으로 만듭니다.
+
+## 눈금과 값
+
+눈금이 나노초라고 해서 나노초까지 정확하다는 뜻은 아닙니다. 실제 걸음과 `now()` 한 번의 값을 잽니다.
+
+```cpp
+#include <algorithm>
+#include <chrono>
+#include <print>
+
+using namespace std::chrono;
+
+int main()
+{
+    // 연달아 읽어서 값이 바뀐 가장 작은 폭
+    auto previous = steady_clock::now();
+    auto smallest = nanoseconds::max();
+    for (int i = 0; i < 1'000'000; ++i) {
+        const auto current = steady_clock::now();
+        if (current != previous)
+            smallest = std::min(smallest, current - previous);
+        previous = current;
+    }
+    std::println("가장 작은 걸음 {}", smallest);
+
+    // now() 한 번에 드는 시간
+    const int calls = 10'000'000;
+    const auto start = steady_clock::now();
+    auto last = start;
+    for (int i = 0; i < calls; ++i)
+        last = steady_clock::now();
+    const duration<double, std::nano> total = last - start;
+    std::println("호출 한 번 {:.1f}ns", total.count() / calls);
+}
+```
+
+```text nocheck
+가장 작은 걸음 20ns
+호출 한 번 22.5ns
+```
+
+x86-64 리눅스 서버에서 GCC 14 `-O2`로 잰 값입니다. 리눅스에서 `now()`는 `clock_gettime`을 부르는데, 커널로 들어가지 않고 읽는 길(vDSO)이 있어서 20ns 남짓이면 됩니다. 그 길이 없는 플랫폼에서는 시스템 호출 한 번의 값(수백 ns)이 듭니다. 어느 쪽이든 **재려는 구간이 `now()` 두 번의 값보다 충분히 길어야** 합니다. 수십 ns짜리 함수 하나를 이렇게 재면 재는 값이 더 큽니다. 그럴 때는 여러 번 돌려 전체를 잽니다([「벤치마크와 프로파일러」](#/read/cpp-advanced/perf-measure)).
+
+## 그 밖의 시계
+
+C++20에 시계가 넷 더 있습니다. `std::chrono::clock_cast`로 서로 바꿉니다.
+
+| 시계 | 재는 것 |
+| --- | --- |
+| `utc_clock` | 윤초까지 센 UTC |
+| `tai_clock` | 국제원자시. 윤초가 없다 |
+| `gps_clock` | GPS 시각. 윤초가 없다 |
+| `file_clock` | 파일 시스템이 쓰는 시각. `fs::file_time_type`의 시계 |
+
+```cpp
+#include <chrono>
+#include <print>
+
+using namespace std::chrono;
+using namespace std::chrono_literals;
+
+int main()
+{
+    const sys_seconds t{1'800'000'000s};
+    const auto as_utc = clock_cast<utc_clock>(t);
+    std::println("sys {}", t);
+    std::println("utc {}", as_utc);
+    std::println("tai {}", clock_cast<tai_clock>(t));
+    std::println("gps {}", clock_cast<gps_clock>(t));
+    std::println("{}", as_utc.time_since_epoch() - t.time_since_epoch());
+}
+```
+
+```text
+sys 2027-01-15 08:00:00
+utc 2027-01-15 08:00:00
+tai 2027-01-15 08:00:37
+gps 2027-01-15 08:00:18
+27s
+```
+
+`system_clock`은 **윤초를 세지 않습니다.** 하루를 늘 86,400초로 칩니다(유닉스 시간). 그래서 같은 순간을 `utc_clock`으로 세면 1970년부터 27초가 더 흘러 있습니다. 화면에 찍힌 시각이 같은 것은 둘 다 UTC를 나타내기 때문입니다. TAI와 GPS는 윤초 없이 흐르므로 UTC보다 37초, 18초 앞서 있습니다. GPS 수신기가 주는 시각을 로그의 시각과 맞출 때 이 18초를 손으로 빼지 않고 `clock_cast`에 맡깁니다.
+
+[`fs::last_write_time`](#/read/cpp-stl/fs-ops)이 주는 시각은 `file_clock`의 것입니다.
+
+```cpp
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <print>
+
+namespace fs = std::filesystem;
+using namespace std::chrono;
+using namespace std::chrono_literals;
+
+int main()
+{
+    const fs::path path = fs::temp_directory_path() / "na-time.txt";
+    std::ofstream(path) << "x";
+
+    const fs::file_time_type written = fs::last_write_time(path);
+    const auto age = file_clock::now() - written;
+    std::println("방금 썼다 {}", age < 10s);
+
+    // 달력 시각으로 바꾼다
+    const auto as_system = clock_cast<system_clock>(written);
+    std::println("2020년 뒤다 {}", as_system > sys_days{2020y / 1 / 1});
+
+    // 고친 시각을 하루 전으로 되돌려 놓는다
+    fs::last_write_time(path, written - 24h);
+    const auto older = file_clock::now() - fs::last_write_time(path);
+    std::println("하루 넘게 묵었다 {}", older >= 24h);
+    fs::remove(path);
+}
+```
+
+```text
+방금 썼다 true
+2020년 뒤다 true
+하루 넘게 묵었다 true
+```
+
+"사흘 넘은 로그 지우기"는 `file_clock::now() - fs::last_write_time(p) > days{3}`으로 씁니다. 달력 시각으로 바꿀 필요가 없습니다. 다만 파일 시각은 `system_clock`처럼 뛰는 시계에서 온 것이므로, 시각이 맞춰지기 전에 쓰인 파일은 몇 년 묵은 것처럼 보일 수 있습니다.
+
+<Note>
+`utc_clock`, `clock_cast`, 시간대는 GCC 13부터 있습니다. Clang 20의 libc++에는 `clock_cast`와 `utc_clock`이 아직 없습니다(이 책을 쓰면서 확인한 것). 두 구현을 모두 지원해야 하는 코드는 `system_clock`과 `steady_clock`만 쓰는 편이 안전합니다.
+</Note>
+
+## 정리
+
+- 걸린 시간과 타임아웃은 `steady_clock`으로, 사람이 보는 시각은 `system_clock`으로 다룬다. `system_clock`은 맞춰지면서 뒤로 가거나 건너뛴다
+- `high_resolution_clock`은 구현마다 다른 시계의 별명이라 쓰지 않는다. 시계의 눈금이 나노초여도 재는 구간은 `now()` 값보다 충분히 길어야 한다
+- `clock_cast`로 `utc`, `tai`, `gps`, `file` 시계와 오간다. `system_clock`은 윤초를 세지 않는다

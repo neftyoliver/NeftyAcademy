@@ -1,0 +1,111 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '검사를 켜는 세 단계, 각 단계가 잡는 것과 재어 본 값, 타입을 바꾸는 디버그 모드, libc++와 -fhardened';
+
+`v[10]`이 범위를 벗어나도 표준 라이브러리는 기본적으로 **검사하지 않습니다.** 검사를 넣으면 느려진다는 까닭입니다. 그 대신 구현마다 검사를 켜는 스위치를 두었습니다. 이 책 여러 곳에서 "`-D_GLIBCXX_ASSERTIONS`로 빌드하면 멈춥니다"라고 미뤄 둔 것을 여기서 모읍니다. [「새니타이저와 경고」](#/read/cpp-syntax/ubc-tools)가 도구 전체의 지도였다면, 이 페이지는 라이브러리 쪽 스위치를 자세히 봅니다.
+
+## libstdc++의 세 단계
+
+| 단계 | 켜는 법 | 하는 일 |
+| --- | --- | --- |
+| 기본 | 아무것도 주지 않는다 | 검사하지 않는다 |
+| 단언 | `-D_GLIBCXX_ASSERTIONS` | 싸게 확인할 수 있는 전제 조건을 검사한다 |
+| 디버그 모드 | `-D_GLIBCXX_DEBUG` | 위에 더해 반복자와 알고리즘의 전제 조건까지 검사한다 |
+
+같은 프로그램을 세 가지로 빌드해 봅니다.
+
+```cpp nocheck
+#include <print>
+#include <vector>
+
+int main()
+{
+    std::vector<int> v{1, 2, 3};
+    int index = 3;
+    std::println("{}", v[index]);       // 범위 밖
+}
+```
+
+```text nocheck
+$ g++ -std=c++23 -O2 main.cpp && ./a.out
+0
+$ g++ -std=c++23 -O2 -D_GLIBCXX_ASSERTIONS main.cpp && ./a.out
+/usr/include/c++/14/bits/stl_vector.h:1130: ... operator[](size_type)
+[with _Tp = int; ...]: Assertion '__n < this->size()' failed.
+중지됨 (코어 덤프됨)
+```
+
+기본 빌드는 **0을 찍고 정상 종료했습니다.** 벡터 뒤의 메모리에 마침 0이 있었을 뿐입니다. 단언을 켜면 어느 헤더의 어느 조건이 깨졌는지 말하고 그 자리에서 멈춥니다. 조용히 틀린 값으로 계속 도는 것과 그 자리에서 멈추는 것의 차이입니다.
+
+## 단언이 잡는 것
+
+| 잡는 것 | 예 |
+| --- | --- |
+| 범위를 벗어난 `[]` | `vector`, `array`, `string`, `deque`, [`span`](#/read/cpp-stl/seq-span), `string_view` |
+| 빈 컨테이너의 `front()`, `back()`, `pop_back()` | |
+| 빈 것을 벗기기 | [`*optional`](#/read/cpp-stl/voc-optional), `*unique_ptr`, `*shared_ptr`, `expected`의 `*` |
+| 말이 안 되는 인자 | 위아래가 뒤집힌 `std::clamp(v, hi, lo)`, 길이보다 많이 떼는 `string_view::remove_prefix` |
+
+검사가 모두 "수 둘을 견준다" 수준이라서 쌉니다. 그리고 **타입의 생김새를 바꾸지 않습니다.** 이 옵션으로 빌드한 파일과 아닌 파일을 한 프로그램에 섞어도 됩니다.
+
+## 디버그 모드가 잡는 것
+
+디버그 모드는 반복자가 **자기가 어느 컨테이너의 것인지, 아직 살아 있는지**를 기억하게 합니다. 그래서 메모리만 봐서는 알 수 없는 잘못이 잡힙니다. 네 가지를 돌려 봤습니다. 넷 다 기본 빌드와 단언 빌드에서는 **아무 말 없이 그럴듯한 값을 찍고 정상 종료**한 코드입니다.
+
+| 코드 | 디버그 모드의 진단 |
+| --- | --- |
+| `reserve` 해 둔 벡터의 앞에 `insert`한 뒤 옛 반복자를 `*it` | `attempt to dereference a singular iterator` |
+| 정렬하지 않은 벡터에 `std::binary_search` | `elements in iterator range [first, last) are not partitioned by the value` |
+| `std::sort`에 `a <= b`를 주는 비교 함수 | `comparison doesn't meet irreflexive requirements, assert(!(a < a))` |
+| 서로 다른 벡터의 `begin()`끼리 `==` | `attempt to compare iterators from different sequences` |
+
+첫 줄이 [「무효화 규칙 한눈에」](#/read/cpp-stl/seq-invalidation)에서 말한 경우입니다. 용량이 넉넉해서 재할당이 일어나지 않았으므로 메모리는 멀쩡하고, [AddressSanitizer](#/read/cpp-syntax/ubc-tools)는 아무것도 보지 못합니다. 규칙으로는 무효가 된 반복자를 쓴 것이고, 디버그 모드만 그것을 압니다. 셋째 줄은 [콘셉트가 보지 못하던](#/read/cpp-stl/tr-concepts) "뜻"의 잘못을 실행 중에 잡은 것입니다.
+
+## 값
+
+이 검사들의 값을 쟀습니다. `int` 2,000만 개짜리 벡터를 훑고 200만 개를 정렬했습니다(x86-64, GCC 14 `-O2`).
+
+| 단계 | 차례로 `v[i]` | 반복자로 훑기 | 200만 개 `sort` |
+| --- | --- | --- | --- |
+| 기본 | 12 ms | 12 ms | 16 ms |
+| 단언 | 14 ms | 14 ms | 15 ms |
+| 디버그 모드 | 15 ms | 1,011 ms | 3,437 ms |
+
+`sizeof(std::vector<int>)`는 기본과 단언에서 24, 디버그 모드에서 56입니다.
+
+- **단언은 거의 공짜입니다.** 가장 빡빡한 루프에서 15% 남짓이고, 보통의 프로그램에서는 재기 어렵습니다. 그래서 페도라 같은 배포판은 배포하는 패키지 전체를 이 옵션으로 빌드합니다. 개발 중에는 늘 켜 두고, 출시 빌드에도 켜 두는 쪽을 먼저 생각합니다
+- **디버그 모드는 비쌉니다.** 반복자 하나가 8바이트에서 40바이트가 되고, 반복자를 쓰는 루프가 수십 배에서 수백 배 느려집니다. 시험을 돌릴 때만 켭니다
+
+<Note kind="warn">
+디버그 모드는 **타입을 바꿉니다.** `std::vector<int>`가 56바이트짜리 다른 클래스(`std::__debug::vector`)가 됩니다. 그래서 디버그 모드로 빌드한 파일과 아닌 파일을 섞으면 안 됩니다. `std::vector<int>&`를 받는 함수의 [맹글링된 이름](#/read/cpp-stl/impl-abi)이 `_Z1fRSt6vectorIiSaIiEE`에서 `_Z1fRNSt7__debug6vectorIiSaIiEEE`로 달라져서 대개는 링크 오류로 드러나지만, 미리 빌드된 라이브러리와 구조체를 주고받는 곳에서는 조용히 깨질 수 있습니다. 프로그램 전체를 같은 설정으로 빌드합니다.
+</Note>
+
+## 다른 구현과 -fhardened
+
+| 구현 | 스위치 |
+| --- | --- |
+| libstdc++ | `-D_GLIBCXX_ASSERTIONS`, `-D_GLIBCXX_DEBUG` |
+| libc++ | `-D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_FAST` (또는 `_EXTENSIVE`, `_DEBUG`) |
+| MSVC STL | 디버그 빌드에서 반복자 검사가 기본으로 켜진다 (`_ITERATOR_DEBUG_LEVEL`) |
+
+libc++의 것을 Clang 20으로 돌려 봤습니다. 위의 범위 밖 `v[3]`이 `FAST`와 `EXTENSIVE`에서는 **메시지 없이 그 자리에서 죽고**(잘못된 명령 신호), `DEBUG`에서는 `vector[] index out of bounds`라는 메시지를 냅니다. `FAST`는 출시 빌드에 켜 두라고 만든 단계라 메시지를 찍는 코드조차 넣지 않습니다. MSVC 쪽은 이 책에서 돌려 보지 못했습니다.
+
+GCC 14에는 여러 보호 옵션을 한꺼번에 켜는 `-fhardened`가 생겼습니다. 이 옵션이 `_GLIBCXX_ASSERTIONS`를 정의해 주는 것을 확인했습니다. 스택 보호와 위치 독립 실행 파일 같은 것도 함께 켜지고, 위의 표와 같은 시험에서 17 / 16 / 24 ms였습니다.
+
+C++26 초안에는 이 관행을 표준으로 올린 **경화된 구현**(hardened implementation)이라는 개념이 들어갔습니다. `vector`의 `[]`나 `optional`의 `*` 같은 전제 조건 가운데 싸게 검사할 수 있는 것을 "경화된 전제 조건"으로 지정하고, 경화된 구현에서는 어기면 프로그램이 멈추도록 한 것입니다. 무엇이 경화되는지는 표준이 정하고, **켜는 방법은 여전히 구현이 정합니다.** [C++26의 사정](#/read/cpp-syntax/ver-26)이 정리되면 위의 스위치들이 그 이름으로 묶일 것입니다.
+
+## 어떻게 쓸까
+
+| 빌드 | 권하는 설정 |
+| --- | --- |
+| 개발하면서 돌리는 빌드 | `-D_GLIBCXX_ASSERTIONS`와 `-fsanitize=address,undefined` |
+| 시험을 돌리는 빌드 | 위에 더해 `-D_GLIBCXX_DEBUG`를 켠 구성을 하나 더 |
+| 출시 빌드 | `-O2`와 `-D_GLIBCXX_ASSERTIONS`. 재어 보고 감당할 수 없을 때만 뺀다 |
+
+검사에 걸려 멈추는 것은 버그가 있다는 뜻이고, 검사를 꺼서 멈추지 않게 하는 것은 고친 것이 아닙니다. 멈춘 자리의 [호출 경로](#/read/cpp-stl/err-location)를 디버거나 코어 덤프로 보고 원인을 고칩니다. 기기가 스스로 다시 떠야 하는 제품이라면 감시 타이머와 재시작을 그 위에 얹습니다. 틀린 값으로 계속 도는 것보다 멈추고 다시 뜨는 쪽이 대개 안전합니다.
+
+## 정리
+
+- 표준 라이브러리는 기본적으로 전제 조건을 검사하지 않는다. `-D_GLIBCXX_ASSERTIONS`가 범위와 빈 값을 싸게 검사하고, 타입을 바꾸지 않는다
+- `-D_GLIBCXX_DEBUG`는 무효가 된 반복자, 정렬되지 않은 범위, 틀린 비교 함수까지 잡는다. 수십 배 느리고 타입을 바꾸므로 프로그램 전체를 같은 설정으로 빌드한다
+- libc++는 `_LIBCPP_HARDENING_MODE`, GCC 14는 `-fhardened`로 같은 일을 한다. 단언은 출시 빌드에도 켜 두는 것을 먼저 생각한다

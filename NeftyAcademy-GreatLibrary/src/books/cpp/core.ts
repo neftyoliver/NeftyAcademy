@@ -7,7 +7,6 @@
  * 본문은 src/chapters/cpp-syntax/ 에 있고, 파일을 넣으면 저절로 열린다(../written.ts).
  */
 import { book } from '../outline';
-import { writtenIn } from '../written';
 
 export const cppSyntax = book(
   'cpp-syntax',
@@ -133,7 +132,6 @@ legacy            레거시 C++
   leg-c-habits      C에서 온 습관들
   leg-sfinae        SFINAE와 enable_if
 `,
-  writtenIn('cpp-syntax'),
 );
 
 export const cppStl = book(

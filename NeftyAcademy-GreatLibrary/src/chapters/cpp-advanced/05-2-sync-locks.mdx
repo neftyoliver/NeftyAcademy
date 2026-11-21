@@ -1,0 +1,219 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '잠금 객체 넷의 차이, unique_lock으로만 되는 일, 잠근 범위의 값, 자료와 잠금을 한 타입으로 묶기';
+
+뮤텍스의 `lock()`과 `unlock()`은 직접 부르지 않습니다. [잠금 객체](#/read/cpp-stl/conc-mutex)가 생성자에서 잠그고 소멸자에서 풉니다. 표준에는 그런 객체가 넷 있고, 고르는 기준은 "무엇을 더 할 수 있어야 하는가"입니다.
+
+## 네 가지
+
+| 잠금 객체 | 크기 | 할 수 있는 것 |
+| --- | --- | --- |
+| `std::lock_guard` | 8 | 만들 때 잠그고 사라질 때 푼다. 그것뿐이다 |
+| `std::unique_lock` | 16 | 중간에 풀고 다시 잠그기, 나중에 잠그기, 옮기기. [조건 변수](#/read/cpp-advanced/sync-condvar)가 이것을 받는다 |
+| `std::scoped_lock` | 뮤텍스당 8 | 여러 뮤텍스를 [교착 없이](#/read/cpp-advanced/sync-deadlock) 한꺼번에 잠근다 |
+| `std::shared_lock` | 16 | [`shared_mutex`](#/read/cpp-advanced/sync-shared)의 읽는 쪽 잠금 |
+
+할 수 있는 것이 적은 쪽을 먼저 고릅니다. `lock_guard`는 "이 블록 전체가 잠겨 있다"를 보장하므로 읽는 사람이 따져 볼 것이 없습니다.
+
+## unique_lock으로만 되는 일
+
+```cpp
+#include <mutex>
+#include <print>
+#include <thread>
+#include <utility>
+
+std::mutex gate;
+int value = 0;                              // gate 가 지킨다
+
+// 잠근 채로 돌려준다: 받은 쪽이 이어서 쓰고, 그 범위가 끝날 때 풀린다
+std::unique_lock<std::mutex> lock_and_bump()
+{
+    std::unique_lock lock(gate);
+    ++value;
+    return lock;
+}
+
+int main()
+{
+    std::unique_lock held(gate);            // 만들면서 잠근다
+    bool other_got = true;
+    {
+        std::jthread other([&] {
+            // 기다리지 않고 한 번만
+            std::unique_lock tried(gate, std::try_to_lock);
+            other_got = tried.owns_lock();
+        });
+    }
+    std::println("다른 스레드의 try_to_lock: {}", other_got);
+
+    held.unlock();                          // 범위가 끝나기 전에 푼다
+    std::println("unlock 뒤: {}", held.owns_lock());
+    held.lock();                            // 다시 잠근다
+    std::println("lock 뒤: {}", held.owns_lock());
+    held.unlock();
+
+    // 아직 잠그지 않는다
+    std::unique_lock later(gate, std::defer_lock);
+    std::println("defer_lock: {}", later.owns_lock());
+
+    {
+        std::unique_lock kept = lock_and_bump();                // 잠긴 채로 받는다
+        ++value;
+        std::println("받은 잠금: {}, 값 {}", kept.owns_lock(), value);
+    }
+}
+```
+
+```text
+다른 스레드의 try_to_lock: false
+unlock 뒤: false
+lock 뒤: true
+defer_lock: false
+받은 잠금: true, 값 2
+```
+
+| 생성자의 둘째 인자 | 뜻 |
+| --- | --- |
+| (없음) | 지금 잠근다. 될 때까지 기다린다 |
+| `std::defer_lock` | 잠그지 않고 만든다. 나중에 `lock()`을 부른다 |
+| `std::try_to_lock` | 한 번 시도한다. 됐는지는 `owns_lock()`으로 본다 |
+| `std::adopt_lock` | 이미 잠겨 있는 것을 넘겨받는다. 풀기만 맡는다 |
+
+`unique_lock`은 "지금 잠그고 있는가"를 `bool` 하나로 기억합니다. 크기가 8바이트 더 큰 까닭이고, [옮길 수 있는](#/read/cpp-advanced/mv-moved-from) 까닭입니다. 옮겨 준 쪽은 `owns_lock()`이 `false`가 되어 소멸자가 아무것도 하지 않습니다.
+
+`try_to_lock`을 다른 스레드에서 한 것을 눈여겨봅니다. **이미 쥐고 있는 스레드가** `std::mutex`에 `try_lock`을 부르는 것은 정의되지 않은 동작입니다. "내가 잠갔는지 알아보는" 용도로는 쓸 수 없습니다.
+
+## 잠근 범위가 값이다
+
+| 6 µs짜리 계산을 스레드마다 20만 번 | 스레드 1개 | 스레드 2개 |
+| --- | --- | --- |
+| 잠근 채로 계산한다 | 1,190 ms | 5,100 ms |
+| 잠근 동안에는 복사만 하고, 계산은 밖에서 한다 | 1,190 ms | 1,230 ms |
+
+x86-64 서버 VM(코어 2개), GCC 14 `-O2`에서 잰 값입니다. 스레드가 둘이 되면 일도 두 배이므로, 아랫줄은 두 코어가 온전히 일한 것이고 윗줄은 **혼자 할 때의 두 배보다도 느립니다.** 한 번에 하나만 계산할 수 있는 데다, 넘겨줄 때마다 [잠든 스레드를 깨우는 값](#/read/cpp-advanced/sync-mutex)이 붙기 때문입니다.
+
+```cpp
+std::mutex guard;
+std::vector<int> shared_data;       // guard 가 지킨다
+
+std::uint64_t compute(const std::vector<int>& data);
+
+std::uint64_t slow()
+{
+    std::lock_guard lock(guard);
+    return compute(shared_data);    // 잠근 채로 계산한다
+}
+
+std::uint64_t fast()
+{
+    std::vector<int> copy;
+    {
+        std::lock_guard lock(guard);
+        copy = shared_data;         // 잠근 동안에는 복사만 한다
+    }
+    return compute(copy);           // 계산은 잠금 밖에서
+}
+```
+
+잠금 안에서 하는 일은 **자료를 읽어 내거나 바꿔 넣는 것**으로 줄입니다. 파일 쓰기, 네트워크, 메모리 할당, 로그 찍기, 남의 콜백 부르기는 모두 밖으로 냅니다. 복사가 비싸면 [`shared_ptr<const T>`를 복사해](#/read/cpp-advanced/sp-shared) 스냅숏을 들고 나옵니다.
+
+## 자료와 잠금을 묶는다
+
+"이 뮤텍스가 이 변수를 지킨다"가 주석으로만 적혀 있으면 한 군데쯤은 잊습니다. 둘을 한 타입에 넣어 **잠그지 않고는 닿을 길이 없게** 만들 수 있습니다.
+
+```cpp
+#include <mutex>
+#include <print>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
+
+template <typename T>
+class Synchronized {
+public:
+    template <typename... Args>
+    explicit Synchronized(Args&&... args) : value_(std::forward<Args>(args)...) {}
+
+    // 잠근 채로 f 를 부르고, f 가 돌려준 것을 값으로 돌려준다
+    template <typename F>
+    auto with(F&& f)
+    {
+        std::lock_guard lock(guard_);
+        return std::forward<F>(f)(value_);
+    }
+
+    // 잠금을 쥔 손잡이. 손잡이가 사라질 때 풀린다
+    class Locked {
+    public:
+        T* operator->() { return &value_; }
+        T& operator*() { return value_; }
+
+    private:
+        friend class Synchronized;
+        Locked(std::mutex& guard, T& value) : lock_(guard), value_(value) {}
+        std::unique_lock<std::mutex> lock_;
+        T& value_;
+    };
+    Locked lock() { return Locked(guard_, value_); }
+
+private:
+    std::mutex guard_;
+    T value_;
+};
+
+int main()
+{
+    Synchronized<std::vector<std::string>> names;
+    {
+        std::vector<std::jthread> workers;
+        for (int id = 0; id < 4; ++id) {
+            workers.emplace_back([&names, id] {
+                for (int i = 0; i < 1000; ++i) {
+                    // 잠금 밖에서 만든다
+                    std::string name = "w" + std::to_string(id);
+                    names.with([&](auto& list) {
+                        list.push_back(std::move(name));
+                    });
+                }
+            });
+        }
+    }
+    std::println("{}", names.with([](const auto& list) { return list.size(); }));
+
+    {
+        auto list = names.lock();           // 여러 줄에 걸쳐 잠가 둔다
+        list->clear();
+        list->push_back("only");
+        std::println("{} {}", list->size(), (*list)[0]);
+    }
+}
+```
+
+```text
+4000
+1 only
+```
+
+`value_`는 `private`이고 밖으로 나가는 길은 `with`와 `lock` 둘뿐이며, 둘 다 잠급니다. Rust의 `Mutex<T>`가 이 꼴입니다. C++에서는 컴파일러가 끝까지 막아 주지는 못합니다. `with` 안에서 원소의 주소를 바깥 변수에 적어 두면 잠금이 풀린 뒤에도 그것을 쓸 수 있습니다. 그래도 **잊어서** 틀리는 길은 사라집니다.
+
+<Note kind="warn">
+손잡이를 한 식에서 두 번 만들면 교착입니다. `names.lock()->size() + names.lock()->size()`는 첫 손잡이가 식이 끝날 때까지 살아 있는 동안 둘째가 같은 뮤텍스를 잠그려 합니다. 손잡이는 이름 붙인 변수로 한 번만 만듭니다.
+</Note>
+
+## 흔한 실수
+
+| 코드 | 생기는 일 |
+| --- | --- |
+| `std::lock_guard<std::mutex>{guard};` | 이름이 없어 [그 줄에서 바로 풀린다](#/read/cpp-advanced/res-guard). 경고가 난다 |
+| `std::scoped_lock lock;` | 뮤텍스를 주지 않았는데 컴파일된다. 아무것도 잠그지 않는다 |
+| `std::unique_lock lock(guard, std::defer_lock);` 뒤에 `lock.lock()`을 잊는다 | 잠그지 않은 채로 지나간다 |
+| 지키는 자료의 참조를 함수가 돌려준다 | 받은 쪽이 잠금 없이 쓴다 |
+| 클래스마다 뮤텍스를 두고 서로의 함수를 부른다 | [잠금 순서](#/read/cpp-advanced/sync-deadlock)가 엇갈린다 |
+
+## 정리
+
+- `lock_guard`를 먼저 쓴다. 중간에 풀거나 옮겨야 하면 `unique_lock`, 뮤텍스가 여럿이면 `scoped_lock`이다
+- 잠근 범위에서는 자료를 읽어 내거나 바꿔 넣기만 한다. 계산과 입출력을 잠금 안에서 하면 스레드를 늘릴수록 느려진다
+- 자료와 뮤텍스를 한 타입에 묶으면 잠그는 것을 잊을 수 없다

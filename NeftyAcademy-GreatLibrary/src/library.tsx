@@ -19,6 +19,7 @@ import PackageManagers from './chapters/basics/05-package-managers.mdx';
 import Git from './chapters/basics/06-git.mdx';
 import Commands from './chapters/basics/07-commands.mdx';
 import CEcosystem from './chapters/basics/08-c-ecosystem.mdx';
+import { writtenIn } from './books/written';
 import { cpp } from './books/cpp';
 import { networking } from './books/networking';
 import { mpi, openmp } from './books/parallel';
@@ -300,3 +301,25 @@ export const library: Library = {
   ],
   footer: 'Nefty Academy · Great Library · AGPL-3.0-or-later',
 };
+
+/**
+ * 위에 직접 적은 책(입문, C 초급·중급, 전자공학)의 draft(...)도, src/chapters/<책 id>/ 에 같은 id 의 파일이 있으면 저절로 열린다.
+ * 파일 이름(NN-id.mdx, NN-M-id.mdx)과 요약(export const summary)을 적는 법은 books/written.ts 와 같다.
+ * 하위 챕터 가운데 하나라도 열리면 묶음의 "준비 중" 딱지도 빠진다.
+ */
+function openWritten(bookId: string, chapters: Chapter[]): void {
+  const pages = writtenIn(bookId);
+  const walk = (list: Chapter[]): void => {
+    for (const ch of list) {
+      if (ch.children) {
+        walk(ch.children);
+        if (ch.draft) ch.draft = ch.children.every((c) => c.draft);
+        continue;
+      }
+      const page = ch.draft ? pages[ch.id] : undefined;
+      if (page) Object.assign(ch, { Content: page[0], summary: page[1], links: page[2], draft: false });
+    }
+  };
+  walk(chapters);
+}
+for (const b of library.books) if (!b.books) openWritten(b.id, b.chapters);

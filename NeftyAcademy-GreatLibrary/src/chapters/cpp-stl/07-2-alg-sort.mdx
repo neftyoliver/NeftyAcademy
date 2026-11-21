@@ -1,0 +1,208 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'sort와 stable_sort, 일부만 정렬하기, 정렬된 범위에서의 이진 탐색 넷, 정렬을 지키며 넣기';
+
+정렬은 그 자체로도 쓰지만, **그 뒤에 할 수 있는 일** 때문에 더 자주 합니다. 정렬된 범위에서는 찾기가 O(log n)이 되고, 겹친 것 걸러 내기와 두 묶음 견주기가 한 번 훑기로 끝납니다.
+
+## 정렬의 종류
+
+```cpp
+#include <algorithm>
+#include <functional>
+#include <print>
+#include <string>
+#include <vector>
+
+struct Reading {
+    std::string sensor;
+    int value;
+};
+
+void show(const char* label, const std::vector<Reading>& readings)
+{
+    std::print("{:12}", label);
+    for (const auto& r : readings)
+        std::print("{}{} ", r.sensor, r.value);
+    std::println("");
+}
+
+int main()
+{
+    std::vector<Reading> readings = {
+        {"b", 3}, {"a", 3}, {"c", 1}, {"a", 2}, {"b", 1},
+    };
+    show("처음", readings);
+
+    std::ranges::sort(readings, {}, &Reading::value);           // 값의 오름차순
+    show("값 순", readings);
+
+    // 내림차순
+    std::ranges::sort(readings, std::ranges::greater{}, &Reading::value);
+    show("값 역순", readings);
+
+    // 센서 이름순, 이름이 같으면 값 순: 견줄 것을 묶어서 한 번에
+    std::ranges::sort(readings, {}, [](const Reading& r) {
+        return std::pair(r.sensor, r.value);
+    });
+    show("이름, 값", readings);
+
+    // 같은 것끼리는 지금의 순서를 지킨다
+    std::ranges::stable_sort(readings, {}, &Reading::value);
+    show("안정 정렬", readings);
+}
+```
+
+```text
+처음        b3 a3 c1 a2 b1
+값 순       c1 b1 a2 b3 a3
+값 역순     b3 a3 a2 c1 b1
+이름, 값    a2 a3 b1 b3 c1
+안정 정렬   b1 c1 a2 a3 b3
+```
+
+`std::ranges::sort(범위, 비교, 프로젝션)`의 셋째 인자는 "견주기 전에 원소에서 무엇을 꺼낼지"입니다. `{}`는 기본 비교(`<`)를 쓰라는 뜻입니다.
+
+"값 순"의 결과에서 값이 1인 `c1`과 `b1`, 값이 3인 `b3`과 `a3`의 순서는 **우연**입니다. `sort`는 같은 것끼리의 순서를 보장하지 않습니다. 마지막의 `stable_sort`는 보장합니다. 직전에 이름순이었으므로, 값이 같은 것끼리는 이름순이 남았습니다(`b1 c1`, `a3 b3`).
+
+| | `sort` | `stable_sort` |
+| --- | --- | --- |
+| 같은 것끼리의 순서 | 보장하지 않는다 | 지킨다 |
+| 시간 | O(n log n) | 여분의 메모리가 있으면 O(n log n) |
+| 여분의 메모리 | 거의 없다 | 원소 수만큼의 임시 버퍼를 잡으려 한다 |
+
+화면에 보일 목록을 "열 하나를 눌러 정렬"하는 식이면 `stable_sort`여야 합니다. 그렇지 않으면 다른 열의 순서가 누를 때마다 뒤섞입니다. 메모리가 빠듯한 기기에서 큰 배열을 `stable_sort`할 때는 그 임시 버퍼를 셈에 넣습니다.
+
+## 전부 정렬하지 않기
+
+"가운데 값 하나"나 "상위 셋"이 필요할 뿐이라면 전부 정렬하는 것은 낭비입니다.
+
+```cpp
+#include <algorithm>
+#include <print>
+#include <vector>
+
+void show(const char* label, const std::vector<int>& v)
+{
+    std::print("{:14}", label);
+    for (int x : v)
+        std::print("{} ", x);
+    std::println("");
+}
+
+int main()
+{
+    const std::vector<int> samples = {41, 73, 12, 98, 55, 67, 30, 12, 88};
+
+    auto a = samples;
+    const auto middle = a.begin() + a.size() / 2;
+    std::ranges::nth_element(a, middle);        // 가운데 자리에 올 것만 제자리에
+    show("nth_element", a);
+    std::println("중앙값 {}", *middle);
+
+    auto b = samples;
+    std::ranges::partial_sort(b, b.begin() + 3);    // 앞의 셋만 정렬된 상태로
+    show("partial_sort", b);
+
+    auto c = samples;
+    std::ranges::partial_sort(c, c.begin() + 3, std::ranges::greater{});
+    std::println("가장 큰 셋 {} {} {}", c[0], c[1], c[2]);
+}
+```
+
+```text nocheck
+nth_element   30 12 12 41 55 67 73 98 88
+중앙값 55
+partial_sort  12 12 30 98 73 67 55 41 88
+가장 큰 셋 98 88 73
+```
+
+| 알고리즘 | 끝난 뒤의 상태 | 시간 |
+| --- | --- | --- |
+| `nth_element(범위, 자리)` | 그 자리에 정렬했을 때의 값이 온다. 앞은 그보다 작거나 같고 뒤는 크거나 같다 | 평균 O(n) |
+| `partial_sort(범위, 가운데)` | 가운데 앞까지만 정렬되어 있다 | O(n log k) |
+
+중앙값과 "가장 큰 셋"은 언제나 같지만, 나머지 자리의 순서는 구현에 달려 있습니다. 위는 GCC 14의 결과입니다. 측정값에서 튀는 값을 빼고 가운데를 쓰는 중앙값 필터가 `nth_element`의 대표적인 쓰임입니다.
+
+## 이진 탐색
+
+정렬된 범위에서는 절반씩 버리며 찾습니다. 넷이 한 묶음입니다.
+
+```cpp
+#include <algorithm>
+#include <print>
+#include <vector>
+
+int main()
+{
+    const std::vector<int> sorted = {10, 20, 20, 20, 30, 40};
+
+    std::println("20이 있는가 {}", std::ranges::binary_search(sorted, 20));
+    std::println("25가 있는가 {}", std::ranges::binary_search(sorted, 25));
+
+    const auto lower = std::ranges::lower_bound(sorted, 20);    // 20 이상인 첫 자리
+    // 20 보다 큰 첫 자리
+    const auto upper = std::ranges::upper_bound(sorted, 20);
+    std::println("lower {} upper {} -> 20은 {}개", lower - sorted.begin(),
+                 upper - sorted.begin(), upper - lower);
+
+    const auto same = std::ranges::equal_range(sorted, 20);     // 둘을 한 번에
+    std::println("equal_range 의 길이 {}", same.size());
+
+    // 없는 값: 둘 다 "그 값이 들어갈 자리"를 가리킨다
+    const auto where = std::ranges::lower_bound(sorted, 25);
+    std::println("25가 들어갈 자리 {}", where - sorted.begin());
+}
+```
+
+```text
+20이 있는가 true
+25가 있는가 false
+lower 1 upper 4 -> 20은 3개
+equal_range 의 길이 3
+25가 들어갈 자리 4
+```
+
+| 알고리즘 | 돌려주는 것 |
+| --- | --- |
+| `binary_search` | 있는지만 (`bool`). 자리는 알려 주지 않는다 |
+| `lower_bound` | 값 **이상인** 첫 원소 |
+| `upper_bound` | 값**보다 큰** 첫 원소 |
+| `equal_range` | 위 둘 사이, 곧 값과 같은 구간 |
+
+`lower_bound`가 가장 자주 쓰입니다. "있으면 그 자리, 없으면 들어갈 자리"를 한 번에 주기 때문입니다. 있는지 확인하려면 돌려받은 반복자가 `end()`가 아니고 가리키는 값이 찾던 값인지 봅니다.
+
+<Note kind="warn">
+이진 탐색은 범위가 **같은 기준으로 정렬되어 있다**고 믿고 일합니다. 정렬되지 않았거나, 내림차순으로 정렬해 놓고 기본 비교로 찾으면 오류 없이 틀린 답을 냅니다. 정렬할 때 준 비교와 프로젝션을 찾을 때도 똑같이 줍니다. [「array」](#/read/cpp-stl/seq-array)에서 본 `static_assert(std::ranges::is_sorted(…))`가 이 가정을 지키는 장치입니다.
+</Note>
+
+## 정렬을 지키며 넣기
+
+```cpp
+#include <algorithm>
+#include <print>
+#include <vector>
+
+int main()
+{
+    std::vector<int> sorted;
+    for (int value : {30, 10, 20, 10, 40}) {
+        const auto where = std::ranges::upper_bound(sorted, value);
+        sorted.insert(where, value);        // 들어갈 자리에 끼운다
+    }
+    for (int v : sorted)
+        std::print("{} ", v);
+    std::println("");
+}
+```
+
+```text
+10 10 20 30 40
+```
+
+`upper_bound`를 쓰면 같은 값 가운데 맨 뒤에 들어가서 넣은 순서가 지켜집니다. 넣을 때마다 뒤를 밀므로 O(n)이지만, [원소가 수천 개까지는](#/read/cpp-stl/ov-complexity) `list`나 `multiset`보다 대개 빠릅니다. 한꺼번에 많이 넣을 것이면 다 넣고 한 번 정렬합니다.
+
+## 정리
+
+- `sort`는 같은 것끼리의 순서를 보장하지 않는다. 필요하면 `stable_sort`. 견줄 멤버는 프로젝션으로 고른다
+- 일부만 필요하면 `nth_element`(평균 O(n))와 `partial_sort`
+- 이진 탐색은 정렬할 때와 같은 기준으로. `lower_bound`는 "있으면 그 자리, 없으면 들어갈 자리"

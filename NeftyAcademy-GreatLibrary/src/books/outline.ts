@@ -15,9 +15,11 @@
  *
  * 챕터를 쓰면 둘째 인자에 { id: [본문, '한 줄 요약', 본문이 가리키는 챕터들] }을 넣는다. 거기 없는 챕터는 "준비 중"으로 보인다.
  * 손으로 적을 필요는 없다: written.ts 의 writtenIn('폴더')가 src/chapters/폴더/ 의 .mdx 를 모아 이 모양으로 만들어 준다.
+ * book()은 따로 주지 않으면 writtenIn(책 id)를 쓴다. 곧 src/chapters/<책 id>/ 에 파일을 넣기만 하면 그 챕터가 열린다.
  */
 import type { Book, Chapter } from 'neftyacademy-paragons-bookshelf';
 import type { ComponentType } from 'react';
+import { writtenIn } from './written';
 
 export type Written = Record<string, [Content: ComponentType, summary?: string, links?: string[]]>;
 
@@ -47,7 +49,7 @@ export function outline(text: string, written: Written = {}): Chapter[] {
   return top;
 }
 
-/** 책 한 권을 짧게 적는 도우미. */
-export function book(id: string, title: string, subtitle: string, category: string, text: string, written: Written = {}): Book {
+/** 책 한 권을 짧게 적는 도우미. 쓴 챕터는 src/chapters/<id>/ 에서 저절로 모은다. */
+export function book(id: string, title: string, subtitle: string, category: string, text: string, written: Written = writtenIn(id)): Book {
   return { id, title, subtitle, category, chapters: outline(text, written) };
 }

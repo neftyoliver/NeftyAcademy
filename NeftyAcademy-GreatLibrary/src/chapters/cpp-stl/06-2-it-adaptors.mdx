@@ -1,0 +1,182 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '거꾸로 도는 반복자와 base()의 한 칸, 넣어 주는 반복자, 옮겨 주는 반복자, 스트림을 범위처럼';
+
+반복자 어댑터는 다른 반복자나 컨테이너를 감싸 **행동을 바꾼 반복자**입니다. 알고리즘은 그대로 두고 반복자만 바꿔 끼워서, 거꾸로 돌게 하거나 덮어쓰는 대신 끼워 넣게 합니다.
+
+## 거꾸로 도는 반복자
+
+`rbegin()`과 `rend()`는 뒤에서 앞으로 가는 반복자를 줍니다. `++`가 뒤로 한 칸입니다.
+
+```cpp
+#include <algorithm>
+#include <iterator>
+#include <print>
+#include <vector>
+
+void show(const char* label, const std::vector<int>& v)
+{
+    std::print("{:10}", label);
+    for (int x : v)
+        std::print("{} ", x);
+    std::println("");
+}
+
+int main()
+{
+    std::vector<int> v = {1, 5, 2, 5, 3};
+
+    std::print("{:10}", "거꾸로");
+    for (auto it = v.rbegin(); it != v.rend(); ++it)
+        std::print("{} ", *it);
+    std::println("");
+
+    // 마지막 5 찾기: 뒤에서부터 처음 만나는 5
+    const auto last5 = std::find(v.rbegin(), v.rend(), 5);
+    std::println("마지막 5의 첨자 {}", std::distance(v.begin(), last5.base()) - 1);
+
+    v.erase(std::next(last5).base());       // 그 5 를 지운다
+    show("지운 뒤", v);
+}
+```
+
+```text
+거꾸로    3 5 2 5 1
+마지막 5의 첨자 3
+지운 뒤   1 5 2 3
+```
+
+`erase`와 `insert`는 보통 반복자만 받습니다. 거꾸로 반복자에서 보통 반복자를 꺼내는 것이 `base()`인데, **한 칸 어긋나 있습니다.**
+
+```text
+원소          1   5   2   5   3
+보통 반복자   ↑               ↑ last5.base()   (찾은 5의 다음)
+거꾸로 반복자             ↑ last5              (찾은 5)
+```
+
+`rit.base()`는 `rit`가 가리키는 원소의 **다음 칸**입니다. `rbegin().base()`가 `end()`가 되게 맞춘 결과입니다. 그래서 그 원소를 지우려면 `std::next(rit).base()`를 넘깁니다. `v.erase(rit.base())`라고 쓰면 옆 원소가 지워집니다.
+
+## 넣어 주는 반복자
+
+`std::copy`는 목적지에 `*out = 값; ++out;`을 되풀이합니다. 목적지가 비어 있으면 없는 칸에 쓰게 됩니다. 넣어 주는 반복자는 그 대입을 `push_back`이나 `insert`로 바꿉니다.
+
+```cpp
+#include <algorithm>
+#include <deque>
+#include <iterator>
+#include <print>
+#include <set>
+#include <vector>
+
+int main()
+{
+    const std::vector<int> source = {4, 1, 6, 3, 2};
+
+    std::vector<int> evens;
+    std::copy_if(source.begin(), source.end(), std::back_inserter(evens),
+                 [](int x) { return x % 2 == 0; });     // evens.push_back(x)
+
+    std::deque<int> reversed;
+    // push_front
+    std::copy(source.begin(), source.end(), std::front_inserter(reversed));
+
+    std::set<int> sorted;
+    std::copy(source.begin(), source.end(), std::inserter(sorted, sorted.end()));
+
+    for (int x : evens)
+        std::print("{} ", x);
+    std::print("/ ");
+    for (int x : reversed)
+        std::print("{} ", x);
+    std::print("/ ");
+    for (int x : sorted)
+        std::print("{} ", x);
+    std::println("");
+}
+```
+
+```text
+4 6 2 / 2 3 6 1 4 / 1 2 3 4 6
+```
+
+| 어댑터 | 부르는 것 | 쓸 수 있는 컨테이너 |
+| --- | --- | --- |
+| `std::back_inserter(c)` | `c.push_back(x)` | `vector`, `deque`, `list`, `string` |
+| `std::front_inserter(c)` | `c.push_front(x)` | `deque`, `list`, `forward_list` |
+| `std::inserter(c, 위치)` | `c.insert(위치, x)` | 모두. `set`, `map`에는 이것 |
+
+<Note kind="warn">
+`std::vector<int> out; std::copy(a.begin(), a.end(), out.begin());`은 비어 있는 `out`의 없는 칸에 씁니다. 컴파일도 되고 조용히 메모리를 망가뜨립니다. `std::back_inserter(out)`을 넘기거나 먼저 `out.resize(a.size())`를 합니다. 원소 수를 알면 뒤쪽이 더 빠릅니다. 사실 통째로 붙이는 일이라면 알고리즘 없이 `out.insert(out.end(), a.begin(), a.end())`가 가장 낫습니다.
+</Note>
+
+## 옮겨 주는 반복자
+
+`std::make_move_iterator`로 감싼 반복자는 `*it`가 원소를 [우측값](#/read/cpp-syntax/sm-rvalue)으로 내줍니다. 받는 쪽이 복사 대신 이동을 합니다.
+
+```cpp
+#include <iterator>
+#include <print>
+#include <string>
+#include <vector>
+
+int main()
+{
+    std::vector<std::string> inbox = {
+        "a long message that lives on the heap",
+        "another long message on the heap too",
+    };
+    const char* before = inbox[0].data();
+
+    std::vector<std::string> archive;
+    archive.insert(archive.end(), std::make_move_iterator(inbox.begin()),
+                   std::make_move_iterator(inbox.end()));
+
+    std::println("글자를 복사하지 않았는가: {}", archive[0].data() == before);
+    std::println("inbox 에는 여전히 {}칸이 있다", inbox.size());
+    inbox.clear();      // 속을 내준 껍데기를 치운다
+}
+```
+
+```text
+글자를 복사하지 않았는가: true
+inbox 에는 여전히 2칸이 있다
+```
+
+원소의 **속**만 옮겨 갑니다. `inbox`의 칸 수는 그대로이고, 칸마다 속이 빈(정확히는 "쓸 수 있지만 내용은 정해지지 않은") 문자열이 남습니다. 그래서 끝에 `clear()`를 부릅니다. 레인지로는 `std::views::as_rvalue`가 같은 일을 합니다.
+
+## 스트림을 범위처럼
+
+`std::istream_iterator<T>`는 `>>`로 하나씩 읽는 입력 반복자이고, 인자 없이 만든 것이 "끝"입니다. `std::ostream_iterator<T>`는 `<<`로 쓰는 출력 반복자입니다.
+
+```cpp
+#include <algorithm>
+#include <iostream>
+#include <iterator>
+#include <numeric>
+#include <sstream>
+#include <vector>
+
+int main()
+{
+    std::istringstream input("23.5 41 1013.2");
+    const std::vector<double> values{std::istream_iterator<double>(input),
+                                     std::istream_iterator<double>()};
+
+    std::ostream_iterator<double> out(std::cout, " | ");
+    std::copy(values.begin(), values.end(), out);
+    const double sum = std::accumulate(values.begin(), values.end(), 0.0);
+    std::cout << "합 " << sum << '\n';
+}
+```
+
+```text
+23.5 | 41 | 1013.2 | 합 1077.7
+```
+
+공백으로 나뉜 숫자를 파일에서 읽어 `vector`에 담는 코드가 한 줄이 됩니다. 다만 [스트림은 느리고](#/read/cpp-stl/io-speed) 읽다가 틀린 글자를 만나면 조용히 멈추므로, 형식이 엄격한 입력에는 [`from_chars`](#/read/cpp-stl/str-convert)가 낫습니다.
+
+## 정리
+
+- `rit.base()`는 `rit`가 가리키는 원소의 다음 칸이다. 지울 때는 `std::next(rit).base()`
+- 빈 컨테이너로 복사할 때는 `std::back_inserter`. `set`과 `map`에는 `std::inserter`
+- `std::make_move_iterator`는 복사를 이동으로 바꾼다. 원래 컨테이너에는 속을 내준 칸이 남는다

@@ -1,0 +1,201 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '알림을 놓치는 틈, 조건을 잠근 채로 바꾸는 까닭, 누구를 깨울지, 길이에 끝이 있는 큐';
+
+조건 변수로 "조건이 맞을 때까지 잔다"를 쓰는 법과, `wait`에 조건을 꼭 줘야 한다는 것은 [「mutex와 lock」](#/read/cpp-stl/conc-mutex)에서 봤습니다. 여기서는 그 규칙들이 **왜** 있는지를 틀리는 코드로 확인하고, 그때 미뤄 둔 길이에 끝이 있는 큐를 만듭니다.
+
+## 알림을 놓치는 틈
+
+조건 변수는 **기억하지 않습니다.** `notify_one()`은 그 순간 자고 있는 스레드를 깨울 뿐이고, 아무도 자고 있지 않으면 사라집니다. 그래서 "조건을 본다"와 "잠든다" 사이에 틈이 있으면 안 됩니다. 아래는 그 틈을 일부러 벌린 코드입니다.
+
+```cpp
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <latch>
+#include <mutex>
+#include <print>
+#include <thread>
+
+using namespace std::chrono_literals;
+
+int main()
+{
+    std::mutex guard;
+    std::condition_variable changed;
+    std::atomic<bool> ready = false;        // 원자적이지만 guard 로 지키지 않는다
+    std::latch checked(1), notified(1);
+    bool woke_by_notify = true;
+    {
+        std::jthread waiter([&] {
+            std::unique_lock lock(guard);
+            if (!ready) {                   // 조건을 봤다: 아직 거짓이다
+                checked.count_down();
+                notified.wait();            // 보고 나서 잠들기까지의 틈
+                auto status = changed.wait_for(lock, 50ms);
+                woke_by_notify = status == std::cv_status::no_timeout;
+            }
+        });
+        checked.wait();
+        ready = true;                       // 잠그지 않고 조건을 바꾼다
+        changed.notify_one();               // 아직 아무도 자고 있지 않다
+        notified.count_down();
+    }
+    std::println("알림으로 깨어났나: {} (ready 는 {})", woke_by_notify,
+                 ready.load());
+}
+```
+
+```text
+알림으로 깨어났나: false (ready 는 true)
+```
+
+`ready`는 참이 되었고 알림도 보냈지만, 기다리는 쪽은 50 ms의 시간제한이 다 되어서야 깨어났습니다. 시간제한이 없었다면 영영 잡니다. `ready`가 `std::atomic`이어서 경합은 없습니다. 그래도 틀립니다.
+
+| 기다리는 스레드 | 깨우는 스레드 |
+| --- | --- |
+| 잠그고 조건을 본다: 거짓 | |
+| | 조건을 참으로 바꾼다 (잠그지 않았으므로 끼어들 수 있다) |
+| | `notify_one()`. 자는 스레드가 없다 |
+| 잠금을 풀고 잠든다 | |
+
+`wait`는 **잠금을 푸는 일과 잠드는 일을 한 동작으로** 합니다. 그 사이에는 누구도 끼어들 수 없습니다. 그러니 깨우는 쪽이 조건을 바꿀 때 같은 뮤텍스를 잠그기만 하면, 기다리는 쪽이 조건을 보는 순간부터 잠들 때까지 끼어들 수 없어 틈이 사라집니다.
+
+| 규칙 | 막는 것 |
+| --- | --- |
+| 조건을 이루는 변수는 **바꿀 때도** 그 뮤텍스를 잠근다. 원자적 변수여도 그렇다 | 위의 놓친 알림 |
+| `wait`에 조건을 준다. `wait(lock, 조건)`은 `while (!조건()) wait(lock);`이다 | 기다리기 전에 이미 온 알림, 가짜 깨어남 |
+| 깨어난 뒤에 조건을 다시 본다(위의 꼴이 해 준다) | 깨어나서 잠그기 전에 다른 스레드가 먼저 가져간 경우 |
+
+가짜 깨어남은 아무도 알리지 않았는데 `wait`가 돌아오는 것입니다. 표준이 허용하고, 운영체제의 기다림이 신호 같은 다른 일로 끊길 때 생깁니다. 드물지만 조건을 주는 꼴로 쓰면 신경 쓸 일이 없습니다.
+
+## 누구를 깨울까
+
+| 기다리는 스레드 8개에 일을 하나씩 2만 번 준다 | 조건을 확인한 횟수 | 걸린 시간 |
+| --- | --- | --- |
+| `notify_one()` | 40,016번 | 215 ms |
+| `notify_all()` | 118,876번 | 447 ms |
+
+x86-64 서버 VM(코어 2개), GCC 14 `-O2`에서 잰 값입니다. `notify_all`은 여덟을 다 깨우고, 하나가 일을 가져가면 나머지 일곱은 조건이 거짓임을 확인하고 다시 잡니다. 깨우고 재우는 데 한 번에 [10 µs쯤](#/read/cpp-advanced/sync-mutex) 들므로 헛되이 깨운 만큼 느려집니다.
+
+| 바뀐 것 | 부를 것 |
+| --- | --- |
+| 한 스레드가 처리하면 끝나는 변화: 큐에 일 하나가 들어왔다 | `notify_one()` |
+| 기다리는 모두에게 뜻이 있는 변화: 닫혔다, 설정이 바뀌었다 | `notify_all()` |
+| 기다리는 쪽마다 조건이 다르다 | `notify_all()`, 또는 조건 변수를 나눈다 |
+
+알림을 잠금 안에서 부를지 푼 뒤에 부를지는 정확성과 상관이 없습니다. 조건을 잠근 채로 바꾸기만 했으면 둘 다 맞습니다. 두 스레드가 값을 하나씩 주고받게 해서 재어 보니 한 번 오가는 데 어느 쪽이든 24 µs로 같았습니다.
+
+## 길이에 끝이 있는 큐
+
+[STL 책의 `WorkQueue`](#/read/cpp-stl/conc-mutex)는 넣는 쪽이 더 빠르면 끝없이 자랍니다. 한도를 두고, 꽉 차면 넣는 쪽이 **기다리게** 합니다. 기다리는 까닭이 둘이므로("비어서", "꽉 차서") 조건 변수도 둘입니다.
+
+```cpp
+#include <algorithm>
+#include <condition_variable>
+#include <cstddef>
+#include <mutex>
+#include <optional>
+#include <print>
+#include <queue>
+#include <thread>
+#include <utility>
+#include <vector>
+
+template <typename T>
+class BoundedQueue {
+public:
+    explicit BoundedQueue(std::size_t capacity) : capacity_(capacity) {}
+
+    // 자리가 날 때까지 기다린다. 닫혔으면 넣지 않고 false
+    bool push(T item)
+    {
+        std::unique_lock lock(guard_);
+        not_full_.wait(lock,
+                       [this] { return items_.size() < capacity_ || closed_; });
+        if (closed_) return false;
+        items_.push(std::move(item));
+        peak_ = std::max(peak_, items_.size());
+        lock.unlock();
+        not_empty_.notify_one();            // 꺼내려고 기다리는 쪽을 깨운다
+        return true;
+    }
+
+    // 항목이 올 때까지 기다린다. 닫히고 비었으면 빈 값
+    std::optional<T> pop()
+    {
+        std::unique_lock lock(guard_);
+        not_empty_.wait(lock, [this] { return !items_.empty() || closed_; });
+        if (items_.empty()) return std::nullopt;
+        T item = std::move(items_.front());
+        items_.pop();
+        lock.unlock();
+        not_full_.notify_one();             // 넣으려고 기다리는 쪽을 깨운다
+        return item;
+    }
+
+    void close()
+    {
+        {
+            std::lock_guard lock(guard_);
+            closed_ = true;
+        }
+        not_empty_.notify_all();            // 모두에게 뜻이 있는 변화다
+        not_full_.notify_all();
+    }
+
+    std::size_t peak() const
+    {
+        std::lock_guard lock(guard_);
+        return peak_;
+    }
+
+private:
+    const std::size_t capacity_;
+    // 아래의 items_, peak_, closed_ 를 지킨다
+    mutable std::mutex guard_;
+    std::condition_variable not_full_;
+    std::condition_variable not_empty_;
+    std::queue<T> items_;
+    std::size_t peak_ = 0;
+    bool closed_ = false;
+};
+
+int main()
+{
+    BoundedQueue<int> queue(4);
+    long long sums[2] = {};
+    {
+        std::vector<std::jthread> consumers;
+        for (int c = 0; c < 2; ++c) {
+            consumers.emplace_back([&queue, &sums, c] {
+                while (auto item = queue.pop()) sums[c] += *item;
+            });
+        }
+        // 꽉 차면 여기서 기다린다
+        for (int i = 1; i <= 10'000; ++i) queue.push(i);
+        queue.close();
+    }
+    std::println("합 {}", sums[0] + sums[1]);
+    std::println("가장 많이 쌓였을 때 4개 이하: {}", queue.peak() <= 4);
+}
+```
+
+```text
+합 50005000
+가장 많이 쌓였을 때 4개 이하: true
+```
+
+조건 변수를 하나만 쓰면 `notify_one()`이 **같은 편**을 깨울 수 있습니다. 넣는 쪽이 낸 알림을 다른 넣는 쪽이 받으면, 깨어난 쪽은 여전히 꽉 차 있어 다시 자고 정작 꺼낼 쪽은 깨지 않습니다. 둘로 나누면 알림이 늘 반대편에게 갑니다.
+
+넣는 쪽이 기다린다는 것은 **빠른 쪽이 느린 쪽에 맞춰진다**는 뜻입니다. 메모리가 끝없이 늘지 않는 대신, 넣는 스레드가 멈춰도 되는 곳이어야 합니다. 멈추면 안 되는 스레드(센서를 주기에 맞춰 읽는 스레드)라면 기다리지 않고 실패를 돌려주는 `try_push`를 두고 가장 오래된 것을 버리게 합니다.
+
+<Note>
+`std::condition_variable`은 `std::unique_lock<std::mutex>`만 받습니다. `std::condition_variable_any`는 `shared_lock`을 비롯한 어떤 잠금이든 받고, [멈춤 신호에도 깨어나는 `wait`](#/read/cpp-advanced/thr-jthread)가 있습니다. 크기는 48바이트와 64바이트이고, 위의 주고받기를 `_any`로 바꿔 재어도 시간은 같았습니다. `jthread`와 함께 쓸 때는 `_any`를 고릅니다.
+</Note>
+
+## 정리
+
+- 조건 변수는 알림을 기억하지 않는다. 조건을 바꾸는 쪽도 같은 뮤텍스를 잠가야 "보고 나서 잠들기까지"의 틈이 사라진다
+- 한 스레드가 처리할 변화에는 `notify_one`, 모두에게 뜻이 있는 변화에는 `notify_all`을 쓴다
+- 기다리는 까닭이 둘이면 조건 변수도 둘로 나눈다. 길이에 끝이 있는 큐는 빠른 쪽을 느린 쪽에 맞춘다

@@ -1,0 +1,222 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '제너레이터를 직접 만들어 속을 보고, std::generator의 참조 타입과 재귀, 원소마다 드는 값을 잰다';
+
+[`std::generator`를 쓰는 법](#/read/cpp-stl/rng-own)은 이미 봤습니다. 여기서는 같은 것을 [프라미스 타입](#/read/cpp-advanced/co-promise)으로 직접 만들어 속을 보고, 표준의 것이 그 위에 무엇을 더했는지, 값이 얼마인지를 봅니다.
+
+## 직접 만든 제너레이터
+
+```cpp
+#include <coroutine>
+#include <exception>
+#include <print>
+#include <stdexcept>
+#include <utility>
+
+template <typename T>
+class Generator {
+public:
+    struct promise_type {
+        const T* current = nullptr;
+        std::exception_ptr error;
+
+        Generator get_return_object()
+        {
+            return Generator{Handle::from_promise(*this)};
+        }
+        std::suspend_always initial_suspend() noexcept { return {}; }
+        std::suspend_always final_suspend() noexcept { return {}; }
+        std::suspend_always yield_value(const T& value) noexcept
+        {
+            current = &value;   // 복사하지 않는다. 멈춘 동안 value는 살아 있다
+            return {};
+        }
+        void return_void() {}
+        void unhandled_exception() { error = std::current_exception(); }
+    };
+    using Handle = std::coroutine_handle<promise_type>;
+
+    struct Sentinel {};
+    class Iterator {
+    public:
+        explicit Iterator(Handle h) : handle_(h) {}
+        const T& operator*() const { return *handle_.promise().current; }
+        Iterator& operator++()
+        {
+            advance(handle_);
+            return *this;
+        }
+        bool operator==(Sentinel) const { return handle_.done(); }
+
+    private:
+        Handle handle_;
+    };
+
+    Iterator begin()
+    {
+        advance(handle_);
+        return Iterator{handle_};
+    }
+    Sentinel end() { return {}; }
+
+    explicit Generator(Handle h) : handle_(h) {}
+    Generator(Generator&& other) noexcept
+        : handle_(std::exchange(other.handle_, {}))
+    {
+    }
+    ~Generator()
+    {
+        if (handle_)
+            handle_.destroy();
+    }
+
+private:
+    static void advance(Handle h)
+    {
+        h.resume();
+        if (h.promise().error)
+            std::rethrow_exception(h.promise().error);
+    }
+    Handle handle_;
+};
+
+struct Guard {
+    ~Guard() { std::println("  (코루틴의 지역 객체가 정리된다)"); }
+};
+
+Generator<int> squares()
+{
+    Guard guard;
+    for (int i = 1;; ++i)
+        co_yield i * i;
+}
+
+Generator<int> faulty()
+{
+    co_yield 1;
+    throw std::runtime_error("센서가 답하지 않는다");
+}
+
+int main()
+{
+    for (int v : squares()) {
+        if (v > 9)
+            break;
+        std::println("받았다 {}", v);
+    }
+    std::println("끝까지 돌지 않고 나왔다");
+
+    try {
+        for (int v : faulty())
+            std::println("받았다 {}", v);
+    } catch (const std::exception& e) {
+        std::println("받은 예외: {}", e.what());
+    }
+}
+```
+
+```text
+받았다 1
+받았다 4
+받았다 9
+  (코루틴의 지역 객체가 정리된다)
+끝까지 돌지 않고 나왔다
+받았다 1
+받은 예외: 센서가 답하지 않는다
+```
+
+반복자의 세 연산이 핸들의 세 함수에 그대로 놓입니다.
+
+| 범위 `for`가 하는 일 | 제너레이터가 하는 일 |
+| --- | --- |
+| `begin()` | 처음으로 `resume()`. 첫 `co_yield`까지 돈다 |
+| `*it` | 프라미스 객체가 가리키는 값을 준다 |
+| `++it` | `resume()`. 다음 `co_yield`까지 돈다 |
+| `it == end()` | `done()`인가 |
+
+`yield_value`는 값을 복사하지 않고 **주소만** 적습니다. `co_yield i * i`의 임시 객체는 그 식이 끝날 때까지, 곧 다시 깨어날 때까지 프레임 안에 살아 있습니다.
+
+끝이 없는 `squares`에서 `break`로 나오면 제너레이터가 사라지면서 `destroy()`를 부르고, 멈춘 자리에 살아 있던 `guard`의 소멸자가 불립니다. 코루틴 안에서도 [RAII](#/read/cpp-advanced/res-guard)는 그대로 통합니다.
+
+## 표준의 것이 더해 주는 것
+
+`std::generator`는 위의 것에 세 가지를 더합니다. 첫째는 범위의 자격입니다. `input_range`이자 뷰여서 [파이프](#/read/cpp-stl/rng-views)에 꽂힙니다. 둘째는 **참조 타입 고르기**입니다.
+
+| 선언 | 내주는 것 | 원소마다 |
+| --- | --- | --- |
+| `generator<T>` | 변수 (`co_yield name;`) | 복사 1번 |
+| `generator<T>` | 임시 객체 (`co_yield make();`) | 복사 없음 |
+| `generator<const T&>` | 변수 | 복사 없음 |
+
+`generator<std::string>`으로 지역 변수를 내주면 원소마다 문자열이 복사됩니다. 큰 것을 내줄 때는 `generator<const std::string&>`로 적습니다. 받는 쪽이 `for (auto s : …)`로 받으면 거기서 한 번 더 복사되므로 `const auto&`로 받습니다.
+
+셋째는 재귀입니다. 제너레이터가 다른 제너레이터의 값을 이어서 내줄 때 `std::ranges::elements_of`로 감쌉니다.
+
+```cpp
+#include <generator>
+#include <memory>
+#include <print>
+#include <ranges>
+
+struct Node {
+    int value;
+    std::unique_ptr<Node> left;
+    std::unique_ptr<Node> right;
+};
+
+std::generator<int> in_order(const Node* node)
+{
+    if (node == nullptr)
+        co_return;
+    co_yield std::ranges::elements_of(in_order(node->left.get()));
+    co_yield node->value;
+    co_yield std::ranges::elements_of(in_order(node->right.get()));
+}
+
+int main()
+{
+    auto leaf = [](int v) { return std::make_unique<Node>(v); };
+    Node root{4, std::make_unique<Node>(2, leaf(1), leaf(3)),
+              std::make_unique<Node>(6, leaf(5), leaf(7))};
+    for (int v : in_order(&root))
+        std::print(" {}", v);
+    std::println("");
+}
+```
+
+```text
+ 1 2 3 4 5 6 7
+```
+
+`for (int v : in_order(…)) co_yield v;`로 써도 결과는 같습니다. 다른 것은 값입니다. 그렇게 쓰면 맨 아래의 값이 한 층씩 위로 다시 내주어지므로 값 하나가 깊이만큼의 깨우기를 치릅니다. `elements_of`는 바깥이 맨 안쪽 코루틴을 **곧바로** 깨우게 합니다.
+
+| 한 줄로 늘어선 깊이 | `elements_of` | `for`로 다시 내주기 |
+| --- | --- | --- |
+| 100 | 11 µs | 42 µs |
+| 1,000 | 77 µs | 4,300 µs |
+| 4,000 | 270 µs | 73,000 µs |
+
+## 원소 하나의 값
+
+1억 개를 내주고 더하는 데 걸린 시간을 원소 하나로 나눈 것입니다. x86-64, `-O2`입니다.
+
+| | GCC 14 | Clang 20 |
+| --- | --- | --- |
+| 보통 `for` 루프 | 0.4 ns | 0.2 ns |
+| 직접 만든 `Generator`, 같은 파일에서 불러 씀 | 2.0 ns | 0.3 ns |
+| 직접 만든 `Generator`, 정의가 다른 파일에 있음 | 2.1 ns | 1.3 ns |
+| `std::generator` | 1.9 ns | libc++ 20에 없다 |
+
+GCC 14에서는 원소마다 **1.5 ns**쯤이 더 듭니다. 깨우기(`resume`)가 프레임에 적힌 함수 포인터를 거치는 호출이라 인라인되지 않습니다. Clang 20은 코루틴을 같은 파일에서 직접 불러 그 자리에서 다 쓸 때에는 루프 안으로 인라인했습니다. 정의가 다른 파일에 있거나 함수 포인터로 넘기면 Clang에서도 1.3 ns에서 2.0 ns가 됩니다.
+
+1.5 ns가 큰지 작은지는 원소마다 하는 일에 달렸습니다. 파일에서 한 줄을 읽거나 트리의 노드를 따라가는 일에서는 보이지 않고, 정수를 더하는 루프에서는 다섯 배입니다. 여기에 제너레이터를 만들 때마다 [프레임을 잡는 값](#/read/cpp-advanced/co-cost)이 한 번 듭니다.
+
+<Note kind="warn">
+제너레이터는 한 번만 지나갈 수 있고, 복사되지 않습니다. `begin()`을 두 번 부르면 안 됩니다. 인자를 참조로 받은 제너레이터는 [그 인자보다 오래 살면 안 됩니다](#/read/cpp-advanced/co-keywords). `auto g = lines(read_file());`처럼 임시 객체를 넘기고 나중에 도는 코드가 가장 흔한 사고입니다.
+</Note>
+
+## 정리
+
+- 제너레이터는 `yield_value`가 값의 주소를 적고 멈추는 코루틴이다. 반복자의 `++`가 `resume()`이다
+- 큰 값은 `generator<const T&>`로 내주고, 다른 제너레이터의 값은 `elements_of`로 잇는다
+- GCC 14에서 원소마다 1.5 ns쯤 더 든다. 원소마다 하는 일이 그보다 훨씬 클 때 쓴다

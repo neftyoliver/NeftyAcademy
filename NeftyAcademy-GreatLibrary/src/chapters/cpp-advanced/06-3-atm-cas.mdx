@@ -1,0 +1,134 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '예상한 값일 때만 바꾸기, 읽고-계산하고-바꾸는 고리, weak와 strong, 비트로 견준다는 것, 다툴 때의 값';
+
+[`std::atomic`의 연산 목록](#/read/cpp-advanced/atm-atomic)에 없는 일은 대개 "읽고, 계산하고, 쓴다"입니다. 그 사이에 다른 스레드가 끼어들 수 있습니다. 비교 후 교환(compare-and-swap, CAS)은 <strong>"내가 읽은 그 값이 아직 그대로일 때만 쓴다"</strong>를 연산 하나로 합니다. 잠금 없는 코드는 모두 이것 위에 서 있습니다.
+
+## 예상한 값일 때만 바꾼다
+
+```cpp nocheck
+bool ok = value.compare_exchange_strong(expected, desired);
+```
+
+| `value`가 | 하는 일 | 돌려주는 것 |
+| --- | --- | --- |
+| `expected`와 같다 | `value`에 `desired`를 쓴다 | `true` |
+| 다르다 | 쓰지 않는다. **`expected`에 지금 값을 넣어 준다** | `false` |
+
+실패했을 때 `expected`가 지금 값으로 바뀌는 것이 요점입니다. 다시 읽을 필요 없이 그 값으로 곧바로 다시 시도할 수 있습니다.
+
+```cpp
+#include <atomic>
+#include <print>
+#include <thread>
+#include <vector>
+
+// 0 보다 클 때만 하나 뺀다. 뺐으면 true
+bool take_one(std::atomic<int>& stock)
+{
+    int seen = stock.load();
+    while (seen > 0) {
+        // stock 이 아직 seen 이면 seen - 1 로 바꾼다.
+        // 그사이 다른 스레드가 바꿨으면 실패하고, seen 에 지금 값이 들어온다
+        if (stock.compare_exchange_weak(seen, seen - 1)) return true;
+    }
+    return false;
+}
+
+// 지금 값보다 클 때만 올린다
+void raise_to(std::atomic<int>& peak, int value)
+{
+    int seen = peak.load();
+    while (value > seen && !peak.compare_exchange_weak(seen, value)) {}
+}
+
+int main()
+{
+    std::atomic<int> stock = 100'000;
+    std::atomic<int> peak = 0;
+    std::atomic<bool> claimed = false;
+    std::atomic<int> winners = 0;
+    int taken[4] = {};
+    {
+        std::vector<std::jthread> workers;
+        for (int id = 0; id < 4; ++id) {
+            workers.emplace_back([&, id] {
+                for (int i = 0; i < 80'000; ++i) {
+                    if (take_one(stock)) ++taken[id];
+                    raise_to(peak, id * 1000 + i % 1000);
+                }
+                // 아직 아무도 차지하지 않았다면 내가 차지한다
+                bool expected = false;
+                if (claimed.compare_exchange_strong(expected, true)) ++winners;
+            });
+        }
+    }
+    int total = taken[0] + taken[1] + taken[2] + taken[3];
+    std::println("가져간 합 {}, 남은 것 {}", total, stock.load());
+    std::println("가장 큰 값 {}", peak.load());
+    std::println("차지한 스레드 {}", winners.load());
+
+    std::atomic<double> level = 0.0;
+    double expected = -0.0;                     // 0.0 == -0.0 이지만 비트는 다르다
+    bool swapped = level.compare_exchange_strong(expected, 1.0);
+    std::println("-0.0 을 예상하고 바꾸기: {}", swapped);
+}
+```
+
+```text
+가져간 합 100000, 남은 것 0
+가장 큰 값 3999
+차지한 스레드 1
+-0.0 을 예상하고 바꾸기: false
+```
+
+네 스레드가 8만 개씩 가져가려 했지만 정확히 10만 개만 나갔고, 재고는 0 밑으로 내려가지 않았습니다. `take_one`의 꼴이 **CAS 고리**입니다.
+
+1. 지금 값을 읽는다
+2. 그 값으로 새 값을 계산한다. 할 일이 없으면(재고가 0) 그만둔다
+3. "아직 그 값이면 새 값으로"를 시도한다. 실패하면 받은 값으로 2부터 다시 한다
+
+2번의 계산은 **여러 번 돌 수 있다**는 것을 기억합니다. 그 안에서 로그를 찍거나 메모리를 할당하면 실패할 때마다 되풀이됩니다. 고리 안에는 값을 계산하는 일만 둡니다.
+
+`claimed`는 고리 없이 한 번만 시도하는 꼴입니다. "먼저 온 하나만 한다"를 잠금 없이 정합니다. 넷이 동시에 시도해도 `true`를 받는 것은 하나입니다.
+
+## weak와 strong
+
+| | `compare_exchange_weak` | `compare_exchange_strong` |
+| --- | --- | --- |
+| 값이 같은데도 실패할 수 있나 | 있다 (가짜 실패) | 없다 |
+| 쓰는 자리 | 어차피 고리 안에서 다시 시도할 때 | 한 번만 시도할 때 |
+
+x86-64에서는 둘이 같은 명령(`lock cmpxchg`)입니다. 차이는 [명령 하나로 CAS를 하지 못하는 CPU](#/read/cpp-advanced/atm-atomic)에서 납니다. 라즈베리 파이 4의 코어는 "읽어 두고(`ldaxr`), 그사이 아무도 안 건드렸으면 쓴다(`stlxr`)"로 CAS를 만드는데, 값이 같아도 사이에 인터럽트가 끼면 쓰기가 실패합니다. GCC 14가 그 CPU용으로 만든 코드를 보면 `weak`는 그대로 `false`를 돌려주고, `strong`은 그 경우를 스스로 다시 시도하는 고리를 한 겹 더 가집니다. 고리 안에서 `strong`을 쓰면 고리가 두 겹이 되므로 `weak`를 씁니다.
+
+## 비트로 견준다
+
+CAS의 "같다"는 `==`가 아니라 **메모리의 비트가 같다**입니다. 예제의 마지막 줄이 그것입니다. `0.0 == -0.0`은 참이지만 부호 비트가 달라 교환은 실패합니다. 반대로 `NaN`은 `==`로는 자기 자신과도 다르지만 비트가 같으면 교환됩니다.
+
+| 타입 | 조심할 것 |
+| --- | --- |
+| 정수, 포인터, `bool`, `enum` | 없다 |
+| 실수 | `-0.0`과 `0.0`, `NaN` |
+| 구조체 | `operator==`를 정의했어도 쓰이지 않는다. 멤버 사이의 빈칸은 C++20부터 견주지 않게 되어 있다 |
+
+## 다툴 때의 값
+
+| 1씩 올리기 | 스레드 1개 | 2개 | 4개 (코어 2개) |
+| --- | --- | --- | --- |
+| `fetch_add(1)` | 6 ns | 7~10 ns | 14 ns |
+| CAS 고리 | 11 ns | 14~27 ns | 17~25 ns |
+| CAS가 실패한 비율 | 0% | 15~32% | 12~69% |
+
+x86-64 서버 VM, GCC 14 `-O2`에서 잰 한 번의 값입니다. `fetch_add`는 x86-64에서 명령 하나라 **실패가 없습니다.** 다투는 스레드가 있어도 기다렸다가 한 번에 끝납니다. CAS 고리는 다툴수록 헛도는 시도가 늘고, 그 비율은 돌릴 때마다 크게 흔들립니다. 그러니 `fetch_add`, `exchange`, `fetch_or`로 되는 일은 그것으로 하고, CAS 고리는 그것들로 안 되는 일에만 씁니다.
+
+<Note>
+"지금보다 클 때만 올린다"는 흔한 일이어서 C++26에 `fetch_max`와 `fetch_min`이 들어갔습니다. GCC 16과 2026년의 libc++부터 쓸 수 있고, 이 책이 쓰는 GCC 14와 Clang 20에는 없어 돌려 보지는 못했습니다. 그 전까지는 위의 `raise_to`를 씁니다.
+</Note>
+
+CAS에는 하나 더 큰 함정이 있습니다. "값이 그대로다"가 "아무 일도 없었다"를 뜻하지는 않습니다. 값이 A에서 B로 갔다가 다시 A로 돌아와도 CAS는 성공합니다. 정수를 세는 데는 문제가 되지 않지만 포인터에서는 버그가 되고, 그것이 [ABA 문제](#/read/cpp-advanced/atm-aba)입니다.
+
+## 정리
+
+- 비교 후 교환은 예상한 값일 때만 쓰고, 실패하면 지금 값을 알려 준다. 읽고-계산하고-시도하는 고리로 쓴다
+- 고리 안에서는 `weak`, 한 번만 시도할 때는 `strong`을 쓴다. 견주는 것은 비트다
+- `fetch_add` 같은 연산은 실패하지 않는다. 그것으로 되는 일에 CAS 고리를 쓰지 않는다

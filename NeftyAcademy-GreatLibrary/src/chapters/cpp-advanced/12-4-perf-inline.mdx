@@ -1,0 +1,175 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '인라인이 주는 것은 호출 값보다 그 뒤의 최적화다. 파일을 넘는 LTO와 실행 기록을 쓰는 PGO를 잰다';
+
+[pimpl](#/read/cpp-advanced/te-pimpl)에서 `add()`가 다른 파일로 가자 0.25 ns가 1.6 ns가 됐고, `-flto`를 켜자 0.29 ns로 돌아왔습니다. 그때 지나친 세 가지를 봅니다. 함수의 본문을 부르는 자리에 펼쳐 넣는 **인라인**, 그것을 파일의 경계 너머로 넓히는 **LTO**, 실행해서 얻은 기록으로 판단하게 하는 **PGO**입니다.
+
+## 인라인이 주는 것
+
+```cpp nosan flags=-O2
+#include <chrono>
+#include <print>
+#include <random>
+#include <vector>
+
+template <typename T>
+[[gnu::always_inline]] inline void hide(T& v) { asm volatile("" : "+r"(v)); }
+
+inline int brighten(int value, int amount)
+{
+    const int sum = value + amount;
+    return sum > 255 ? 255 : sum;
+}
+
+// 본문은 같고 인라인만 막았다. 다른 파일에 있는 함수와 같은 처지다
+[[gnu::noinline]] int brighten_far(int value, int amount)
+{
+    const int sum = value + amount;
+    return sum > 255 ? 255 : sum;
+}
+
+template <typename F>
+double ns_each(const std::vector<int>& image, std::vector<int>& out, F one)
+{
+    const int rounds = 20'000;
+    const auto start = std::chrono::steady_clock::now();
+    for (int r = 0; r < rounds; ++r) {
+        int amount = 40;
+        hide(amount);
+        for (std::size_t i = 0; i < image.size(); ++i)
+            out[i] = one(image[i], amount);
+        int* written = out.data();
+        hide(written);                // 결과가 쓰인 것으로 친다
+    }
+    const auto end = std::chrono::steady_clock::now();
+    return std::chrono::duration<double, std::nano>(end - start).count()
+           / (static_cast<double>(image.size()) * rounds);
+}
+
+int main()
+{
+    std::mt19937 rng(3);
+    std::vector<int> image(10'000), out(10'000);
+    for (int& v : image) v = static_cast<int>(rng() % 256);
+
+    const double near =
+        ns_each(image, out, [](int v, int a) { return brighten(v, a); });
+    const double far =
+        ns_each(image, out, [](int v, int a) { return brighten_far(v, a); });
+    std::println("인라인됨 {:.2f} ns, 호출 {:.2f} ns", near, far);
+}
+```
+
+```text nocheck
+인라인됨 0.11 ns, 호출 0.56 ns
+```
+
+x86-64, GCC 14 `-O2`입니다. `brighten`을 실제로 다른 파일(`pixel.cpp`)에 두고 재면 이렇습니다.
+
+| `brighten`이 있는 곳 | 원소 하나에 |
+| --- | --- |
+| 다른 파일 | 0.59 ns |
+| 헤더. 벡터화를 껐다(`-fno-tree-vectorize`) | 0.35 ns |
+| 헤더 | 0.11 ns |
+| 다른 파일, `-flto` | 0.11 ns |
+
+호출을 없애서 얻은 것은 0.59에서 0.35까지입니다. 나머지는 본문이 루프 안에 펼쳐진 뒤에야 할 수 있게 된 일, 여기서는 원소 넷을 한꺼번에 처리하는 [SIMD](#/read/cpp-advanced/perf-simd)가 벌었습니다. **인라인의 값은 호출이 아니라 그 뒤에 열리는 최적화**입니다. 상수 인자가 본문으로 퍼지고, 쓰지 않는 갈래가 지워지고, 루프 밖으로 뺄 계산이 보입니다.
+
+## 누가 정하는가
+
+펼칠지는 컴파일러가 함수의 크기와 불리는 횟수를 보고 정합니다. 열 줄 남짓한 계산을 하는 함수 `mix`를 두 군데서 부르는 프로그램에서, 무엇을 붙이면 달라지는지 봤습니다. GCC 14입니다.
+
+| `mix`에 붙인 것 | `-Os` | `-O2` | `-O3` |
+| --- | --- | --- | --- |
+| 없음 | 호출 | 호출 | 인라인 |
+| `inline` | 호출 | 인라인 | 인라인 |
+| `[[gnu::always_inline]] inline` | 인라인 | 인라인 | 인라인 |
+| `[[gnu::noinline]]` | 호출 | 호출 | 호출 |
+
+`inline`은 [정의를 여러 파일에 두어도 된다는 키워드](#/read/cpp-syntax/fn-inline)이지 명령이 아닙니다. 그래도 GCC는 이것을 힌트로 받아 크기 한도를 올려 줍니다. Clang 20은 `-O2`에서 붙이든 말든 펼쳤습니다. 아래 두 속성은 표준이 아니며 GCC와 Clang이 받습니다. `always_inline`은 `-O0`에서도 펼칩니다.
+
+까닭은 컴파일러에게 물을 수 있습니다. Clang에서는 `-Rpass-missed=inline`입니다.
+
+```text nocheck
+$ g++ -O2 -fopt-info-inline-missed -c kw.cpp
+kw.cpp:32:39: missed:   not inlinable: int main()/2660 -> int mix(int, int)/2522,
+    --param max-inline-insns-auto limit reached
+$ g++ -O2 -fopt-info-inline-missed -c main.cpp      # brighten이 다른 파일에 있다
+main.cpp:23:62: missed:   not inlinable: int main()/4067 ->
+    int brighten(int, int)/7480, function body not available
+```
+
+본문이 보이지 않는 함수, 그리고 함수 포인터나 가상 함수처럼 어느 함수가 불릴지 모르는 호출은 펼치지 못합니다.
+
+<Note>
+"인라인하면 코드가 커진다"는 반만 맞습니다. 파일 21개짜리 프로젝트의 코드 크기가 `-O2`에서 173 KB인데, 인라인을 끄자(`-fno-inline`) 215 KB로 **늘었습니다**. 작은 함수는 부를 준비를 하는 코드가 본문보다 큽니다. 큰 함수까지 펼치는 `-O3`에서는 244 KB였습니다.
+</Note>
+
+## LTO
+
+보통의 빌드에서 컴파일러는 파일 하나만 봅니다. `-flto`를 주면 목적 파일에 기계어 대신 컴파일러의 중간 표현을 담아 두었다가, **링크할 때 프로그램 전체를 놓고** 최적화합니다. 컴파일과 링크 양쪽에 같은 옵션을 줍니다.
+
+```text nocheck
+$ g++ -O2 -flto -c pixel.cpp main.cpp
+$ g++ -O2 -flto pixel.o main.o -o app
+```
+
+위 프로젝트(파일 21개)로 잰 값입니다. GCC 14 `-O2`입니다.
+
+| | 그냥 | `-flto` |
+| --- | --- | --- |
+| 전부 빌드 | 15.5~16.8 s | 12.3~13.3 s |
+| 파일 하나를 고친 뒤 | 0.6 s | 2.3 s |
+| 그 가운데 링크 | 0.05 s | 1.9 s |
+| 코드 크기 | 173 KB | 121 KB |
+
+전부 빌드하는 시간은 오히려 줄었습니다. 파일마다 따로 하던 코드 생성이 링크할 때 한 번으로 모이기 때문으로 보입니다. 값은 **고칠 때마다** 치릅니다. 파일 하나만 바꿔도 링크가 프로그램 전체를 다시 최적화합니다. 프로젝트가 커지면 이 시간도 자랍니다. `-flto=auto`는 이 일을 여러 코어에 나누고(코어 둘에서 1.9 s가 1.3~1.6 s), Clang에는 나눠서 하도록 만든 `-flto=thin`이 있습니다.
+
+LTO는 [파일마다 어긋난 정의](#/read/cpp-syntax/mod-headers)를 찾아 주기도 합니다(`-Wodr`). 넘지 못하는 경계도 있습니다. 따로 배포하는 공유 라이브러리 안쪽은 링크할 때 보이지 않습니다.
+
+## PGO
+
+컴파일러는 어느 갈래가 흔한지, 가상 호출이 주로 어느 함수로 가는지 모릅니다. PGO(profile-guided optimization)는 그것을 **실행해서 적어 온 기록**으로 알려 줍니다. 빌드를 두 번 합니다.
+
+```text nocheck
+$ g++ -O2 -fprofile-generate -c shapes.cpp -o shapes.o
+$ g++ -fprofile-generate shapes.o -o shapes
+$ ./shapes circle                 # 평소의 입력으로 돌린다. shapes.gcda가 생긴다
+$ g++ -O2 -fprofile-use -c shapes.cpp -o shapes.o
+$ g++ shapes.o -o shapes
+```
+
+도형 세 가지(`Circle`, `Square`, `Triangle`)의 [가상 함수](#/read/cpp-advanced/te-compare) `area()`를 `unique_ptr<Shape>` 10,000개에 대해 부릅니다. 인자는 어느 타입이 열에 아홉을 차지할지입니다.
+
+| 기록할 때의 입력 | 원이 90% | 사각형이 90% | 셋이 고르게 |
+| --- | --- | --- | --- |
+| 기록 없음 | 2.2 ns | 2.1 ns | 6.4 ns |
+| 원이 90% | 0.75 ns | 2.0 ns | 4.0 ns |
+| 사각형이 90% | 2.0 ns | 0.73 ns | 3.6 ns |
+| 셋이 고르게 | 2.1 ns | 2.1 ns | 6.3 ns |
+
+맞는 입력으로 기록하면 세 배 빨라집니다. 기록에 "거의 `Circle::area`로 간다"고 적혀 있으므로, 컴파일러는 부를 주소가 그것인지 먼저 비교하고, 맞으면 **인라인해 둔 본문**을 실행합니다. 가상 호출은 나머지 열에 하나에만 남습니다. 기록한 입력과 실제 입력이 다르면 이득이 사라집니다. 이 예제에서 손해까지 가지는 않았습니다. 맨 아랫줄처럼 기록에 치우침이 없으면 컴파일러도 할 일이 없습니다.
+
+같은 방법을 다른 코드에도 써 봤습니다.
+
+- 글자를 여섯 갈래로 나누는 `if` 사슬은 2.5 ns가 2.3 ns가 됐습니다. [맞히기 어려운 분기](#/read/cpp-advanced/perf-branch)는 순서를 바꿔도 그대로입니다.
+- 앞 페이지에서 거꾸로 붙인 `[[likely]]`의 1.9 ns는 0.34 ns로 돌아왔습니다. GCC는 표시보다 기록을 따랐습니다.
+- Clang 20에서도 가상 호출이 3.8 ns에서 0.76 ns가 됐습니다. 기록 파일을 `llvm-profdata merge`로 합쳐 `-fprofile-use=`에 넘기는 점이 다릅니다.
+
+<Note kind="warn">
+GCC의 기록 파일은 목적 파일의 이름을 따릅니다(`shapes.o`에 `shapes.gcda`). 두 번째 빌드에서 출력 이름을 바꿨더니 `profile count data file not found [-Wmissing-profile]` 경고 하나만 내고 **기록 없이** 컴파일했습니다. 소스를 고친 뒤 옛 기록을 쓰면 `coverage-mismatch` 오류로 막아 주지만, 기록이 아예 없는 것은 경고뿐이라 지나치기 쉽습니다.
+</Note>
+
+## 셋을 견주면
+
+| | 켜는 법 | 얻는 것 | 치르는 값 |
+| --- | --- | --- | --- |
+| 인라인 | 본문을 헤더에 둔다 | 호출과 그 뒤의 최적화 | 헤더를 고치면 [쓰는 파일을 모두 다시 컴파일](#/read/cpp-advanced/te-pimpl) |
+| LTO | `-flto` | 파일을 넘는 인라인, 작아진 코드 | 고칠 때마다 긴 링크 |
+| PGO | 빌드 두 번과 평소의 입력 | 흔한 길에 맞춘 배치와 인라인 | 빌드 절차. 입력이 달라지면 다시 기록한다 |
+
+## 정리
+
+- 인라인은 호출을 없애는 것보다 그 뒤의 최적화를 여는 일이다. 0.59 ns가 0.11 ns가 된 것의 대부분은 SIMD였다
+- LTO는 파일의 경계를 넘어 펼친다. 전부 빌드는 느려지지 않았고, 고칠 때마다 링크가 0.05 s에서 1.9 s가 됐다
+- PGO는 실행 기록으로 갈래와 가상 호출을 정리한다. 맞는 입력이면 세 배, 다른 입력이면 얻는 것이 없다

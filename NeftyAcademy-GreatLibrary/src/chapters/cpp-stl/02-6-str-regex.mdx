@@ -1,0 +1,189 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'regex_match와 regex_search, 묶음 꺼내기, 모두 찾기와 바꾸기, 느린 까닭과 대신 쓸 것';
+
+로그 한 줄에서 날짜와 등급과 값을 꺼내는 일처럼, 글의 **모양**을 적어 두고 맞춰 보는 도구가 정규식입니다. `<regex>` 헤더에 있습니다. 편하지만 표준 라이브러리에서 값이 가장 비싼 축에 드는 도구이기도 합니다.
+
+## 맞춰 보고 꺼내기
+
+```cpp
+#include <print>
+#include <regex>
+#include <string>
+
+int main()
+{
+    // 날짜 시각 [등급] 이름=값
+    const std::regex pattern(
+        R"((\d{4})-(\d{2})-(\d{2}) (\d{2}:\d{2}:\d{2}) \[(\w+)\] (\w+)=([\d.]+))");
+
+    const std::string line = "2026-11-20 18:31:02 [WARN] temp=71.5";
+    std::smatch m;
+    if (std::regex_match(line, m, pattern)) {
+        std::println("조각 {}개", m.size());
+        std::println("전체: {}", m[0].str());
+        std::println("{}년 {}월, 등급 {}", m[1].str(), m[2].str(), m[5].str());
+        std::println("{} = {}", m[6].str(), m[7].str());
+    }
+}
+```
+
+```text
+조각 8개
+전체: 2026-11-20 18:31:02 [WARN] temp=71.5
+2026년 11월, 등급 WARN
+temp = 71.5
+```
+
+- 패턴은 `R"(...)"` 꼴의 날 문자열로 적습니다. 그 안에서는 `\`가 그냥 `\`여서 `\\d`라고 두 번 적지 않아도 됩니다.
+- 괄호로 묶은 부분이 차례로 `m[1]`, `m[2]`가 됩니다. `m[0]`은 맞은 부분 전체입니다.
+- `m[i]`는 원래 문자열의 한 구간을 가리킵니다. `line`이 사라지면 함께 죽으므로, 임시 `std::string`을 `regex_match`에 넘기지 않습니다(그런 호출은 컴파일되지 않게 막혀 있습니다).
+
+문법은 기본이 자바스크립트의 것(ECMAScript)입니다.
+
+| 적는 것 | 맞는 것 |
+| --- | --- |
+| `\d` `\w` `\s` | 숫자, 글자·숫자·밑줄, 공백 |
+| `.` | 아무 글자 하나 |
+| `[abc]` `[^abc]` `[a-z]` | 이 가운데 하나, 이것들이 아닌 하나, 범위 |
+| `x*` `x+` `x?` `x{2,4}` | 0번 이상, 1번 이상, 0이나 1번, 2번에서 4번 |
+| `a\|b` | a 또는 b |
+| `^` `$` | 처음, 끝 |
+| `(…)` `(?:…)` | 묶고 꺼낸다, 묶기만 한다 |
+
+## match와 search
+
+```cpp
+#include <print>
+#include <regex>
+#include <string>
+
+int main()
+{
+    const std::regex pair(R"((\w+)=([\d.]+))");
+    const std::string exact = "temp=71.5";
+    const std::string inside = "x temp=71.5 y";
+
+    std::println("match:  {} {}", std::regex_match(exact, pair),
+                 std::regex_match(inside, pair));
+    std::println("search: {} {}", std::regex_search(exact, pair),
+                 std::regex_search(inside, pair));
+}
+```
+
+```text
+match:  true false
+search: true true
+```
+
+`std::regex_match`는 **글 전체**가 패턴과 맞아야 참이고, `std::regex_search`는 **어딘가에** 맞는 곳이 있으면 참입니다. 입력을 검증할 때는 `match`, 긴 글에서 찾아낼 때는 `search`입니다.
+
+## 모두 찾기와 바꾸기
+
+```cpp
+#include <print>
+#include <regex>
+#include <string>
+
+int main()
+{
+    const std::string text = "temp=71.5 humid=40 press=1013.2";
+    const std::regex pair(R"((\w+)=([\d.]+))");
+
+    const std::sregex_iterator first(text.begin(), text.end(), pair);
+    for (auto it = first; it != std::sregex_iterator(); ++it) {
+        const std::smatch& m = *it;
+        std::println("{:5} -> {:6} 위치 {}", m[1].str(), m[2].str(), m.position());
+    }
+
+    // 바꿀 글 안의 $1, $2 는 묶음
+    std::println("{}", std::regex_replace(text, pair, "$1: $2,"));
+
+    const std::regex spaces(R"(\s+)");
+    std::println("{}", std::regex_replace(std::string("a   b \t c"), spaces, " "));
+}
+```
+
+```text
+temp  -> 71.5   위치 0
+humid -> 40     위치 10
+press -> 1013.2 위치 19
+temp: 71.5, humid: 40, press: 1013.2,
+a b c
+```
+
+`std::sregex_iterator`는 맞는 곳을 차례로 내주는 반복자입니다. 인자 없이 만든 것이 "끝"입니다.
+
+패턴이 틀리면 `std::regex`의 생성자가 `std::regex_error`를 던집니다. 패턴은 컴파일 시간이 아니라 **실행 중에** 해석되기 때문입니다. `std::regex bad("(unclosed");`는 컴파일되고, 실행하면 GCC 14에서 `Mismatched '(' and ')' in regular expression`이라는 말과 함께 예외가 납니다.
+
+## 값이 비싸다
+
+같은 로그 줄에서 값을 찾는 일을 2만 번 되풀이해 재 봅니다.
+
+```cpp nosan
+#include <chrono>
+#include <print>
+#include <regex>
+#include <string>
+#include <string_view>
+
+int main()
+{
+    using clock = std::chrono::steady_clock;
+    const auto ms = [](clock::duration d) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(d).count();
+    };
+    const std::string line = "2026-11-20 18:31:02 [WARN] temp=71.5";
+    const char* const source = R"(\[(\w+)\] (\w+)=([\d.]+))";
+    const int rounds = 20'000;
+    int hits = 0;
+
+    const auto t0 = clock::now();
+    for (int i = 0; i < rounds; ++i) {
+        const std::regex pattern(source);       // 돌 때마다 만든다
+        hits += std::regex_search(line, pattern);
+    }
+    const auto t1 = clock::now();
+    const std::regex pattern(source);           // 한 번만 만든다
+    for (int i = 0; i < rounds; ++i)
+        hits += std::regex_search(line, pattern);
+    const auto t2 = clock::now();
+    for (int i = 0; i < rounds; ++i) {
+        const std::string_view v = line;
+        const bool found = v.find('[') != v.npos && v.find('=') != v.npos;
+        hits += found;
+    }
+    const auto t3 = clock::now();
+
+    std::println("매번 만들기 {}ms / 한 번 만들기 {}ms / find {}ms (맞은 횟수 {})",
+                 ms(t1 - t0), ms(t2 - t1), ms(t3 - t2), hits);
+}
+```
+
+```text nocheck
+매번 만들기 675ms / 한 번 만들기 9ms / find 0ms (맞은 횟수 60000)
+```
+
+x86-64 서버에서 `-O2`로 잰 값입니다. 읽을 것이 둘 있습니다.
+
+- **패턴을 만드는 일이 찾는 일보다 수십 배 비쌉니다.** `std::regex` 객체는 루프 밖에서, 되도록 `static const`로 한 번만 만듭니다.
+- 한 번만 만들어도 `find`로 직접 찾는 것보다 훨씬 느립니다. 모양이 단순하면 [`string_view`의 찾기 멤버](#/read/cpp-stl/str-view)와 [`from_chars`](#/read/cpp-stl/str-convert)로 충분합니다.
+
+크기도 듭니다. `std::println` 한 줄짜리 프로그램이 같은 조건에서 114KB였고, 맨 위의 예제는 259KB였습니다(동적 링크, `-O2`). `<regex>`는 템플릿이라 쓰는 만큼 내 실행 파일에 코드가 들어옵니다.
+
+<Note kind="warn">
+`std::regex`는 바이트 단위로 일합니다. `.`은 한글 한 글자가 아니라 바이트 하나에 맞고, `\w`는 한글에 맞지 않습니다. 또 libstdc++의 구현은 긴 입력에서 재귀가 깊어져 스택이 넘칠 수 있습니다. 믿을 수 없는 긴 입력을 `std::regex`에 그대로 넣지 않습니다.
+</Note>
+
+| 상황 | 쓰는 것 |
+| --- | --- |
+| 구분자로 나뉜 단순한 줄 | `find`, `split`, `from_chars` |
+| 설정 도구나 스크립트 성격의 코드, 속도가 상관없다 | `std::regex` |
+| 속도가 필요하고 패턴이 컴파일할 때 정해져 있다 | CTRE (헤더만 있는 라이브러리) |
+| 속도가 필요하고 패턴을 실행 중에 받는다 | RE2, PCRE2 |
+
+## 정리
+
+- 전체가 맞는지는 `regex_match`, 어딘가에 있는지는 `regex_search`, 모두 찾기는 `sregex_iterator`
+- 패턴은 실행 중에 해석된다. `std::regex` 객체는 한 번만 만들어 다시 쓴다
+- 느리고 크고 바이트 단위다. 단순한 모양은 `find`와 `from_chars`로 푼다

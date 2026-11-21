@@ -26,7 +26,7 @@ const TIP_FONT = 13; // 노드 위에 뜨는 이름표. 배율의 제곱근만�
 const CHAPTER_TITLED_R = 30;
 const SUB_TITLED_R = 22;
 const ZOOM_MAX = 8;
-const MANY_LINKS = 40; // 상호 참조 줄이 이보다 많으면 흐리게 깔고, 노드에 올렸을 때만 또렷하게 그린다
+const MANY_LINKS = 40; // 상호 참조 줄이 이보다 많으면 평소에는 그리지 않고, 챕터에 올렸을 때 그 챕터의 줄만 그린다
 // 줄이 노드의 가운데에 이보다 가까이 오지 못하는 거리. 확대해서 노드가 커져도 줄이 노드에 닿지 않는 값이다
 const CLEAR = { book: BOOK_R + 2, hub: HUB_R + 2, chapter: 23, sub: 11.5 };
 
@@ -62,7 +62,10 @@ interface CrossLink {
   key: string;
   from: string;
   to: string;
-  line: Line;
+  a: { node: number; at: Point; book: number };
+  b: { node: number; at: Point; book: number };
+  /** 길을 찾은 뒤에 채워진다. 참조가 많은 지도에서는 그 챕터에 올렸을 때에야 찾는다 */
+  line?: Line;
 }
 
 const polar = (c: Point, r: number, deg: number): Point => {
@@ -146,7 +149,7 @@ export function WebView({ books }: { books: Book[] }) {
   const svg = useRef<SVGSVGElement>(null);
   const drag = useRef<{ x: number; y: number; moved: boolean } | null>(null);
 
-  const { placed, box, hub, links } = useMemo(() => {
+  const { placed, box, hub, links, dense, routeLink } = useMemo(() => {
     const n = books.length;
     const sizes = books.map(measure);
     let rotate: number;
@@ -224,11 +227,16 @@ export function WebView({ books }: { books: Book[] }) {
         const b = where.get(to);
         if (!a || !b || from === to) continue; // 지금 보이지 않는 책이거나 없는 챕터
         const key = [from, to].sort().join(' ');
-        if (!links.has(key)) links.set(key, { key, from, to, line: between(a, b, [a.book, b.book]) });
+        if (!links.has(key)) links.set(key, { key, from, to, a, b });
       }
       ch.children?.forEach((sub) => collect(bookId, sub));
     };
     for (const p of placed) p.book.chapters.forEach((ch) => collect(p.book.id, ch));
+    // 참조가 많으면(MANY_LINKS) 줄을 미리 긋지 않는다. 수백 개의 길을 한꺼번에 찾으면 지도가 늦게 뜨고, 그려 봐야 그물이 된다.
+    // 그런 지도에서는 챕터에 올렸을 때 그 챕터의 줄만 그때 찾아 그린다
+    const routeLink = (l: CrossLink): Line => (l.line ??= between(l.a, l.b, [l.a.book, l.b.book]));
+    const dense = links.size > MANY_LINKS;
+    if (!dense) for (const l of links.values()) routeLink(l);
 
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const v of outline) {
@@ -238,7 +246,7 @@ export function WebView({ books }: { books: Book[] }) {
       maxY = Math.max(maxY, v.y);
     }
     const pad = 16;
-    return { placed, links: [...links.values()], hub, box: { x: minX - pad, y: minY - pad, w: maxX - minX + pad * 2, h: maxY - minY + pad * 2 } };
+    return { placed, links: [...links.values()], dense, routeLink, hub, box: { x: minX - pad, y: minY - pad, w: maxX - minX + pad * 2, h: maxY - minY + pad * 2 } };
   }, [books]);
 
   // 화면의 가운데(지도 좌표). 확대는 이 점을 중심으로 좌표만 늘리고, viewBox 는 그대로 둔다.
@@ -396,10 +404,10 @@ export function WebView({ books }: { books: Book[] }) {
           )}
         </g>
 
-        {/* 참조가 많은 책에서는 점선이 그물처럼 덮이므로 흐리게 깔아 두고, 노드에 올렸을 때만 또렷하게 보인다 */}
-        <g className={links.length > MANY_LINKS ? 'bf-web-links is-many' : 'bf-web-links'}>
-          {links.map((l) => (
-            <path key={l.key} d={path(l.line)} className={hover && (hover.key === l.from || hover.key === l.to) ? 'is-on' : undefined} />
+        {/* 참조가 많은 지도에서는 올린 챕터의 줄만 그린다 */}
+        <g className="bf-web-links">
+          {(dense ? (hover ? links.filter((l) => l.from === hover.key || l.to === hover.key) : []) : links).map((l) => (
+            <path key={l.key} d={path(routeLink(l))} className={hover && (hover.key === l.from || hover.key === l.to) ? 'is-on' : undefined} />
           ))}
         </g>
 

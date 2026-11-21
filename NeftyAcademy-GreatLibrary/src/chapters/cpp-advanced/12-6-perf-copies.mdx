@@ -1,0 +1,205 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '복사가 숨는 다섯 자리와 하나의 값, 도구가 찾아 주는 것과 못 찾는 것, 줄이는 법과 복사가 나은 때';
+
+복사를 피하는 문법은 [이동 의미론](#/read/cpp-advanced/mv-rvo)과 [넘기고 돌려주는 법](#/read/cpp-advanced/sp-passing)에서 다 봤습니다. 여기서는 성능 쪽에서 봅니다. 복사가 어디에 숨는지, 하나에 얼마인지, 어떻게 찾는지입니다.
+
+## 숨는 자리 다섯
+
+이름이 25자인 센서 값 1,000개를 다루는 코드를 고치기 전과 뒤로 나란히 돌려, 그동안의 할당을 셉니다.
+
+```cpp
+#include <cstdlib>
+#include <format>
+#include <map>
+#include <new>
+#include <print>
+#include <string>
+#include <string_view>
+#include <vector>
+
+static long allocations = 0;   // 프로그램의 모든 new를 센다
+
+void* operator new(std::size_t size)
+{
+    ++allocations;
+    if (void* p = std::malloc(size)) return p;
+    throw std::bad_alloc();
+}
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+
+struct Reading {
+    std::string name;
+    double value = 0;
+};
+
+class Sensor {
+public:
+    explicit Sensor(std::string name) : name_(std::move(name)) {}
+    std::string name_copy() const { return name_; }     // 부를 때마다 복사한다
+    const std::string& name() const { return name_; }   // 빌려준다
+private:
+    std::string name_;
+};
+
+bool by_string(const std::string& name, const std::string& prefix)
+{
+    return name.starts_with(prefix);
+}
+bool by_view(std::string_view name, std::string_view prefix)
+{
+    return name.starts_with(prefix);
+}
+
+template <typename Before, typename After>
+void compare(const char* what, Before before, After after)
+{
+    long start = allocations;
+    before();
+    const long first = allocations - start;
+    start = allocations;
+    after();
+    std::println("{:<30}{:>6}{:>6}", what, first, allocations - start);
+}
+
+int main()
+{
+    std::vector<Reading> readings;
+    std::map<std::string, double> latest;
+    for (int i = 0; i < 1000; ++i) {
+        readings.push_back({std::format("sensor-outdoor-north-{:04}", i), i * 0.5});
+        latest[readings.back().name] = readings.back().value;
+    }
+    const Sensor sensor("sensor-outdoor-north-0007");
+    double total = 0;
+    std::size_t hits = 0;
+
+    std::println("{:<30}{:>6}{:>6}", "할당 횟수", "전", "후");
+    compare("for (Reading r : readings)",
+            [&] { for (Reading r : readings) total += r.value; },
+            [&] { for (const Reading& r : readings) total += r.value; });
+
+#pragma GCC diagnostic push   // 아래 실수는 -Wall이 잡는다. 세어 보려고 잠깐 끈다
+#pragma GCC diagnostic ignored "-Wrange-loop-construct"
+    compare("const pair<string, double>&",
+            [&] {
+                for (const std::pair<std::string, double>& kv : latest)
+                    total += kv.second;
+            },
+            [&] { for (const auto& [name, value] : latest) total += value; });
+#pragma GCC diagnostic pop
+
+    compare("const string&에 리터럴",
+            [&] {
+                for (const Reading& r : readings)
+                    hits += by_string(r.name, "sensor-outdoor-north-00");
+            },
+            [&] {
+                for (const Reading& r : readings)
+                    hits += by_view(r.name, "sensor-outdoor-north-00");
+            });
+    compare("값으로 돌려주는 getter",
+            [&] {
+                for (int i = 0; i < 1000; ++i) hits += sensor.name_copy().size();
+            },
+            [&] {
+                for (int i = 0; i < 1000; ++i) hits += sensor.name().size();
+            });
+    compare("push_back(r.name)",
+            [&] {
+                std::vector<std::string> names;
+                for (Reading& r : readings) names.push_back(r.name);
+            },
+            [&] {
+                std::vector<std::string> names;
+                names.reserve(readings.size());
+                for (Reading& r : readings) names.push_back(std::move(r.name));
+            });
+    std::println("{} {}", total, hits);
+}
+```
+
+```text
+할당 횟수                         전    후
+for (Reading r : readings)      1000     0
+const pair<string, double>&     1000     0
+const string&에 리터럴          1000     0
+값으로 돌려주는 getter          1000     0
+push_back(r.name)               1011     1
+999000 50200
+```
+
+다섯 군데 모두 원소마다 한 번씩 할당했습니다. `-O2`를 줘도 횟수는 그대로입니다. 시간으로는 이렇습니다(x86-64, GCC 14 `-O2`).
+
+| 숨은 자리 | 까닭 | 원소 하나에 |
+| --- | --- | --- |
+| `for (Reading r : …)` | `r`이 원소의 복사본이다 | 13 → 1.3 ns |
+| `const pair<string, double>&` | `map`의 원소는 `pair<const string, double>`이다. 타입이 달라 임시 객체를 만들어 묶는다 | 16 → 4.0 ns |
+| `const string&`에 리터럴 | 부를 때마다 임시 `string`을 만든다 | 16 → 1.9 ns |
+| 값으로 돌려주는 getter | 부를 때마다 멤버를 복사한다 | 12 → 0.5 ns |
+| `push_back(r.name)` | 더 쓰지 않을 것을 복사하고, 자랄 때마다 다시 할당한다 | 27 → 4.8 ns |
+
+복사 하나가 12 ns쯤입니다. [할당과 해제 한 쌍](#/read/cpp-advanced/mm-new)의 10 ns에 글자를 옮기는 값을 더한 것입니다. 이름이 10자여서 [작은 문자열 최적화](#/read/cpp-stl/impl-sso)에 들어가면 할당이 없어 첫 줄이 2~3 ns로 줄지만, 참조로 받는 쪽은 그때도 0.5 ns입니다.
+
+복사가 **쌓이는** 꼴은 훨씬 비쌉니다. 이름 1,000개를 쉼표로 이어 붙였습니다.
+
+| 잇는 방법 | 이름 하나에 | 할당 |
+| --- | --- | --- |
+| `line = line + name + ",";` | 410 ns | 1,999번 |
+| `line += name; line += ',';` | 2.9 ns | 11번 |
+| `reserve`를 먼저 하고 `+=` | 2.4 ns | 1번 |
+
+첫 줄은 돌 때마다 지금까지 이은 것 전체를 새로 복사합니다. 길이의 제곱으로 느려집니다.
+
+## 도구가 찾아 주는 것
+
+고치기 전의 코드를 [clang-tidy](#/read/cpp-syntax/ubc-tools)의 `performance-*` 검사에 넣었습니다. 경고 여섯 가운데 넷입니다.
+
+```text nocheck
+$ clang-tidy -checks='-*,performance-*' before.cpp -- -std=c++23
+before.cpp:26:18: warning: loop variable is copied but only used as const
+    reference; consider making it a const reference [performance-for-range-copy]
+before.cpp:27:10: warning: the type of the loop variable 'kv' is different from
+    the one returned by the iterator and generates an implicit conversion; (줄임)
+    [performance-implicit-conversion-in-loop]
+before.cpp:36:33: warning: 'push_back' is called inside a loop; consider
+    pre-allocating the container capacity before the loop
+    [performance-inefficient-vector-operation]
+before.cpp:39:40: warning: string concatenation results in allocation of
+    unnecessary temporary strings; consider using 'operator+=' or
+    'string::append()' instead [performance-inefficient-string-concatenation]
+```
+
+| | 잡았다 | 놓쳤다 |
+| --- | --- | --- |
+| clang-tidy 20 | 값으로 받는 `for`, 다른 `pair`, `reserve` 없는 `push_back`, `+`로 잇기, 값으로 받고 읽기만 하는 매개변수 | 리터럴로 만드는 임시 `string`, 값으로 돌려주는 getter, 옮겨도 되는 `push_back` |
+| GCC 14 `-Wall` | 다른 `pair` (`-Wrange-loop-construct`) | 나머지 모두 |
+
+놓친 것은 재서 찾습니다. 위 프로그램처럼 할당을 세거나, [프로파일러](#/read/cpp-advanced/perf-measure)에서 `malloc`과 `memcpy`가 위로 올라오는지 봅니다.
+
+## 줄이는 법
+
+| 하려는 일 | 쓰는 것 |
+| --- | --- |
+| 읽기만 할 문자열과 배열을 받는다 | [`string_view`](#/read/cpp-stl/str-view), [`span`](#/read/cpp-stl/seq-span). 값으로 받는다 |
+| 받아서 보관한다 | [값으로 받아 `std::move`](#/read/cpp-syntax/sm-move) |
+| 만들어 돌려준다 | 값으로 돌려준다. [그 자리에 바로 만들어진다](#/read/cpp-advanced/mv-rvo) |
+| 컨테이너에 넣는다 | [`reserve`, `emplace_back`](#/read/cpp-stl/seq-vector), [`try_emplace`](#/read/cpp-stl/assoc-map) |
+| 컨테이너에서 컨테이너로 옮긴다 | `std::move`, [노드 핸들](#/read/cpp-stl/assoc-node) |
+
+<Note kind="warn">
+`string_view`와 `const string&`는 **빌린 것**입니다. 복사를 없앤 자리마다 "가리키는 것이 나보다 오래 사는가"를 따져야 합니다. getter가 돌려준 참조를 객체가 사라진 뒤에 쓰면 [매달린 참조](#/read/cpp-syntax/ubc-lifetime)입니다.
+</Note>
+
+## 복사가 나은 때
+
+- **작은 값.** 8바이트 구조체와 `string_view`를 값으로 넘길 때와 참조로 넘길 때를 쟀더니 같았습니다(2.1 ns와 2.1 ns, 0.57 ns와 0.57 ns). 같다면 수명을 따질 필요가 없는 값이 낫습니다.
+- **다른 스레드나 코루틴으로 넘어가는 것.** 받는 쪽이 언제 쓸지 모르므로 [복사해서 넘깁니다](#/read/cpp-advanced/thr-args). 12 ns를 내고 수명 버그 하나를 막습니다.
+- **재 보니 드러나지 않는 것.** 시작할 때 한 번 하는 복사는 그대로 둡니다. 고칠 곳은 루프 안입니다.
+
+## 정리
+
+- 긴 문자열의 복사 하나는 할당 한 번, 12 ns쯤이다. `for`의 변수, 다른 `pair`, 리터럴, getter, `push_back`에 숨는다
+- clang-tidy의 `performance-*`가 절반쯤 찾는다. 나머지는 할당을 세거나 프로파일러로 찾는다
+- 빌려 쓰면 복사가 없지만 수명을 따져야 한다. 작은 값과 스레드로 넘기는 것은 복사한다

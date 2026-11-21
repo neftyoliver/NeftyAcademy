@@ -1,0 +1,162 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '자리의 수를 세는 세마포어, 한 번 쓰는 출발선 래치, 단계마다 모이는 배리어, 뮤텍스와 다른 점';
+
+뮤텍스는 자료를 지키는 도구입니다. 스레드끼리 **때를 맞추는** 일(몇 개까지만 동시에, 모두 준비되면 출발, 모두 끝나면 다음 단계)은 조건 변수로 만들 수 있지만 매번 뮤텍스와 조건을 엮어야 합니다. C++20은 그 흔한 꼴 셋을 따로 내놓았습니다.
+
+## 세 가지
+
+| 도구 | 하는 일 | 다시 쓸 수 있나 |
+| --- | --- | --- |
+| `std::counting_semaphore<N>` | 남은 자리의 수를 센다. `acquire()`가 하나 가져가고 `release()`가 돌려준다 | 있다 |
+| `std::binary_semaphore` | 자리가 하나인 세마포어. 신호 하나를 주고받는다 | 있다 |
+| `std::latch` | 수를 0까지 내린다. 0이 되면 기다리던 모두가 지나간다 | 없다. 한 번뿐이다 |
+| `std::barrier` | 정해진 수의 스레드가 모두 올 때까지 기다렸다가 함께 지나간다 | 있다. 단계마다 되풀이한다 |
+
+```cpp
+#include <atomic>
+#include <barrier>
+#include <chrono>
+#include <latch>
+#include <print>
+#include <semaphore>
+#include <thread>
+#include <vector>
+
+using namespace std::chrono_literals;
+
+int main()
+{
+    // 1. 세마포어: 동시에 들어올 수 있는 수를 셋으로 묶는다
+    std::counting_semaphore<3> slots(3);
+    std::atomic<int> inside = 0;
+    std::atomic<int> most = 0;
+    {
+        std::vector<std::jthread> workers;
+        for (int i = 0; i < 8; ++i) {
+            workers.emplace_back([&] {
+                slots.acquire();                    // 자리가 날 때까지 기다린다
+                int now = ++inside;
+                int seen = most.load();
+                while (now > seen && !most.compare_exchange_weak(seen, now)) {}
+                std::this_thread::sleep_for(2ms);   // 일하는 척
+                --inside;
+                slots.release();                    // 자리를 돌려준다
+            });
+        }
+    }
+    std::println("동시에 가장 많이 들어온 수 {}", most.load());
+
+    // 2. 이진 세마포어: 다른 스레드에게 "됐다"고 알린다
+    std::binary_semaphore done(0);
+    int result = 0;
+    std::jthread worker([&] {
+        result = 42;
+        // 기다리지 않던 스레드가 놓아 준다
+        done.release();
+    });
+    done.acquire();
+    std::println("받은 값 {}", result);
+    std::println("시간 안에 또 오나 {}", done.try_acquire_for(10ms));
+
+    // 3. 래치: 모두 준비될 때까지, 그리고 모두 끝날 때까지
+    std::latch ready(4), go(1), finished(4);
+    std::atomic<bool> released = false;
+    std::atomic<int> early = 0;
+    {
+        std::vector<std::jthread> runners;
+        for (int i = 0; i < 4; ++i) {
+            runners.emplace_back([&] {
+                ready.count_down();
+                go.wait();
+                if (!released) ++early;
+                finished.count_down();
+            });
+        }
+        ready.wait();                               // 넷이 모두 출발선에 섰다
+        released = true;
+        go.count_down();                            // 출발
+        finished.wait();                            // 넷이 모두 끝났다
+    }
+    std::println("신호 전에 출발한 주자 {}", early.load());
+
+    // 4. 배리어: 단계마다 모두 모였다가 함께 넘어간다
+    int phase = 0;
+    std::barrier sync(3, [&]() noexcept { ++phase; });  // 모일 때마다 한 번 불린다
+    int seen[3][2] = {};
+    {
+        std::vector<std::jthread> team;
+        for (int id = 0; id < 3; ++id) {
+            team.emplace_back([&, id] {
+                for (int step = 0; step < 2; ++step) {
+                    sync.arrive_and_wait();         // 셋이 다 올 때까지 기다린다
+                    seen[id][step] = phase;
+                }
+            });
+        }
+    }
+    std::println("단계 {} / 첫 단계에서 본 값 {} {} {} / 둘째 {} {} {}", phase,
+                 seen[0][0], seen[1][0], seen[2][0], seen[0][1], seen[1][1],
+                 seen[2][1]);
+}
+```
+
+```text
+동시에 가장 많이 들어온 수 3
+받은 값 42
+시간 안에 또 오나 false
+신호 전에 출발한 주자 0
+단계 2 / 첫 단계에서 본 값 1 1 1 / 둘째 2 2 2
+```
+
+## 세마포어는 주인이 없다
+
+뮤텍스는 [잠근 스레드가 풀어야 합니다](#/read/cpp-advanced/sync-mutex). 세마포어에는 그런 규칙이 없습니다. 2번에서 `main`이 `acquire()`로 기다리고 **다른 스레드가** `release()`합니다. 그래서 세마포어는 "자료를 지키는 것"이 아니라 "신호를 보내는 것"에 씁니다.
+
+| 쓰임 | 꼴 |
+| --- | --- |
+| 동시에 하는 수를 묶는다 (연결 8개까지, 내려받기 3개까지) | `counting_semaphore<N>`. 들어갈 때 `acquire`, 나올 때 `release` |
+| 일이 끝났음을 한 번 알린다 | `binary_semaphore(0)`. 끝낸 쪽이 `release`, 기다리는 쪽이 `acquire` |
+
+`release()`를 `acquire()`보다 많이 불러 수가 `N`을 넘으면 정의되지 않은 동작입니다. 들어갈 때와 나올 때를 [가드](#/read/cpp-advanced/res-guard)로 짝지어 두면 예외로 나가도 자리를 돌려줍니다. 표준에는 세마포어용 잠금 객체가 없습니다.
+
+## 래치와 배리어
+
+`std::latch`는 **한 번만 쓰는 문**입니다. 3번에서 세 가지로 썼습니다.
+
+| 래치 | 뜻 |
+| --- | --- |
+| `ready(4)` | 일꾼이 하나씩 내리고 `main`이 기다린다: "모두 준비됐다" |
+| `go(1)` | `main`이 한 번 내리고 일꾼들이 기다린다: "함께 출발" |
+| `finished(4)` | 일꾼이 하나씩 내리고 `main`이 기다린다: "모두 끝났다" |
+
+이 책의 측정 예제들이 스레드를 같은 순간에 출발시킬 때 쓴 것이 둘째 꼴입니다. 스레드를 만드는 데 [수십 µs](#/read/cpp-advanced/thr-jthread)가 걸리므로, 문 없이 시작하면 첫 스레드가 혼자 먼저 달립니다.
+
+`std::barrier`는 같은 스레드들이 **단계를 맞춰** 여러 번 모일 때 씁니다. 격자를 셋이 나눠 계산하고, 모두 끝나면 격자를 바꿔 끼우고, 다시 계산하는 식입니다. 모일 때마다 생성자에 준 함수가 한 스레드에서 한 번 불리고, 그동안 나머지는 서 있습니다. 4번에서 `phase`를 잠그지 않고 고칠 수 있는 까닭입니다. 그 함수는 `noexcept`여야 합니다.
+
+## 값
+
+| 한 스레드에서 다른 스레드로 차례를 넘긴다 | 두 코어에서 | 한 코어에 묶고 |
+| --- | --- | --- |
+| `binary_semaphore` 둘로 주고받기 | 0.5~0.9 µs | 1.0 µs |
+| 뮤텍스와 조건 변수로 주고받기 | 12 µs | 1.2 µs |
+
+x86-64 서버 VM(코어 2개), GCC 14 `-O2`에서 20만 번 주고받아 잰 값입니다. 두 코어에서 세마포어가 훨씬 빠른 것은 libstdc++의 세마포어가 잠들기 전에 **잠깐 돌면서** 기다려 보기 때문입니다. 상대가 바로 답하는 이 시험에서는 잠들 일이 없습니다. 상대가 오래 걸리면 결국 잠들고, 그때는 조건 변수와 같은 값을 냅니다.
+
+| 타입 | GCC 14 | Clang 20 |
+| --- | --- | --- |
+| `std::binary_semaphore`, `std::counting_semaphore<8>`, `std::latch` | 4바이트 | 8바이트 |
+| `std::barrier<>` | 32바이트 | 40바이트 |
+| `std::mutex` + `std::condition_variable` | 88바이트 | 88바이트 |
+
+리눅스에서 세마포어와 래치는 [뮤텍스와 같은 재료](#/read/cpp-advanced/sync-mutex)로 만들어집니다. 정수 하나를 원자적으로 고치고, 기다려야 할 때만 커널에 맡깁니다.
+
+<Note>
+셋 가운데 무엇으로도 **자료를 지킬 수는 없습니다.** 세마포어로 자리를 셋으로 묶었다면 그 안에는 세 스레드가 함께 있습니다. 그들이 같은 변수를 고치면 여전히 뮤텍스가 필요합니다.
+</Note>
+
+## 정리
+
+- 세마포어는 남은 자리를 센다. 주인이 없어서 한 스레드가 기다리고 다른 스레드가 놓아 줄 수 있다
+- 래치는 한 번 쓰는 문이다. 함께 출발시키거나 모두 끝나기를 기다린다. 배리어는 단계마다 되풀이해 모인다
+- 때를 맞추는 도구는 자료를 지켜 주지 않는다. 함께 고치는 것이 있으면 뮤텍스를 따로 쓴다

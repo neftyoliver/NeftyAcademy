@@ -1,0 +1,120 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '다른 변수인데 서로를 늦추는 까닭, 재어 본 값, 숨어 있는 자리, 떼어 놓는 법과 그 값';
+
+지금까지 몇 번 "캐시 줄을 주고받는다"고 적고 넘어갔습니다. [`shared_ptr`의 계수](#/read/cpp-advanced/sp-shared)에서, [스레드별 집계](#/read/cpp-advanced/thr-local)에서, [캐시 줄의 크기](#/read/cpp-advanced/thr-hardware)에서였습니다. 여기서 갚습니다. 두 스레드가 **서로 다른 변수**만 고치는데도 느려지는 일, 거짓 공유(false sharing)입니다.
+
+## 캐시는 줄 단위로 움직인다
+
+코어마다 자기 캐시가 있고, 캐시는 메모리를 64바이트짜리 **줄**로 나눠 담습니다. 한 코어가 어떤 줄에 쓰려면 그 줄을 혼자 가져야 하므로, 다른 코어들이 가진 사본은 못 쓰게 됩니다. 다른 코어가 그 줄을 다시 읽거나 쓰려면 줄 전체를 건네받아야 합니다.
+
+이 규칙은 **변수가 아니라 줄**에 걸립니다. 변수 `a`와 `b`가 한 줄에 있으면, 한 코어는 `a`만 고치고 다른 코어는 `b`만 고쳐도 줄은 두 코어 사이를 쉬지 않고 오갑니다. 코드에는 나눠 쓰는 것이 없는데 기계에서는 나눠 쓰고 있습니다.
+
+## 재어 본다
+
+```cpp
+#include <atomic>
+#include <chrono>
+#include <print>
+#include <thread>
+
+struct Adjacent {                       // 두 계수가 붙어 있다: 같은 캐시 줄
+    std::atomic<long> a{0};
+    std::atomic<long> b{0};
+};
+
+struct Apart {                          // 64바이트 경계에 하나씩: 다른 캐시 줄
+    alignas(64) std::atomic<long> a{0};
+    alignas(64) std::atomic<long> b{0};
+};
+
+template <typename Counters>
+double run()
+{
+    static Counters counters;
+    const long rounds = 20'000'000;
+    auto start = std::chrono::steady_clock::now();
+    {
+        // 두 스레드는 서로 "다른" 변수만 고친다
+        std::jthread one([&] { for (long i = 0; i < rounds; ++i) ++counters.a; });
+        std::jthread two([&] { for (long i = 0; i < rounds; ++i) ++counters.b; });
+    }
+    std::chrono::duration<double, std::milli> elapsed =
+        std::chrono::steady_clock::now() - start;
+    return elapsed.count();
+}
+
+int main()
+{
+    std::println("크기 {} / {}", sizeof(Adjacent), sizeof(Apart));
+    std::println("붙어 있을 때 {:.0f} ms", run<Adjacent>());
+    std::println("떼어 놓았을 때 {:.0f} ms", run<Apart>());
+}
+```
+
+```text nocheck
+크기 16 / 128
+붙어 있을 때 615 ms
+떼어 놓았을 때 136 ms
+```
+
+x86-64 서버 VM(코어 2개), GCC 14 `-O2`의 결과입니다. `alignas(64)` 두 개가 4.5배를 가릅니다. 같은 기계에서 세 가지 꼴을 쟀습니다.
+
+| 두 스레드가 하는 일 | 한 줄에 있을 때 | 줄을 나눴을 때 |
+| --- | --- | --- |
+| 각자의 `std::atomic<long>`을 1억 번 올린다 | 3,000 ms | 690 ms |
+| 하나는 바뀌지 않는 값을 2억 번 읽고, 하나는 그 옆의 값을 계속 올린다 | 335 ms | 75 ms |
+| 각자의 보통 `long` 둘을 1억 번 고친다 | 60~135 ms | 50~90 ms |
+
+둘째 줄이 가장 놀랍습니다. **읽기만 하는** 스레드가, 읽는 값이 한 번도 바뀌지 않는데도 네 배 느려집니다. 옆의 값이 바뀔 때마다 줄 전체가 무효가 되어 다시 가져와야 하기 때문입니다. 그 줄에서 쓰는 쪽도 초당 1억 7천만 번에서 3천3백만 번으로 떨어졌습니다.
+
+셋째 줄은 차이가 작습니다. 보통 변수에 쓰는 것은 코어가 [버퍼에 모아 두었다가](#/read/cpp-advanced/atm-order) 한꺼번에 내보내므로 줄을 덜 자주 빼앗아 옵니다. 원자적 연산은 할 때마다 줄을 혼자 쥐어야 해서 그대로 맞습니다. 이 수치는 CPU마다 많이 다릅니다. 이 실험의 CPU는 최근의 서버용 코어입니다.
+
+## 숨어 있는 자리
+
+| 자리 | 한 줄에 놓이는 것 |
+| --- | --- |
+| 스레드마다 한 칸씩 쓰는 배열 (`counts[thread_id]`) | 이웃한 스레드들의 칸. `long` 여덟 개가 한 줄이다 |
+| 큐의 머리와 꼬리 | 넣는 스레드가 고치는 번호와 빼는 스레드가 고치는 번호 |
+| 설정과 통계를 함께 둔 구조체 | 모두가 읽는 설정과 누군가 계속 고치는 계수 |
+| 뮤텍스와 그것이 지키지 않는 자료 | 잠금을 다투는 것만으로 옆의 자료를 읽는 쪽이 느려진다 |
+| 따로 할당한 작은 객체들 | 힙이 연달아 내준 16바이트짜리 둘은 대개 한 줄이다 |
+
+마지막 줄 때문에 **할당을 따로 했다고 안심할 수 없습니다.** 반대로 걱정한 것이 아닐 수도 있습니다. `make_shared`는 [계수와 객체를 한 덩어리로](#/read/cpp-stl/mem-make) 잡으므로, 한 스레드가 `shared_ptr`를 복사하는 동안 다른 스레드가 객체를 읽으면 서로 늦출 것 같습니다. 재어 보니 차이가 없었습니다. 이 실험에서는 힙이 준 주소가 마침 계수는 한 줄의 끝에, 객체는 다음 줄의 처음에 오게 했기 때문입니다. 거짓 공유는 **주소에 달린 일**이라서 멤버 하나를 더하거나 할당 순서가 바뀌면 나타나고 사라집니다.
+
+## 떼어 놓는다
+
+```cpp
+// 1. 스레드마다 쓰는 칸을 한 줄씩 차지하게 한다
+struct alignas(64) PerThread {
+    long count = 0;
+    long sum = 0;
+};
+std::vector<PerThread> stats(8);        // 칸마다 64바이트
+
+// 2. 자주 고치는 것과 읽기만 하는 것을 줄로 가른다
+struct Server {
+    int port = 0;                       // 시작할 때 정하고 읽기만 한다
+    int workers = 0;
+    alignas(64) std::atomic<long> requests{0};  // 계속 고친다: 다음 줄에서 시작한다
+    alignas(64) std::mutex guard;               // 다투는 잠금도 따로
+};
+```
+
+| 방법 | 값 |
+| --- | --- |
+| `alignas(64)`로 줄의 처음에 놓는다 | 구조체가 커진다. 위의 `Adjacent` 16바이트가 `Apart`에서는 128바이트다 |
+| 읽기만 하는 멤버와 고치는 멤버를 모아서 가른다 | 없다. 멤버의 순서만 바꾼다 |
+| 스레드마다 지역 변수에 모으고 끝에 한 번 쓴다 | 없다. 가장 싸고 가장 확실하다 |
+
+셋째가 먼저입니다. 반복문 안에서 `stats[id].count`를 고치는 대신 지역 변수 `long count`에 세고, 반복문이 끝난 뒤에 한 번 옮깁니다. 지역 변수는 레지스터나 자기 스택에 있어서 누구와도 줄을 나누지 않습니다. 64라는 수는 [기계마다 다르고](#/read/cpp-advanced/thr-hardware), 헤더에 적을 때는 직접 정한 상수를 씁니다.
+
+<Note>
+줄을 나눠도 소용없는 경우가 **진짜 공유**입니다. 여러 스레드가 정말로 같은 변수 하나를 고치면 그 줄은 오갈 수밖에 없습니다. 모두가 올리는 계수 하나, 모두가 복사하는 `shared_ptr` 하나가 그렇습니다. 이때는 배치가 아니라 설계를 바꿉니다. [스레드마다 세고 합치거나](#/read/cpp-advanced/thr-local), `shared_ptr`를 참조로 넘겨 [복사 자체를 없앱니다](#/read/cpp-advanced/sp-passing).
+</Note>
+
+## 정리
+
+- 캐시는 64바이트 줄 단위로 코어 사이를 오간다. 다른 변수라도 한 줄에 있으면 서로를 늦춘다
+- 읽기만 하는 값도 옆의 값이 계속 바뀌면 네 배 느려졌다. 자주 고치는 것과 읽기만 하는 것을 줄로 가른다
+- 먼저 지역 변수에 모아서 쓰는 횟수를 줄이고, 그래도 남는 것에 `alignas`를 쓴다

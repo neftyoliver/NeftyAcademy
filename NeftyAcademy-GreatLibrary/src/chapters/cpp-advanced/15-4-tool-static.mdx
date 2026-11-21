@@ -1,0 +1,237 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '버그 아홉 개를 심어 도구 넷을 돌려 본 표. clang-tidy를 프로젝트에 붙이기, 고쳐 주는 검사, 포매터';
+
+코드를 실행하지 않고 읽어서 문제를 찾는 것이 정적 분석입니다. [「새니타이저와 경고」](#/read/cpp-syntax/ubc-tools)에서 이름을 봤습니다. [새니타이저](#/read/cpp-advanced/tool-sanitizers)가 실행된 길만 보는 것과 달리, 정적 분석은 한 번도 실행되지 않는 갈래도 봅니다. 대신 놓치는 것도 틀리게 짚는 것도 있습니다. 무엇을 얼마나 잡는지 심어 놓고 돌려 봅니다.
+
+## 버그 아홉 개와 도구 넷
+
+```cpp nocheck
+#include <cstdio>
+#include <cstring>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+struct Sensor {
+    virtual ~Sensor() = default;
+    virtual double read() const { return 0.0; }
+};
+struct Thermo : Sensor {
+    double read() { return 21.5; }                  // 1. const가 빠졌다
+};
+
+std::string make_name(int id) { return "sensor-" + std::to_string(id); }
+
+void store(std::vector<std::string>& names, std::string name)
+{
+    names.push_back(std::move(name));
+    std::printf("%zu\n", name.size());              // 2. 옮긴 뒤에 쓴다
+}
+
+std::string_view first_word()
+{
+    std::string_view view = make_name(7);           // 3. 임시 문자열을 가리킨다
+    return view.substr(0, 6);
+}
+
+int average(const std::vector<int>& values)
+{
+    long sum = 0;
+    for (int v : values) sum += v;
+    return sum / values.size();                     // 4. 타입이 좁아진다
+}
+
+void fill(char* out, const char* text)
+{
+    char buffer[16];
+    std::strcpy(buffer, text);                      // 5. 길이를 보지 않는 복사
+    std::memcpy(out, buffer, sizeof(out));          // 6. 포인터의 크기다
+}
+
+int* find(std::vector<int>& values, int wanted)
+{
+    for (int& v : values)
+        if (v == wanted) return &v;
+    return nullptr;
+}
+
+int use(std::vector<int>& values)
+{
+    int* p = find(values, 3);
+    return *p;                                      // 7. 못 찾으면 널을 읽는다
+}
+
+double leak(bool fail)
+{
+    double* scratch = new double[64];
+    if (fail) return -1.0;                          // 8. 일찍 나가면 샌다
+    const double result = scratch[0];               // 9. 초기화하지 않은 값
+    delete[] scratch;
+    return result;
+}
+```
+
+같은 파일에 도구 넷을 돌렸습니다. 컴파일러에는 `-Wall -Wextra -Wconversion -Wsign-conversion`을 주고 GCC에는 `-Wnull-dereference -O2`를 더했습니다. clang-tidy 20에는 `bugprone-*`, `clang-analyzer-*`, `performance-*`와 좁아지는 변환 검사를, cppcheck 2.13에는 `--enable=warning,style,performance`를 줬습니다.
+
+| 버그 | 잡은 도구 |
+| --- | --- |
+| 1. `const`가 빠져 재정의가 아닌 함수 | g++, clang++, cppcheck |
+| 2. 옮긴 뒤에 쓰기 | clang-tidy |
+| 3. 임시 문자열을 가리키는 `string_view` | clang++, clang-tidy, cppcheck |
+| 4. 좁아지는 변환 | g++, clang++, clang-tidy |
+| 5. 길이를 보지 않는 `strcpy` | clang-tidy |
+| 6. 포인터에 `sizeof` | g++, clang++, cppcheck |
+| 7. 널일 수 있는 포인터 읽기 | g++ |
+| 8. 일찍 나가며 새는 메모리 | clang-tidy, cppcheck |
+| 9. 초기화하지 않은 값 | clang-tidy, cppcheck |
+
+- **혼자 다 잡는 도구는 없습니다.** clang-tidy 여섯, cppcheck 다섯, 두 컴파일러가 넷씩입니다. 아홉이 모두 잡힌 것은 넷을 겹쳤기 때문입니다.
+- **컴파일러의 경고가 가장 쌉니다.** 빌드할 때마다 공짜로 돌고, 7번은 GCC의 경고만 잡았습니다.
+- **4번의 다른 반쪽은 아무도 못 잡았습니다.** 벡터가 비었을 때 0으로 나누는 것입니다. 값에 달린 오류는 [테스트](#/read/cpp-advanced/tool-testing)의 몫입니다.
+- `g++ -fanalyzer`는 이 파일에서 아무것도 알리지 않았습니다.
+
+## 프로젝트에 붙이기
+
+검사 목록은 `.clang-tidy`에 적어 저장소의 맨 위에 둡니다.
+
+```yaml
+# .clang-tidy: 저장소의 맨 위에 둔다
+Checks: >
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  performance-*,
+  modernize-use-override,
+  modernize-use-nullptr,
+  cppcoreguidelines-narrowing-conversions
+WarningsAsErrors: 'bugprone-use-after-move,bugprone-dangling-handle'
+HeaderFilterRegex: '^(src|include)/'
+```
+
+```text nocheck
+$ run-clang-tidy -p build          # build/compile_commands.json을 읽는다
+bugs.cpp:22:26: error: 'name' used after it was moved
+    [bugprone-use-after-move,-warnings-as-errors]
+bugs.cpp:35:12: warning: narrowing conversion from 'size_type' (aka 'unsigned long')
+    to signed type 'int' is implementation-defined
+    [bugprone-narrowing-conversions,cppcoreguidelines-narrowing-conversions]
+```
+
+clang-tidy는 컴파일러와 똑같은 옵션으로 소스를 읽어야 하므로 [CMake가 만든 `compile_commands.json`](#/read/cpp-advanced/tool-cmake)이 필요합니다. `WarningsAsErrors`에 올린 검사는 종료 코드를 1로 만들어 [CI](#/read/cpp-advanced/tool-ci)를 멈춥니다.
+
+| 알아 둘 것 | 내용 |
+| --- | --- |
+| 느리다 | 파일 21개에 60초였다. 그 프로젝트의 빌드는 7초다. CI에서 돌리거나 바뀐 파일에만 돌린다 |
+| 처음부터 다 켜지 않는다 | 오래된 코드에 수백 개가 쏟아지면 아무도 읽지 않는다. 버그를 찾는 검사부터 켜고 0을 유지한다 |
+| 한 줄만 끈다 | `// NOLINT(bugprone-use-after-move)`. 까닭을 옆에 적는다 |
+| 남의 헤더는 뺀다 | `HeaderFilterRegex`로 내 폴더만 본다 |
+
+## 고쳐 주는 검사
+
+`modernize-*`의 여러 검사는 찾기만 하지 않고 고칩니다. 옛 문법의 파일에 `--fix`를 줬습니다.
+
+```cpp
+#include <cstddef>
+#include <vector>
+
+struct Base {
+    virtual ~Base() {}
+    virtual int size() const { return 0; }
+};
+
+struct Derived : Base {
+    virtual int size() const { return 1; }
+};
+
+int total(const std::vector<int>& values, int* out)
+{
+    if (out == NULL) return 0;
+    int sum = 0;
+    for (std::vector<int>::const_iterator it = values.begin();
+         it != values.end(); ++it)
+        sum += *it;
+    *out = sum;
+    return sum;
+}
+```
+
+```text nocheck
+$ clang-tidy --fix old.cpp -checks='-*,modernize-use-nullptr,modernize-loop-convert,
+      modernize-use-override,modernize-use-equals-default' -- -std=c++23
+clang-tidy applied 6 of 6 suggested fixes.
+$ git diff
+-    virtual ~Base() {}
++    virtual ~Base() = default;
+-    virtual int size() const { return 1; }
++    int size() const override { return 1; }
+-    if (out == NULL) return 0;
++    if (out == nullptr) return 0;
+-    for (std::vector<int>::const_iterator it = values.begin();
+-         it != values.end(); ++it)
+-        sum += *it;
++    for (int value : values)
++        sum += value;
+```
+
+[옛 코드를 새 문법으로 옮길 때](#/read/cpp-syntax/leg-c-habits) 손으로 하지 않습니다. 검사 하나씩, 커밋 하나씩 하고, 고친 뒤 빌드와 테스트를 돌립니다.
+
+## 포매터
+
+clang-format은 코드의 모양을 정해진 규칙대로 다시 씁니다. 규칙은 `.clang-format`에 둡니다.
+
+```yaml
+# .clang-format: 저장소의 맨 위에 둔다
+BasedOnStyle: WebKit
+ColumnLimit: 88
+IndentWidth: 4
+PointerAlignment: Left
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: WithoutElse
+SortIncludes: CaseSensitive
+```
+
+```cpp nocheck
+#include <vector>
+#include <string>
+#include <algorithm>
+struct Reading{std::string name;double value=0;};
+double total (const std::vector<Reading> &readings,double scale){
+double sum=0;
+  for(const Reading &r:readings){if(r.value<0)continue;
+      sum+=r.value*scale;}
+return sum;}
+```
+
+```cpp
+#include <algorithm>
+#include <string>
+#include <vector>
+struct Reading {
+    std::string name;
+    double value = 0;
+};
+double total(const std::vector<Reading>& readings, double scale)
+{
+    double sum = 0;
+    for (const Reading& r : readings) {
+        if (r.value < 0) continue;
+        sum += r.value * scale;
+    }
+    return sum;
+}
+```
+
+모양을 두고 벌이는 논쟁을 없애는 것이 쓸모입니다. 리뷰에서 사람은 뜻만 보고, 모양은 도구가 봅니다. `clang-format --dry-run --Werror`는 고치지 않고 어긋난 곳이 있으면 종료 코드 1을 돌려주므로 CI에 넣고, 평소에는 편집기가 저장할 때 돌리게 합니다. 이미 있는 큰 저장소에는 `git clang-format`으로 **바꾼 줄에만** 적용합니다. 전체를 한 번에 바꾸면 `git blame`이 그 커밋으로 덮입니다.
+
+<Note>
+`#include`의 순서가 바뀐 것을 눈여겨봅니다. 포매터가 헤더를 정렬합니다. 순서에 기대는 헤더가 있으면 이때 깨지는데, 그것은 [헤더가 스스로 서지 못한다](#/read/cpp-syntax/mod-headers)는 버그가 드러난 것입니다.
+</Note>
+
+## 정리
+
+- 버그 아홉을 심어 clang-tidy가 여섯, cppcheck가 다섯, 컴파일러 경고가 넷을 잡았다. 겹쳐 써야 하고, 값에 달린 오류는 못 잡는다
+- `.clang-tidy`와 `compile_commands.json`으로 프로젝트에 붙인다. 느리므로 CI에서 돌리고, 버그를 찾는 검사부터 켠다
+- `modernize-*`는 고쳐 주고, clang-format은 모양을 정한다. 둘 다 사람이 뜻에만 신경 쓰게 한다

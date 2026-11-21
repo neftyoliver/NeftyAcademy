@@ -3,13 +3,15 @@ import react from '@vitejs/plugin-react';
 import remarkGfm from 'remark-gfm';
 import { defineConfig } from 'vite';
 import { viteSingleFile } from 'vite-plugin-singlefile';
+import rehypeTableCells from './rehype-table-cells.mjs';
 import remarkChapterLinks from './remark-chapter-links.mjs';
 
 export default defineConfig({
   plugins: [
     // .mdx → React 컴포넌트. remark-gfm은 표·취소선 같은 깃허브식 마크다운을 켠다.
     // remarkChapterLinks는 본문의 챕터 링크를 모아 지도의 줄로 쓸 수 있게 내보낸다.
-    { enforce: 'pre', ...mdx({ remarkPlugins: [remarkGfm, remarkChapterLinks] }) },
+    // rehypeTableCells는 표에서 글이 긴 칸에 표시를 해 두어, 좁은 화면에서 그 칸이 한 낱말 폭으로 찌그러지지 않게 한다.
+    { enforce: 'pre', ...mdx({ remarkPlugins: [remarkGfm, remarkChapterLinks], rehypePlugins: [rehypeTableCells] }) },
     react({ include: /\.(mdx|tsx?)$/ }),
     // 결과물을 dist/index.html 한 파일로(JS·CSS를 안에 넣는다). 메일로 보내거나 USB로 옮겨도 그대로 열린다.
     viteSingleFile(),

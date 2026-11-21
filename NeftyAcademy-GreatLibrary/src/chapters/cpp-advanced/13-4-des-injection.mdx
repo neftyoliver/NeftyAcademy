@@ -1,0 +1,192 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '쓸 것을 안에서 만들지 않고 밖에서 받는다. 가짜 시계로 한 시간을 0초에 시험하기, 넣는 방법 넷과 그 값';
+
+아래 온도 조절기는 60초 안에는 켜고 끄기를 바꾸지 않습니다. 이 규칙을 시험하려면 어떻게 해야 할까요.
+
+```cpp
+#include <chrono>
+
+int read_adc(int channel);     // 하드웨어를 읽는 함수
+
+class Thermostat {
+public:
+    bool update()
+    {
+        const double celsius = read_adc(3) * 0.1;               // 진짜 센서
+        const auto now = std::chrono::steady_clock::now();      // 진짜 시계
+        const bool want = celsius < 20.0;
+        if (want != heating_ && now - last_switch_ >= std::chrono::seconds(60)) {
+            heating_ = want;
+            last_switch_ = now;
+        }
+        return heating_;
+    }
+
+private:
+    bool heating_ = false;
+    std::chrono::steady_clock::time_point last_switch_{};
+};
+```
+
+방의 온도를 바꾸고 60초를 기다려야 합니다. 클래스가 **쓸 것을 스스로 가져오기** 때문입니다. 센서와 시계가 선언에 보이지 않으므로 바꿔 끼울 틈도 없습니다. 의존성 주입(dependency injection)은 이것을 뒤집습니다. 쓸 것을 밖에서 만들어 생성자로 넣어 줍니다.
+
+## 밖에서 넣어 준다
+
+```cpp
+#include <chrono>
+#include <print>
+#include <vector>
+
+using namespace std::chrono_literals;
+using Time = std::chrono::steady_clock::time_point;
+
+// 바깥 세계는 인터페이스 뒤에 둔다
+struct Sensor {
+    virtual ~Sensor() = default;
+    virtual double celsius() = 0;
+};
+struct Clock {
+    virtual ~Clock() = default;
+    virtual Time now() const = 0;
+};
+
+// 목표 온도보다 낮으면 켜고 높으면 끈다. 한 번 바꾸면 60초는 그대로 둔다
+class Thermostat {
+public:
+    Thermostat(Sensor& sensor, Clock& clock, double target)
+        : sensor_(sensor), clock_(clock), target_(target) {}
+
+    bool update()
+    {
+        const bool want = sensor_.celsius() < target_;
+        const Time now = clock_.now();
+        if (want != heating_ && (!switched_ || now - last_switch_ >= 60s)) {
+            heating_ = want;
+            last_switch_ = now;
+            switched_ = true;
+        }
+        return heating_;
+    }
+
+private:
+    Sensor& sensor_;     // 빌린다. 이 객체보다 오래 살아야 한다
+    Clock& clock_;
+    double target_;
+    bool heating_ = false;
+    bool switched_ = false;
+    Time last_switch_{};
+};
+
+// ---- 시험용 가짜 ----
+struct FakeSensor : Sensor {
+    double value = 0;
+    double celsius() override { return value; }
+};
+struct FakeClock : Clock {
+    Time current{};
+    Time now() const override { return current; }
+};
+
+int main()
+{
+    FakeSensor sensor;
+    FakeClock clock;
+    Thermostat thermostat(sensor, clock, 20.0);
+
+    struct Step { std::chrono::seconds after; double celsius; };
+    const std::vector<Step> script = {
+        {0s, 18.0}, {30s, 21.5}, {40s, 21.5}, {3600s, 19.0}};
+    std::chrono::seconds elapsed = 0s;
+    for (const Step& step : script) {
+        clock.current += step.after;      // 기다리지 않고 시계만 돌린다
+        elapsed += step.after;
+        sensor.value = step.celsius;
+        std::println("{:>5} {:4.1f}도 → {}", elapsed, step.celsius,
+                     thermostat.update() ? "켬" : "끔");
+    }
+}
+```
+
+```text
+   0s 18.0도 → 켬
+  30s 21.5도 → 켬
+  70s 21.5도 → 끔
+3670s 19.0도 → 켬
+```
+
+한 시간이 넘는 흐름을 기다리지 않고 돌렸습니다. 30초에는 온도가 넘었는데도 켜 둔 채이고, 70초에 꺼집니다. 진짜 프로그램에서는 `Sensor`를 상속한 ADC 판과 `steady_clock`을 읽는 `Clock`을 넣습니다. `Thermostat`의 코드는 한 글자도 바뀌지 않습니다.
+
+생성자의 선언이 "이 클래스는 센서와 시계에 기댄다"를 알려 주는 것도 얻은 것입니다. [전역 변수나 싱글턴](#/read/cpp-syntax/life-static-init)으로 가져오는 의존은 선언에 보이지 않습니다.
+
+## 넣는 방법 넷
+
+| 방법 | 바꿔 끼우는 때 | `update()` 한 번 | 치르는 것 |
+| --- | --- | --- | --- |
+| 인터페이스의 참조 (위의 꼴) | 실행 중 | 1.6~2.3 ns | 가상 호출 둘 |
+| 템플릿 인자 | 컴파일할 때 | 0.9~1.2 ns | 구현이 헤더에 있어야 한다. 타입마다 한 벌 |
+| `std::function` 멤버 | 실행 중 | 3.9 ns | 객체가 40바이트에서 88바이트로 |
+| 링크할 때 다른 파일 | 빌드할 때 | 그대로 | 프로그램 하나에 한 가지뿐 |
+
+x86-64, GCC 14 `-O2`이고, 넣은 것이 값을 돌려주기만 할 때의 숫자입니다. 진짜 시계를 넣으면 `steady_clock::now()`가 [20 ns 남짓](#/read/cpp-stl/chr-clocks)이어서 어느 방법이든 24 ns입니다. **주입의 값은 간접 호출 한두 번**이고, 대개는 넣은 것이 하는 일에 묻힙니다. 그래서 기본은 인터페이스입니다. [샘플마다 불리는 안쪽 루프](#/read/cpp-advanced/tmp-crtp)라면 템플릿으로 받습니다.
+
+```cpp
+#include <concepts>
+
+template <typename S>
+concept TemperatureSource = requires(S& s) {
+    { s.celsius() } -> std::convertible_to<double>;
+};
+
+// 가상 함수 없이, 센서의 타입을 템플릿 인자로 받는다
+template <TemperatureSource S>
+class BasicThermostat {
+public:
+    BasicThermostat(S& sensor, double target) : sensor_(sensor), target_(target) {}
+    bool update() { return sensor_.celsius() < target_; }   // 줄여서 적었다
+
+private:
+    S& sensor_;
+    double target_;
+};
+
+struct AdcSensor {              // Sensor를 상속하지 않아도 된다
+    double celsius() { return 21.5; }
+};
+
+bool demo(AdcSensor& sensor)
+{
+    BasicThermostat thermostat(sensor, 20.0);
+    return thermostat.update();
+}
+```
+
+호출 하나만 넣으면 될 때는 인터페이스를 만들지 않고 [`std::function`](#/read/cpp-syntax/lam-function)으로 받습니다. 받아서 바로 부르고 보관하지 않는다면 템플릿 인자로 받는 편이 쌉니다.
+
+## 누가 조립하는가
+
+넣어 줄 것을 만드는 곳은 한 군데, 보통 `main`입니다.
+
+```cpp nocheck
+int main()
+{
+    AdcSensor sensor(3);            // Sensor를 상속한 진짜 센서
+    SteadyClock clock;
+    Thermostat thermostat(sensor, clock, 20.0);
+    run(thermostat);
+}   // 선언의 반대 순서로 사라진다. 빌려준 것이 빌린 것보다 오래 산다
+```
+
+`Thermostat`은 참조로 **빌렸으므로** 센서와 시계가 더 오래 살아야 합니다. 지역 변수의 [선언 순서](#/read/cpp-advanced/res-ownership)가 그것을 보증합니다. 조립하는 곳이 흩어져 있어 수명을 장담할 수 없으면 `unique_ptr`로 넘겨 갖게 하거나 `shared_ptr`로 나눠 갖습니다.
+
+<Note kind="warn">
+모든 것을 주입하지는 않습니다. 넣을 것은 **바깥 세계와 닿는 것**(장치, 시계, 파일, 통신, 난수)과 시험에서 바꿔 끼울 것입니다. 값 타입, 계산만 하는 함수, 표준 컨테이너까지 인터페이스 뒤로 보내면 생성자 인자가 열 개가 되고 코드를 따라 읽을 수 없게 됩니다.
+</Note>
+
+가짜 객체를 손으로 쓰지 않고 만들어 주는 도구는 [단위 테스트](#/read/cpp-advanced/tool-testing)에서 봅니다.
+
+## 정리
+
+- 쓸 것을 안에서 가져오면 시험할 수 없다. 생성자로 받으면 가짜 시계로 한 시간을 기다리지 않고 돌린다
+- 인터페이스로 넣는 값은 가상 호출 한두 번, 1~2 ns다. 안쪽 루프만 템플릿으로 받는다
+- 조립은 `main` 한 곳에서 한다. 빌려준 것이 더 오래 살도록 선언 순서를 맞춘다

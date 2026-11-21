@@ -1,0 +1,222 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '치환 실패로 쳐 주는 곳의 경계, requires 식으로 묻는 법과 함정, enable_if로는 못 하던 것';
+
+`enable_if`와 `void_t`를 읽는 법, 그것을 콘셉트로 옮긴 꼴은 [「SFINAE와 enable_if」](#/read/cpp-syntax/leg-sfinae)에서 봤습니다. 여기서는 그 밑에 깔린 규칙 하나를 끝까지 따라갑니다. **어디서 난 실패가 조용히 "아니오"가 되고, 어디서 난 실패가 컴파일을 멈추는가**입니다. `requires`로 옮겨도 이 경계는 그대로입니다.
+
+## 조용히 빠지는 곳과 멈추는 곳
+
+```cpp
+#include <cstddef>
+#include <print>
+#include <string>
+
+// 1. 조건이 서명에 드러나 있다
+template <typename T>
+auto size_a(const T& t) -> decltype(t.size())
+{
+    return t.size();
+}
+
+// 2. 서명은 무엇이든 받는다. 조건은 본문에만 있다
+template <typename T>
+std::size_t size_b(const T& t)
+{
+    return t.size();
+}
+
+template <typename T>
+concept WorksWithA = requires(const T& t) { size_a(t); };
+template <typename T>
+concept WorksWithB = requires(const T& t) { size_b(t); };
+
+int main()
+{
+    std::println("size_a: string {}, int {}", WorksWithA<std::string>,
+                 WorksWithA<int>);
+    std::println("size_b: string {}, int {}", WorksWithB<std::string>,
+                 WorksWithB<int>);
+}
+```
+
+```text
+size_a: string true, int false
+size_b: string true, int true
+```
+
+둘째 줄이 틀린 답입니다. `size_b(1)`은 컴파일되지 않는데 콘셉트는 된다고 합니다. 컴파일러는 "부를 수 있는가"를 물을 때 **서명만** 봅니다. 서명에 타입을 넣어 보다가 말이 안 되면 그 후보를 조용히 버리고(치환 실패), 서명이 멀쩡하면 본문은 열어 보지 않고 "된다"고 답합니다.
+
+본문을 열어 봐야만 답할 수 있는 물음도 있습니다. 그때는 본문 안의 실패가 **진짜 오류**가 됩니다. 아래는 두 컴파일러에 넣어 확인한 것입니다.
+
+| 묻는 것 | 안 되는 타입을 넣으면 |
+| --- | --- |
+| 반환 타입이 `-> decltype(t.size())` | 조용히 거짓 |
+| 반환 타입이 `std::size_t`, 본문에서 `t.size()` | **참이라고 한다** (거짓말) |
+| 본문에 `static_assert(조건)` | 참이라고 한다. 부르는 순간에야 오류 |
+| 반환 타입이 `auto`, 본문에서 `t.size()` | **컴파일 오류.** 반환 타입을 알려면 본문을 만들어야 한다 |
+| 별칭 `template <…> using E = typename T::value_type;` | 조용히 거짓 |
+| 클래스 `struct E { using type = typename T::value_type; };` | 컴파일 오류. 클래스 본문 안의 실패다 |
+| 멤버 선언에서 실패하는 클래스 템플릿을 `X<T>{}`로 만들기 | 컴파일 오류 |
+| `std::underlying_type_t<int>`, `std::common_type_t<int, std::string>` | 조용히 거짓 |
+| `std::make_unsigned_t<float>` | libstdc++는 컴파일 오류, libc++는 조용히 거짓 |
+
+넷째 줄이 가장 자주 밟는 것입니다. 편하다고 반환 타입을 `auto`로 두면, 그 함수를 "부를 수 있는가"로 묻는 것만으로 컴파일이 멈춥니다. 남이 탐지에 쓸 수 있는 함수는 조건을 **서명에** 적습니다. `requires` 절이 가장 깔끔합니다.
+
+마지막 줄은 표준 라이브러리도 한결같지 않다는 뜻입니다. `underlying_type`은 C++20에서 "안 되면 `type`이 없다"로 정해졌지만, `make_unsigned`는 그런 약속이 없어 구현마다 다릅니다.
+
+## requires 식으로 묻는 법
+
+```cpp
+#include <concepts>
+#include <print>
+#include <type_traits>
+#include <utility>
+
+struct Sensor {
+    using value_type = double;
+    static constexpr int channels = 4;
+    int gain = 1;
+
+    double read() const { return 21.5; }
+    void reset() {}        // const가 아니다
+    void consume() && {}   // 임시 객체에서만 부를 수 있다
+
+private:
+    void calibrate() {}
+};
+void attach(Sensor&) {}    // 멤버가 아닌 함수
+
+template <typename T>
+concept ReadsNumber = requires(const T& t) {
+    { t.read() } -> std::convertible_to<double>;
+};
+template <typename T>
+concept HasValueType = requires { typename T::value_type; };
+template <typename T>
+concept HasChannels = requires {
+    { T::channels } -> std::convertible_to<int>;
+};
+template <typename T>
+concept HasGain = requires(T& t) { t.gain; };
+template <typename T>
+concept ResetsWhenConst = requires(const T& t) { t.reset(); };
+template <typename T>
+concept ConsumesLvalue = requires(T& t) { t.consume(); };
+template <typename T>
+concept ConsumesRvalue = requires(T&& t) { std::move(t).consume(); };
+template <typename T>
+concept Attachable = requires(T& t) { attach(t); };
+template <typename T>
+concept HasCalibrate = requires(T& t) { t.calibrate(); };
+template <typename T>
+concept ReadsNoexcept = requires(const T& t) {
+    { t.read() } noexcept;
+};
+
+// 함정: 식이 성립하는가만 본다
+template <typename T>
+concept WrongIntegral = requires { std::is_integral_v<T>; };
+// 값이 참인가를 본다
+template <typename T>
+concept RightIntegral = requires { requires std::is_integral_v<T>; };
+
+int main()
+{
+    std::println("read()가 수를 돌려준다 {}", ReadsNumber<Sensor>);
+    std::println("value_type이 있다 {}", HasValueType<Sensor>);
+    std::println("정적 멤버 channels {}", HasChannels<Sensor>);
+    std::println("멤버 변수 gain {}", HasGain<Sensor>);
+    std::println("const에서 reset() {}", ResetsWhenConst<Sensor>);
+    std::println("좌측값에서 consume() {}", ConsumesLvalue<Sensor>);
+    std::println("우측값에서 consume() {}", ConsumesRvalue<Sensor>);
+    std::println("attach(t) {}", Attachable<Sensor>);
+    std::println("private인 calibrate() {}", HasCalibrate<Sensor>);
+    std::println("read()가 noexcept {}", ReadsNoexcept<Sensor>);
+    std::println("float: 틀린 콘셉트 {}, 맞는 콘셉트 {}", WrongIntegral<float>,
+                 RightIntegral<float>);
+}
+```
+
+```text
+read()가 수를 돌려준다 true
+value_type이 있다 true
+정적 멤버 channels true
+멤버 변수 gain true
+const에서 reset() false
+좌측값에서 consume() false
+우측값에서 consume() true
+attach(t) true
+private인 calibrate() false
+read()가 noexcept false
+float: 틀린 콘셉트 true, 맞는 콘셉트 false
+```
+
+`requires` 식의 괄호 안은 **가상의 변수**입니다. 그 변수의 타입이 물음의 일부입니다.
+
+| 함정 | 생기는 일 | 고치는 법 |
+| --- | --- | --- |
+| `requires { 특성_v<T>; }` | 그 식이 **쓸 수 있는 식인가**만 본다. 값이 `false`여도 통과한다 | `requires 특성_v<T>;`로 한 번 더 적거나, 콘셉트를 `= 특성_v<T>`로 정의한다 |
+| 변수를 `T t`로 받는다 | `const` 객체에서 못 부르는 함수도 통과한다 | 실제로 쓸 모양으로 받는다. `const T&`, `T&`, `T&&` |
+| `private` 멤버 | 콘셉트가 있는 자리에서 못 부르므로 거짓이다 | 뜻한 대로다. 접근 권한도 물음에 든다 |
+| `{ 식 } -> 타입;`이라고 적는다 | 문법 오류. 화살표 뒤는 콘셉트여야 한다 | `-> std::same_as<타입>`, `-> std::convertible_to<타입>` |
+
+## enable_if로는 못 하던 것
+
+SFINAE는 템플릿의 서명에서만 일어나므로 **템플릿이 아닌 멤버**에는 쓸 수 없었습니다. 소멸자와 복사 생성자가 그렇습니다. `requires` 절은 붙습니다.
+
+```cpp
+#include <print>
+#include <string>
+#include <type_traits>
+#include <utility>
+
+template <typename T>
+class Maybe {
+public:
+    Maybe() : empty_{}, has_(false) {}
+    explicit Maybe(T value) : value_(std::move(value)), has_(true) {}
+
+    // T에 소멸자 일이 없으면 Maybe에도 없다
+    ~Maybe() requires std::is_trivially_destructible_v<T> = default;
+    ~Maybe()
+    {
+        if (has_)
+            value_.~T();
+    }
+
+    bool has_value() const { return has_; }
+
+private:
+    union {
+        char empty_;
+        T value_;
+    };
+    bool has_;
+};
+
+static_assert(std::is_trivially_destructible_v<Maybe<int>>);
+static_assert(!std::is_trivially_destructible_v<Maybe<std::string>>);
+
+int main()
+{
+    Maybe<std::string> name{"sensor"};
+    Maybe<int> count;
+    std::println("{} {}", name.has_value(), count.has_value());
+}
+```
+
+```text
+true false
+```
+
+소멸자가 둘이고, 제약을 만족하는 쪽이 뽑힙니다. `Maybe<int>`는 소멸자가 하는 일이 없는 타입이 되어 [레지스터로 돌려줄 수 있고](#/read/cpp-advanced/mv-rvo), 컨테이너가 원소마다 소멸자를 부르지 않습니다. `std::optional`도 `T`의 이 성질을 물려받습니다. libstdc++ 14는 그 일을 부모 클래스를 조건에 따라 갈아 끼우는 옛 방법으로 해 두었는데, 새로 쓰는 코드는 위의 한 줄이면 됩니다.
+
+<Note>
+컴파일 시간도 재 봤습니다. 타입 8,000개에 "`size()`가 있는가"를 묻는 데 `void_t`는 0.31초, 콘셉트는 0.14초였습니다(GCC 14). 콘셉트는 타입마다 클래스 템플릿을 만들지 않기 때문입니다. 오버로드 300개 가운데 하나를 고르는 호출 300번은 `enable_if` 0.46초, `requires` 0.54초로 차이가 없었습니다. 옮기는 까닭은 속도가 아니라 읽기와 오류 메시지, 그리고 위의 소멸자 같은 일입니다.
+</Note>
+
+## 정리
+
+- "부를 수 있는가"는 서명만 보고 답한다. 조건이 본문에만 있으면 틀린 답이 나오고, 반환 타입이 `auto`면 묻는 것만으로 컴파일이 멈춘다
+- `requires` 식은 식이 성립하는지만 본다. 값이 참인지는 `requires`를 한 번 더 적어야 본다
+- `requires` 절은 소멸자와 복사 생성자에도 붙는다. 조건에 따라 "하는 일이 없는" 타입을 만들 수 있다

@@ -1,9 +1,10 @@
 /**
  * 쓴 챕터를 폴더에서 저절로 모은다.
  *
- *   book('cpp-syntax', 'C++ 문법', …, 차례, writtenIn('cpp-syntax'))
+ *   book('cpp-syntax', 'C++ 문법', …, 차례)      ← 마지막 인자를 적지 않으면 writtenIn('cpp-syntax') 다
  *
- * src/chapters/cpp-syntax/ 에 .mdx 파일을 넣기만 하면 그 챕터가 열린다. library.tsx 나 차례 파일을 고칠 필요가 없다.
+ * src/chapters/<책 id>/ 에 .mdx 파일을 넣기만 하면 그 챕터가 열린다. library.tsx 나 차례 파일을 고칠 필요가 없다.
+ * (library.tsx 에 직접 적은 책의 draft(...) 도 같은 방식으로 열린다. library.tsx 의 openWritten)
  *
  *  - 파일 이름에서 앞의 차례 번호를 뗀 것이 챕터 id 다:  03-2-types-init.mdx → types-init
  *    (번호는 폴더 안에서 파일이 차례대로 보이게 하려는 것일 뿐이다. 차례를 정하는 것은 차례 글이다)

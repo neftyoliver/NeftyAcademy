@@ -1,0 +1,211 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '둘이 나눠 쥐는 공유 상태와 그 값, 콜백 API를 future로 감싸기, 여럿이 기다리기, future가 못 하는 일';
+
+`std::async`로 일을 맡기고 `future`로 결과를 받는 법, `promise`로 값을 넣는 법은 [「future와 async」](#/read/cpp-stl/conc-future)에서 봤습니다. 여기서는 그 둘 사이에 있는 것을 들여다보고, `future`로 **할 수 있는 일의 끝**이 어디인지를 봅니다. 그 끝에서 [스레드 풀](#/read/cpp-advanced/asy-pool)과 [코루틴](#/read/cpp-advanced/co-task)이 시작합니다.
+
+## 공유 상태
+
+`promise`와 `future`는 힙에 놓인 **공유 상태** 하나를 양쪽에서 가리킵니다. 그 안에 값이 들어올 자리, 예외가 들어올 자리, "들어왔는가"와 그것을 기다리는 장치가 있습니다.
+
+| 한 번 주고받는 데 | GCC 14 | Clang 20 |
+| --- | --- | --- |
+| `sizeof(std::future<int>)` | 16 | 8 |
+| 힙 할당 | 2번, 72바이트 | 1번, 120바이트 |
+| `promise`를 만들고, 값을 넣고, `get()`하기 (한 스레드에서) | 215 ns | 110 ns |
+| `std::async(std::launch::async, …)`로 맡기고 `get()`하기 | 35 µs | 35 µs |
+
+x86-64 서버 VM에서 `-O2`로 잰 값입니다. 통로 자체는 200 ns쯤입니다. `std::async`의 35 µs는 거의 전부 [스레드를 만드는 값](#/read/cpp-advanced/thr-jthread)입니다. `future`가 느린 것이 아니라 일마다 스레드를 만드는 것이 느립니다.
+
+공유 상태는 양쪽이 모두 놓을 때 사라집니다. 그래서 `promise`를 쥔 스레드와 `future`를 쥔 스레드 가운데 어느 쪽이 먼저 끝나도 괜찮습니다. [참조로 결과 칸을 넘기는 방법](#/read/cpp-advanced/thr-args)에는 없던 성질입니다.
+
+## 콜백을 future로 감싼다
+
+`promise`를 직접 쓰는 가장 흔한 자리는 **결과를 콜백으로 알려 주는 API**를 `future`로 바꿀 때입니다.
+
+```cpp
+#include <functional>
+#include <future>
+#include <memory>
+#include <print>
+#include <stdexcept>
+#include <thread>
+#include <utility>
+#include <vector>
+
+std::vector<std::jthread> io_threads;       // 흉내 낸 입출력 스레드들
+
+// 결과를 콜백으로 알려 주는 옛 API. 콜백은 다른 스레드에서 불린다
+void read_async(int address, std::function<void(int value, bool ok)> done)
+{
+    io_threads.emplace_back([address, done = std::move(done)] {
+        if (address > 0x7f) done(0, false);
+        else done(address * 2, true);
+    });
+}
+
+// 그것을 future 로 감싼다
+std::future<int> read_future(int address)
+{
+    // std::function 은 복사되는 것만 담는다.
+    // promise 는 복사가 안 되므로 shared_ptr 에 넣는다
+    auto promise = std::make_shared<std::promise<int>>();
+    std::future<int> result = promise->get_future();
+    read_async(address, [promise](int value, bool ok) {
+        if (ok) {
+            promise->set_value(value);
+        } else {
+            auto error = std::make_exception_ptr(std::runtime_error("읽기 실패"));
+            promise->set_exception(error);
+        }
+    });
+    return result;
+}
+
+const char* name_of(const std::future_error& e)
+{
+    if (e.code() == std::future_errc::future_already_retrieved)
+        return "future_already_retrieved";
+    if (e.code() == std::future_errc::promise_already_satisfied)
+        return "promise_already_satisfied";
+    if (e.code() == std::future_errc::no_state) return "no_state";
+    return "broken_promise";
+}
+
+int main()
+{
+    std::future<int> good = read_future(0x10);
+    std::future<int> bad = read_future(0x90);
+    std::println("{}", good.get());
+    try {
+        bad.get();
+    } catch (const std::exception& e) {
+        std::println("{}", e.what());
+    }
+
+    // 한 결과를 여럿이 기다린다
+    std::promise<int> answer;
+    std::shared_future<int> shared = answer.get_future().share();
+    int seen[3] = {};
+    {
+        std::vector<std::jthread> waiters;
+        for (int i = 0; i < 3; ++i) {
+            // 스레드마다 shared_future 의 복사본을 하나씩 갖는다
+            waiters.emplace_back([shared, &seen, i] { seen[i] = shared.get(); });
+        }
+        answer.set_value(42);
+    }
+    std::println("{} {} {}", seen[0], seen[1], seen[2]);
+
+    // 잘못 쓰면 받는 오류
+    std::promise<int> p;
+    auto f = p.get_future();
+    try {
+        p.get_future();
+    } catch (const std::future_error& e) {
+        std::println("get_future 를 두 번: {}", name_of(e));
+    }
+    p.set_value(1);
+    try {
+        p.set_value(2);
+    } catch (const std::future_error& e) {
+        std::println("set_value 를 두 번: {}", name_of(e));
+    }
+    std::promise<int> moved = std::move(p);
+    try {
+        p.set_value(3);
+    } catch (const std::future_error& e) {
+        std::println("옮겨 준 promise 에: {}", name_of(e));
+    }
+    io_threads.clear();
+}
+```
+
+```text
+32
+읽기 실패
+42 42 42
+get_future 를 두 번: future_already_retrieved
+set_value 를 두 번: promise_already_satisfied
+옮겨 준 promise 에: no_state
+```
+
+`read_future`를 부르는 쪽은 콜백이 어느 스레드에서 불리는지 몰라도 됩니다. 값이든 예외든 `get()`으로 받습니다. 실패를 `set_exception`으로 넣는 것이 요점입니다. 콜백이 아무것도 넣지 않고 사라지면 기다리는 쪽은 [`broken_promise`](#/read/cpp-stl/conc-future)를 받습니다. 영원히 기다리게 되지는 않습니다.
+
+| `std::future` | `std::shared_future` |
+| --- | --- |
+| 옮길 수만 있다. 받는 쪽이 하나다 | 복사된다. 받는 쪽이 여럿이다 |
+| `get()`은 한 번. 값을 **옮겨** 준다 | `get()`은 몇 번이든. `const` 참조를 준다 |
+| `future.share()`로 바꾼다 | 스레드마다 **자기 복사본**을 쥐고 기다린다 |
+
+`shared_future` 객체 하나를 여러 스레드가 참조로 나눠 쓰는 것은 경합입니다. [`shared_ptr`](#/read/cpp-advanced/sp-shared)과 같은 규칙입니다. 복사본끼리는 안전합니다.
+
+## 여럿을 기다린다
+
+`future` 여러 개가 **모두** 끝나기를 기다리는 것은 차례로 `get()`을 부르면 됩니다. 걸리는 시간은 가장 느린 것만큼입니다. **가장 먼저 끝난 하나**를 기다리는 방법은 `future`에 없습니다. 통로를 하나로 모아야 합니다.
+
+```cpp
+#include <atomic>
+#include <chrono>
+#include <future>
+#include <memory>
+#include <print>
+#include <thread>
+#include <vector>
+
+using namespace std::chrono_literals;
+
+// 여러 곳에 묻고, 가장 먼저 온 답 하나만 받는다
+struct FirstAnswer {
+    std::promise<int> promise;
+    std::atomic<bool> taken = false;
+
+    void offer(int value)
+    {
+        // 먼저 온 하나만 값을 넣는다. set_value 를 두 번 부르면 예외가 난다
+        if (!taken.exchange(true)) promise.set_value(value);
+    }
+};
+
+int main()
+{
+    auto first = std::make_shared<FirstAnswer>();
+    std::future<int> winner = first->promise.get_future();
+    std::vector<std::jthread> servers;
+    const std::chrono::milliseconds delays[] = {30ms, 5ms, 60ms};
+    for (int id = 0; id < 3; ++id) {
+        servers.emplace_back([first, id, delay = delays[id]] {
+            std::this_thread::sleep_for(delay);     // 서버마다 걸리는 시간이 다르다
+            first->offer(id);
+        });
+    }
+    std::println("가장 먼저 답한 서버 {}", winner.get());
+}
+```
+
+```text
+가장 먼저 답한 서버 1
+```
+
+답은 5 ms 뒤에 받지만, 이 프로그램은 60 ms 뒤에 끝납니다. 진 쪽의 스레드들을 **그만두게 할 방법이 없어서** 끝까지 기다립니다.
+
+## future가 못 하는 일
+
+| 하고 싶은 일 | `std::future`에서는 | 그 일을 하는 것 |
+| --- | --- | --- |
+| 끝나면 이어서 다음 일을 한다 | 없다. `get()`으로 막고 기다려야 한다 | [코루틴](#/read/cpp-advanced/co-task), [센더](#/read/cpp-advanced/asy-execution) |
+| 여럿 가운데 먼저 끝난 것을 기다린다 | 없다. 위처럼 직접 모은다 | 센더 라이브러리의 `when_any`(C++26 초안에는 없다) |
+| 그만두게 한다 | 없다 | [`stop_token`](#/read/cpp-advanced/thr-jthread)을 일에 따로 넘긴다 |
+| 기다리지 않고 "끝났으면 알려 달라" | 없다. `wait_for(0s)`로 떠본다 | 콜백, 큐 |
+
+`future`는 **막고 기다리는** 도구입니다. 기다리는 스레드가 따로 있고 그 수가 몇 안 될 때는 가장 단순한 답입니다. 동시에 기다릴 일이 수천 개가 되면 스레드도 수천 개가 필요해지고, 거기서부터는 다른 틀이 필요합니다.
+
+<Note>
+`std::promise<void>`는 값 없이 "됐다"만 알리는 한 번짜리 신호입니다. [`std::latch`](#/read/cpp-advanced/sync-semaphore)와 쓰임이 겹치는데, 실패(`set_exception`)를 함께 알릴 수 있다는 점이 다릅니다. 신호만 필요하면 `latch`가 힙 할당 없이 4바이트로 같은 일을 합니다.
+</Note>
+
+## 정리
+
+- `promise`와 `future`는 힙의 공유 상태 하나를 나눠 쥔다. 통로는 200 ns쯤이고, `std::async`가 비싼 것은 스레드를 만들기 때문이다
+- 콜백으로 알려 주는 API는 `promise`를 콜백에 넣어 `future`로 감싼다. 실패는 `set_exception`으로 넣는다
+- `future`는 막고 기다릴 뿐이다. 이어 붙이기, 먼저 끝난 것 고르기, 그만두기는 없다

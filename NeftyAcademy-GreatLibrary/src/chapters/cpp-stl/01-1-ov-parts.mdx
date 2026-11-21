@@ -1,0 +1,202 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '세 부품과 그 사이의 약속, 알고리즘이 컨테이너를 모른다는 것, 이 책의 지도';
+
+「C++ 문법」에서는 [`vector`](#/read/cpp-syntax/ft-vector)와 `string`을 도구로 먼저 쥐고 문법을 배웠습니다. 이 책은 그 도구 상자를 전부 엽니다. 상자가 큰 만큼, 칸이 어떻게 나뉘어 있는지부터 봅니다.
+
+## 세 부품
+
+| 부품 | 하는 일 | 예 |
+| --- | --- | --- |
+| 컨테이너 | 값을 담는다 | `vector`, `map`, `string` |
+| 반복자 | 컨테이너 안의 한 자리를 가리킨다 | `v.begin()`, `v.end()` |
+| 알고리즘 | 반복자 두 개 사이에서 일한다 | `std::sort`, `std::find` |
+
+알고리즘은 컨테이너를 직접 받지 않습니다. "여기부터 저기까지"를 뜻하는 반복자 두 개를 받습니다. 그래서 같은 함수가 모든 컨테이너에서 돕니다.
+
+```cpp
+#include <algorithm>
+#include <array>
+#include <deque>
+#include <print>
+#include <vector>
+
+template <typename Range>
+void show(const char* name, const Range& r)
+{
+    std::print("{:7}", name);
+    for (const auto& x : r)
+        std::print("{} ", x);
+    std::println("");
+}
+
+int main()
+{
+    std::vector<int> v = {5, 2, 8, 1};
+    std::array<int, 4> a = {5, 2, 8, 1};
+    std::deque<int> d = {5, 2, 8, 1};
+    int c[] = {5, 2, 8, 1};
+
+    std::sort(v.begin(), v.end());          // 넷 모두 같은 std::sort
+    std::sort(a.begin(), a.end());
+    std::sort(d.begin(), d.end());
+    std::sort(std::begin(c), std::end(c));  // 배열은 포인터가 반복자다
+
+    show("vector", v);
+    show("array", a);
+    show("deque", d);
+    show("int[]", c);
+}
+```
+
+```text
+vector 1 2 5 8
+array  1 2 5 8
+deque  1 2 5 8
+int[]  1 2 5 8
+```
+
+컨테이너가 열 가지이고 알고리즘이 백 가지라면, 조합마다 함수를 만들 때는 천 개가 필요합니다. 반복자를 사이에 두면 열 개와 백 개만 있으면 됩니다. 내가 만든 컨테이너도 반복자만 내주면 백 가지 알고리즘을 그대로 씁니다.
+
+기준을 바꾸는 넷째 부품이 있습니다. [람다](#/read/cpp-syntax/fn-lambda) 같은 **부를 수 있는 것**입니다. `std::sort(v.begin(), v.end(), 비교)`처럼 "무엇이 앞인가"를 넘기면 알고리즘은 그대로이고 기준만 바뀝니다.
+
+## 반복자는 포인터를 일반화한 것
+
+위에서 C 배열에는 포인터를 그대로 넘겼습니다. 반복자는 포인터가 하는 일(`*`로 값 보기, `++`로 다음 칸, `!=`로 비교)을 흉내 내는 객체입니다. `std::find`를 손으로 써 보면 알고리즘이 반복자에게 바라는 것이 그것뿐임이 보입니다.
+
+```cpp
+#include <list>
+#include <print>
+#include <string>
+#include <vector>
+
+// std::find 를 손으로 써 본 것. 컨테이너가 무엇인지 모른다
+template <typename It, typename T>
+It my_find(It first, It last, const T& value)
+{
+    for (; first != last; ++first)      // 반복자에게 바라는 것: !=, ++, *
+        if (*first == value)
+            return first;
+    return last;                        // 못 찾으면 끝을 돌려준다
+}
+
+int main()
+{
+    std::vector<int> v = {3, 1, 4, 1, 5};
+    std::list<std::string> names = {"kim", "lee", "park"};
+
+    auto it = my_find(v.begin(), v.end(), 4);
+    if (it != v.end())
+        std::println("4는 {}번 칸에 있다", it - v.begin());
+
+    auto name = my_find(names.begin(), names.end(), "choi");
+    std::println("choi를 {}", name == names.end() ? "못 찾았다" : "찾았다");
+}
+```
+
+```text
+4는 2번 칸에 있다
+choi를 못 찾았다
+```
+
+`end()`는 마지막 칸이 아니라 **마지막 칸의 다음**입니다. 구간은 언제나 "처음은 넣고 끝은 뺀" `[first, last)`입니다. 이렇게 정하면 빈 구간은 `first == last`이고, "못 찾았다"는 `last`를 돌려주는 것으로 나타낼 수 있습니다. `end()`가 가리키는 곳에는 값이 없으므로 `*v.end()`는 정의되지 않은 동작입니다.
+
+## 알고리즘은 컨테이너를 모른다
+
+반복자만 받는다는 설계에는 값이 따릅니다. 알고리즘은 칸의 **내용**을 바꿀 수 있지만 칸의 **개수**는 바꾸지 못합니다. 개수를 바꾸는 것은 컨테이너의 멤버 함수만 할 수 있습니다.
+
+```cpp
+#include <algorithm>
+#include <print>
+#include <vector>
+
+int main()
+{
+    std::vector<int> v = {1, 0, 2, 0, 3};
+
+    auto new_end = std::remove(v.begin(), v.end(), 0);  // 0 아닌 것을 앞으로 모은다
+    std::println("remove 뒤 size {}", v.size());         // 칸 수는 그대로다
+    std::println("남길 것은 앞의 {}칸", new_end - v.begin());
+
+    v.erase(new_end, v.end());                          // 지우는 것은 컨테이너의 일
+    std::println("erase 뒤 size {}", v.size());
+
+    std::vector<int> w = {1, 0, 2, 0, 3};
+    auto removed = std::erase(w, 0);                    // C++20: 둘을 한 번에
+    std::println("std::erase가 지운 개수 {}, 남은 size {}", removed, w.size());
+}
+```
+
+```text
+remove 뒤 size 5
+남길 것은 앞의 3칸
+erase 뒤 size 3
+std::erase가 지운 개수 2, 남은 size 3
+```
+
+`std::remove`라는 이름을 보고 지워졌다고 믿는 것이 이 라이브러리에서 가장 유명한 실수입니다. [「복사, 변형, 지우기」](#/read/cpp-stl/alg-modify)에서 다시 봅니다.
+
+<Note>
+모든 알고리즘이 모든 컨테이너에서 도는 것은 아닙니다. `std::sort`는 "몇 칸 건너뛰기"가 되는 반복자를 요구해서 `std::list`에는 쓸 수 없고, `list`는 자기만의 `sort()` 멤버를 따로 가집니다. 반복자가 할 수 있는 일의 등급은 [「반복자의 범주」](#/read/cpp-stl/it-category)에서 다룹니다.
+</Note>
+
+## 레인지: 같은 구조의 새 얼굴
+
+C++20의 레인지 알고리즘은 반복자 한 쌍 대신 컨테이너를 통째로 받습니다. 속은 여전히 반복자이지만 `v.begin(), v.end()`를 되풀이해 적지 않아도 됩니다.
+
+```cpp
+#include <algorithm>
+#include <print>
+#include <string>
+#include <vector>
+
+struct Sensor {
+    std::string name;
+    double value;
+};
+
+int main()
+{
+    std::vector<Sensor> sensors = {
+        {"temp", 23.5},
+        {"humid", 41.0},
+        {"press", 1013.2},
+    };
+
+    // 반복자 한 쌍 대신 컨테이너를 통째로, 비교 기준은 "멤버 하나"로
+    std::ranges::sort(sensors, {}, &Sensor::name);
+    for (const auto& s : sensors)
+        std::println("{:6} {}", s.name, s.value);
+
+    auto it = std::ranges::find(sensors, "temp", &Sensor::name);
+    std::println("temp는 정렬 뒤 {}번", it - sensors.begin());
+}
+```
+
+```text
+humid  41
+press  1013.2
+temp   23.5
+temp는 정렬 뒤 2번
+```
+
+셋째 인자 `&Sensor::name`은 "비교하기 전에 이 멤버를 꺼내라"는 뜻이고 프로젝션이라고 부릅니다. 새로 쓰는 코드에서는 `std::ranges::` 쪽을 먼저 씁니다. [「레인지 알고리즘과 프로젝션」](#/read/cpp-stl/rng-algorithms)에서 자세히 봅니다.
+
+## STL이라는 이름과 이 책의 범위
+
+STL(Standard Template Library)은 원래 알렉산더 스테파노프와 멩 리가 HP에서 만든 라이브러리의 이름이고, 1994년에 표준 초안에 받아들여졌습니다. 컨테이너, 반복자, 알고리즘이 그 내용입니다. 지금은 문자열, 입출력, 시간까지 넣어 "C++ 표준 라이브러리 전체"를 STL이라고 부르는 사람이 많고, 이 책의 제목도 그 넓은 뜻입니다.
+
+| 장 | 다루는 것 |
+| --- | --- |
+| 2–5 | 담는 것: 문자열, 순차·연관 컨테이너, 어댑터 |
+| 6–8 | 가리키고 도는 것: 반복자, 알고리즘, 레인지 |
+| 9–10 | 값 하나를 감싸는 것: `optional`, `variant`, 스마트 포인터 |
+| 11–13 | 바깥과 통하는 것: 입출력, 파일 시스템, 시간 |
+| 14–17 | 수, 오류, 동시성 맛보기, 타입 도구 |
+| 18 | 구현을 들여다보기 |
+
+## 정리
+
+- 컨테이너는 담고, 반복자는 가리키고, 알고리즘은 반복자 두 개 사이 `[first, last)`에서 일한다
+- 알고리즘은 칸의 내용만 바꾼다. 칸의 개수를 바꾸는 것은 컨테이너의 멤버 함수다
+- 레인지 알고리즘은 같은 구조에 컨테이너를 통째로 받는 얼굴을 씌운 것이다

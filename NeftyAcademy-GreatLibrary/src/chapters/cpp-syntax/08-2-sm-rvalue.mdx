@@ -89,7 +89,7 @@ void store(std::string&& s)
 xvalue와 prvalue를 합쳐 rvalue라고 부릅니다.
 
 <Note>
-템플릿에서 `T&&`는 뜻이 다릅니다. `template <typename T> void f(T&& x)`의 `T&&`는 좌측값과 우측값을 모두 받는 "전달 참조"입니다. `auto&&`도 그렇습니다. 타입이 추론되는 자리의 `&&`만 그렇고, `std::string&&`처럼 타입이 정해져 있으면 언제나 우측값 참조입니다. 고급 책의 완벽 전달에서 다룹니다.
+템플릿에서 `T&&`는 뜻이 다릅니다. `template <typename T> void f(T&& x)`의 `T&&`는 좌측값과 우측값을 모두 받는 "전달 참조"입니다. `auto&&`도 그렇습니다. 타입이 추론되는 자리의 `&&`만 그렇고, `std::string&&`처럼 타입이 정해져 있으면 언제나 우측값 참조입니다. 고급 책의 [「보편 참조와 완벽 전달」](#/read/cpp-advanced/mv-forwarding)에서 다룹니다.
 </Note>
 
 ## 정리

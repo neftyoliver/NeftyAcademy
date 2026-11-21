@@ -63,3 +63,40 @@
 .perm-line { fill: none; stroke: var(--node); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 .perm-label { font-size: 14px; fill: currentColor; }
 .perm-mono { font-family: var(--bf-mono); font-weight: 700; }
+
+/* ---------- 그림 여럿이 함께 쓰는 값 칸 ---------- */
+.fig-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.fig-stats-3 { grid-template-columns: repeat(3, 1fr); }
+.fig-stats div { padding: 8px 10px; border: 1px solid var(--bf-line); border-radius: 9px; text-align: center; }
+.fig-stats small { display: block; color: var(--bf-muted); font-size: 12px; }
+.fig-stats b { font-family: var(--bf-mono); font-size: 18px; }
+
+/* ---------- 튜링 기계 (TuringStepper.tsx) ---------- */
+.tm { display: grid; gap: 12px; font-size: 15px; }
+.tm-tape { display: flex; justify-content: center; gap: 4px; padding-bottom: 16px; }
+.tm-cell {
+  position: relative;
+  width: 36px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border: 1.5px solid var(--bf-line);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--node) 7%, transparent);
+  font-family: var(--bf-mono);
+  font-size: 19px;
+}
+.tm-cell.is-head { border-color: var(--node); background: color-mix(in srgb, var(--node) 24%, transparent); }
+.tm-cell.is-head::after { content: '▲'; position: absolute; top: 100%; margin-top: 1px; color: var(--node); font-size: 11px; }
+.tm-rules { display: grid; grid-template-columns: repeat(5, auto); justify-content: center; font-size: 14px; }
+.tm-rule { display: contents; }
+.tm-rule span { padding: 3px 12px; text-align: center; }
+.tm-rule-head span { border-bottom: 1px solid var(--bf-line); color: var(--bf-muted); font-size: 12.5px; }
+.tm-rule.is-on span { background: color-mix(in srgb, var(--node) 22%, transparent); }
+.tm-rule.is-on span:first-child { border-radius: 7px 0 0 7px; }
+.tm-rule.is-on span:last-child { border-radius: 0 7px 7px 0; }
+@media (max-width: 560px) {
+  .tm-cell { width: 32px; height: 36px; font-size: 17px; }
+  .tm-rules { font-size: 13px; }
+  .tm-rule span { padding: 3px 6px; }
+}

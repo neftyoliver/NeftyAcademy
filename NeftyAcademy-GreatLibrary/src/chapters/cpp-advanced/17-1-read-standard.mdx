@@ -1,0 +1,118 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '표준 문서를 구하는 곳과 짜임, 일곱 낱말의 뜻, 라이브러리 설명의 꼴을 컴파일러의 반응과 맞춰 읽는다';
+
+이 책은 여러 번 "표준이 그렇게 정했다"고 말했습니다. 그 말을 직접 확인하는 법을 봅니다. 표준은 설명서가 아닙니다. 컴파일러와 라이브러리가 지켜야 할 것을 적은 계약서에 가깝고, 그래서 읽는 법이 따로 있습니다.
+
+## 어디서 구하나
+
+정식 문서는 ISO가 팝니다. 지금의 표준인 C++23은 2024년 10월에 ISO/IEC 14882:2024로 나왔습니다. 위원회가 손보는 **작업 초안**은 공개돼 있고, 표준마다 내용이 거의 같은 초안이 있습니다.
+
+| 표준 | 가장 가까운 초안 |
+| --- | --- |
+| C++11 | N3337 |
+| C++14 | N4140 |
+| C++17 | N4659 |
+| C++20 | N4861 |
+| C++23 | N4950 |
+| C++26 ([승인 전](#/read/cpp-syntax/ver-26)) | N5050 |
+
+초안의 LaTeX 소스는 GitHub의 `cplusplus/draft`에 있고, 지금의 초안을 웹 페이지로 만든 것이 `eel.is/c++draft`입니다. 웹의 것은 **계속 움직입니다.** C++23의 규칙을 확인할 때 지금의 초안을 보면 C++26의 글을 읽게 됩니다. 이 페이지의 숫자는 N5050의 소스를 내려받아 센 것입니다.
+
+## 짜임
+
+N5050은 소스로 27만 7천 줄이고 절이 3,444개입니다.
+
+| 절 | 내용 |
+| --- | --- |
+| 1~4 | 범위, 참조 문서, 용어의 정의, 일반 원칙 |
+| 5~15 | 언어. 어휘, 기초, 식, 문장, 선언, 모듈, 클래스, 오버로딩, 템플릿, 예외, 전처리 |
+| 16 | 라이브러리 소개. **라이브러리 절을 읽는 규칙**이 여기 있다 |
+| 17~33 | 라이브러리. 언어 지원에서 컨테이너, 알고리즘, 스레드, 실행 제어까지 |
+| 부속서 | 문법 요약, 구현의 한계, 이전 표준이나 C와 달라진 것, 없어질 기능 |
+
+- **절은 번호가 아니라 이름으로 가리킵니다.** 번호는 판마다 밀리지만 `[basic.life]` 같은 이름은 그대로입니다. `[basic.life]/5`는 그 절의 다섯째 문단이고, 주소창에 `wg21.link/basic.life`를 치면 그 절이 열립니다.
+- **주석과 예는 규칙이 아닙니다.** Note가 2,062개, Example이 1,279개 있는데 이해를 돕는 글일 뿐이고, 본문과 어긋나면 본문이 옳습니다.
+
+## 낱말
+
+표준의 낱말은 뜻이 정해져 있습니다. 옆의 수는 초안의 소스에서 센 횟수입니다.
+
+| 낱말 | 뜻 | 횟수 |
+| --- | --- | --- |
+| shall | 지켜야 한다는 요구. 프로그램이 어기면 따로 적혀 있지 않은 한 ill-formed다 | 1,552 |
+| ill-formed | 틀린 프로그램. 구현은 진단을 내야 한다 | 708 |
+| no diagnostic required | 틀렸지만 알려 주지 않아도 된다. [ODR 위반](#/read/cpp-syntax/fn-inline)이 그렇다 | 70 |
+| undefined behavior | 표준이 아무것도 요구하지 않는다 | 150 |
+| unspecified | 구현마다 다를 수 있고 문서로 밝힐 필요도 없다. 인자를 평가하는 순서 | 457 |
+| implementation-defined | 구현이 정하고 **문서에 적어야 한다.** `int`의 크기 | 362 |
+| erroneous behavior | C++26 초안의 새 등급. 틀렸지만 동작은 정해져 있다 | 20 |
+
+"정의되지 않은 동작"이라는 결론이 나오면 표준은 거기서 끝납니다. 그 뒤에 내 컴파일러가 무엇을 하는지는 [컴파일러에게 물어야](#/read/cpp-advanced/read-reference) 합니다.
+
+## 라이브러리 설명의 꼴
+
+라이브러리 절은 함수마다 정해진 이름의 항목으로 적습니다. `span`의 `first`가 좋은 예입니다.
+
+```text nocheck
+template<size_t Count> constexpr span<element_type, Count> first() const;
+
+  Mandates: Count <= Extent is true.
+  Hardened preconditions: Count <= size() is true.
+  Effects: Equivalent to: return R(data(), Count); where R is the return type.
+```
+
+항목의 이름마다 어겼을 때의 일이 다릅니다. 하나씩 어겨 봤습니다.
+
+| 항목 | 어기면 | 실제로 본 것 |
+| --- | --- | --- |
+| Constraints | 그 함수가 후보에서 조용히 빠진다 | `ranges::sort`에 `list`를 주자 `no match for call`, `constraints not satisfied` |
+| Mandates | 프로그램이 ill-formed다 | `span<int, 3>`에 `first<4>()`를 쓰자 `static assertion failed` |
+| Preconditions | 정의되지 않은 동작 | 진단이 없다 |
+| Hardened preconditions | [경화된 구현](#/read/cpp-advanced/safe-hardening)에서는 끝낸다 | 길이가 3인 `span`의 `first<4>()`가 `4`를 찍었고, 단언을 켜자 멈췄다 |
+| Throws | 적힌 예외가 나온다 | 빈 `optional`의 `value()` |
+
+그 밖에 Effects(하는 일), Returns(돌려주는 값), Complexity(드는 수고), Remarks가 있습니다. Effects의 "Equivalent to"는 적힌 코드와 똑같이 동작한다는 뜻이고, 그 코드가 부르는 함수의 조건까지 함께 따라옵니다.
+
+선언도 읽을 거리입니다. 위의 `first`는 `span<element_type, Count>`를 돌려줍니다. 길이가 타입에 들어간다는 뜻입니다.
+
+```cpp
+#include <print>
+#include <span>
+#include <vector>
+
+int main()
+{
+    std::vector<int> v{1, 2, 3};
+    const std::span<int> all{v};                // 길이를 객체가 들고 있다
+    const auto head = all.first<2>();           // span<int, 2>. 길이가 타입에 있다
+    std::println("{} {}", sizeof(all), sizeof(head));
+    std::println("{}", head.size());
+}
+```
+
+```text
+16 8
+2
+```
+
+## 문서의 번호
+
+| 꼴 | 뜻 |
+| --- | --- |
+| N5050 | 위원회 문서. 작업 초안도, 회의록도 N 번호를 받는다 |
+| P2900R14 | 제안서와 그 개정 번호. [계약](#/read/cpp-advanced/safe-contracts)이 P2900이다 |
+| CWG, LWG 뒤의 번호 | 언어와 라이브러리의 문제 보고. 표준의 버그와 그것을 고친 기록이다 |
+| `__cpp_lib_span 202311L` | 기능 시험 매크로. 값은 그 기능이 초안에 들어간 해와 달이다 |
+
+컴파일러의 오류 메시지나 [cppreference](#/read/cpp-advanced/read-reference)에 이 번호가 나오면 `wg21.link/p2900`처럼 번호를 붙여 원문을 엽니다. 어떤 규칙이 왜 그렇게 됐는지는 제안서에 적혀 있습니다. 표준에는 까닭이 없습니다.
+
+<Note>
+표준을 처음부터 읽는 사람은 없습니다. 질문을 하나 들고 그 절로 가서, 모르는 용어를 정의한 절로 한 번 더 가는 식으로 읽습니다. 16절의 "라이브러리 절을 읽는 규칙"만은 미리 한 번 읽어 둘 만합니다. 위의 항목들이 거기 정의돼 있습니다.
+</Note>
+
+## 정리
+
+- 표준과 거의 같은 작업 초안이 공개돼 있다. 절은 `[basic.life]/5`처럼 이름과 문단으로 가리키고, 웹의 초안은 다음 표준 쪽으로 계속 움직인다
+- ill-formed, undefined, unspecified, implementation-defined는 서로 다른 약속이다. 정의되지 않은 동작에서 표준은 끝나고 그 뒤는 구현에 물어야 한다
+- 라이브러리 함수는 Constraints, Mandates, Preconditions 같은 항목으로 적힌다. 항목마다 어겼을 때의 일이 후보에서 빠지기, 컴파일 오류, 정의되지 않은 동작으로 다르다

@@ -1,0 +1,175 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '일꾼과 줄 하나로 만드는 풀, 일을 모아야 이득인 까닭, 풀 안에서 기다리는 교착';
+
+[일마다 스레드를 만드는 값](#/read/cpp-advanced/asy-async)을 없애는 방법은 스레드를 **미리 만들어 두고 다시 쓰는** 것입니다. 일꾼 몇이 [줄 하나](#/read/cpp-stl/conc-mutex)에서 일을 꺼내 돌립니다. 지금까지 본 부품들을 맞추면 백 줄이 안 됩니다.
+
+## 풀을 만든다
+
+```cpp
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <future>
+#include <mutex>
+#include <print>
+#include <string>
+#include <stdexcept>
+#include <stop_token>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+class ThreadPool {
+public:
+    explicit ThreadPool(unsigned count)
+    {
+        for (unsigned i = 0; i < count; ++i)
+            workers_.emplace_back([this](std::stop_token stop) { work(stop); });
+    }
+
+    ~ThreadPool()
+    {
+        // 모두에게 한꺼번에 알린다
+        for (auto& worker : workers_) worker.request_stop();
+    }   // 그 뒤 workers_ 가 사라지며 하나씩 join 한다
+
+    // 일을 줄에 세우고, 결과를 받을 future 를 돌려준다
+    template <typename F, typename... Args>
+    auto submit(F&& f, Args&&... args)
+    {
+        using Result = std::invoke_result_t<F, Args...>;
+        // 함수와 인자를 값으로 잡아 둔다. 나중에 일꾼의 스레드에서 불린다
+        auto bound = [f = std::forward<F>(f),
+                      ... args = std::forward<Args>(args)]() mutable {
+            return std::invoke(std::move(f), std::move(args)...);
+        };
+        std::packaged_task<Result()> task(std::move(bound));
+        std::future<Result> result = task.get_future();
+        {
+            std::lock_guard lock(guard_);
+            tasks_.emplace_back(std::move(task));
+        }
+        ready_.notify_one();
+        return result;
+    }
+
+private:
+    void work(std::stop_token stop)
+    {
+        while (true) {
+            std::move_only_function<void()> task;
+            {
+                std::unique_lock lock(guard_);
+                // 일이 생기거나 멈춤 신호가 올 때까지 잔다.
+                // 멈춤 신호가 와도 남은 일이 있으면 마저 한다
+                auto has_task = [this] { return !tasks_.empty(); };
+                if (!ready_.wait(lock, stop, has_task)) return;
+                task = std::move(tasks_.front());
+                tasks_.pop_front();
+            }
+            // 잠금 밖에서 돌린다. 예외는 packaged_task 가 future 로 보낸다
+            task();
+        }
+    }
+
+    std::mutex guard_;                                  // tasks_ 를 지킨다
+    std::condition_variable_any ready_;
+    std::deque<std::move_only_function<void()>> tasks_;
+    // 맨 뒤에 둔다: 가장 먼저 사라진다
+    std::vector<std::jthread> workers_;
+};
+
+int square(int x) { return x * x; }
+
+int main()
+{
+    using namespace std::chrono_literals;
+    {
+        ThreadPool pool(2);
+        std::future<int> a = pool.submit(square, 7);
+        std::future<std::string> b =
+            pool.submit([](std::string s) { return s + "!"; }, std::string("done"));
+        std::future<int> c =
+            pool.submit([]() -> int { throw std::runtime_error("일이 실패했다"); });
+        int squared = a.get();
+        std::println("{} {}", squared, b.get());
+        try {
+            c.get();
+        } catch (const std::exception& e) {
+            std::println("{}", e.what());
+        }
+
+        std::vector<std::future<int>> results;
+        for (int i = 1; i <= 100; ++i) results.push_back(pool.submit(square, i));
+        long sum = 0;
+        for (auto& result : results) sum += result.get();
+        std::println("1부터 100까지의 제곱의 합 {}", sum);
+    }
+
+    // 일꾼이 하나뿐인 풀에서, 일이 다른 일을 맡기고 기다리면
+    ThreadPool small(1);
+    std::future<bool> outer = small.submit([&small] {
+        std::future<int> inner = small.submit(square, 3);
+        return inner.wait_for(50ms) == std::future_status::ready;
+    });
+    std::println("안쪽 일이 시간 안에 끝났나: {}", outer.get());
+}
+```
+
+```text
+49 done!
+일이 실패했다
+1부터 100까지의 제곱의 합 338350
+안쪽 일이 시간 안에 끝났나: false
+```
+
+| 부품 | 맡은 일 | 다룬 곳 |
+| --- | --- | --- |
+| `std::jthread` 여럿 | 줄에서 꺼내 돌리는 일꾼 | [「thread, jthread, stop_token」](#/read/cpp-advanced/thr-jthread) |
+| `std::mutex`와 `std::deque` | 일이 서는 줄 | [「조건 변수」](#/read/cpp-advanced/sync-condvar) |
+| 토큰을 받는 `wait` | 일이 없으면 자고, 멈춤 신호에 깨어난다. 남은 일은 마저 한다 | 같은 곳 |
+| `std::packaged_task` | 일과 `future`를 묶는다. 예외도 `future`로 보낸다 | [「std::async와 packaged_task」](#/read/cpp-advanced/asy-async) |
+| `std::move_only_function<void()>` | 반환 타입이 다른 일들을 한 줄에 세운다 | 같은 곳 |
+
+`submit`의 람다가 인자를 **값으로** 잡는 것을 눈여겨봅니다(`... args = std::forward<Args>(args)`). 일은 나중에 다른 스레드에서 돌므로, [스레드에 인자를 넘길 때](#/read/cpp-advanced/thr-args)와 같은 까닭으로 복사하거나 옮겨서 가져갑니다. 참조로 넘기려면 부르는 쪽이 `std::ref`를 적습니다.
+
+멤버의 순서도 뜻이 있습니다. `workers_`가 [맨 뒤에 있어](#/read/cpp-advanced/res-ownership) 가장 먼저 사라지고, 일꾼이 모두 끝난 뒤에야 줄과 뮤텍스가 사라집니다. 소멸자는 멈춤 신호만 보내고, 줄에 남은 일은 일꾼들이 **다 하고** 끝납니다. 남은 일을 버리고 싶으면 소멸자에서 줄을 먼저 비웁니다. 그때 버려진 일의 `future`는 `broken_promise`를 받습니다.
+
+## 일을 모아야 이득이다
+
+| 작은 일(제곱 하나) 10만 개 | 일 하나에 |
+| --- | --- |
+| 풀: 하나 맡기고 바로 `get()`으로 기다리기를 되풀이 | 24 µs |
+| 풀: 모두 맡긴 뒤에 모두 받는다 | 0.8~1.5 µs |
+| `std::async`: 모두 맡긴 뒤에 모두 받는다 | 30 µs |
+
+x86-64 서버 VM(코어 2개), GCC 14 `-O2`에서 잰 값입니다. 일꾼 수를 1, 2, 4로 바꿔도 거의 같았습니다.
+
+첫 줄이 중요합니다. 풀을 써도 **하나 맡기고 기다리면** `std::async`와 다를 것이 없습니다. 맡길 때 자던 일꾼을 깨우고, 받을 때 자던 내가 깨어나는 데 [12 µs씩](#/read/cpp-advanced/sync-mutex) 듭니다. 스레드를 만드는 값을 없앴더니 깨우는 값이 그 자리를 차지한 것입니다. 일을 **몰아서 맡기면** 일꾼이 잠들 틈 없이 다음 일을 꺼내므로 일 하나의 값이 1 µs 안팎으로 내려갑니다.
+
+그 1 µs도 제곱 하나에 비하면 천 배입니다. 풀에 넣을 일은 **적어도 수십 µs는 걸리는 덩어리**여야 하고, 작은 일은 수백 개씩 묶어 한 덩어리로 맡깁니다. [병렬 알고리즘](#/read/cpp-stl/alg-parallel)이 범위를 큼직하게 잘라 나눠 주는 것도 이 때문입니다.
+
+## 풀 안에서 기다리지 않는다
+
+예제의 마지막 부분이 풀의 대표적인 함정입니다. 일꾼이 하나뿐인 풀에서 일(`outer`)이 다른 일(`inner`)을 맡기고 그 결과를 기다립니다. `inner`를 돌릴 일꾼은 지금 `outer`를 돌리며 기다리는 바로 그 일꾼입니다. 예제는 50 ms만 기다리게 해서 `false`를 받았지만, `get()`이었다면 영원히 멈춥니다. 일꾼이 여덟이어도 여덟 개의 일이 동시에 그러면 같은 일이 일어납니다.
+
+| 함정 | 생기는 일 | 피하는 법 |
+| --- | --- | --- |
+| 풀의 일이 같은 풀에 맡긴 일을 기다린다 | 일꾼이 모두 기다리는 데 묶인다 | 나눈 일은 맡기고 **돌아온다**. 결과를 모으는 일은 풀 밖의 스레드가 한다 |
+| 일이 파일이나 네트워크를 오래 기다린다 | 계산할 일꾼이 남지 않는다 | 기다리는 일은 [다른 풀이나 스레드](#/read/cpp-advanced/thr-hardware)로 보낸다 |
+| `future`를 받지 않고 버린다 | 예외가 조용히 사라진다 | `future`를 확인하거나, 일 안에서 잡아 기록한다 |
+| 일꾼의 `thread_local` | [앞 일의 값이 남아 있다](#/read/cpp-advanced/thr-local) | 일의 첫머리에서 초기화한다 |
+| 줄에 끝이 없다 | 맡기는 쪽이 빠르면 메모리가 는다 | [길이에 끝을 둔다](#/read/cpp-advanced/sync-condvar) |
+
+<Note>
+이 풀은 줄이 하나라서 일꾼들이 같은 뮤텍스를 다툽니다. 일꾼이 많고 일이 아주 잘게 쪼개지는 프로그램에서는 일꾼마다 자기 줄을 두고, 자기 줄이 비면 남의 줄에서 가져오는 방식(작업 훔치기)을 씁니다. 그것은 직접 만들 것이 아니라 라이브러리의 일입니다. 인텔의 oneTBB가 그렇고, C++26의 [`std::execution`](#/read/cpp-advanced/asy-execution)이 표준의 틀을 줍니다.
+</Note>
+
+## 정리
+
+- 스레드 풀은 `jthread` 여럿, 줄 하나, 조건 변수 하나다. `packaged_task`가 결과와 예외를 `future`로 보낸다
+- 일을 하나씩 맡기고 기다리면 깨우는 값 때문에 이득이 없다. 큼직한 덩어리로, 몰아서 맡긴다
+- 풀의 일이 같은 풀의 다른 일을 기다리면 멈춘다. 일은 맡기고 돌아오게 짠다
