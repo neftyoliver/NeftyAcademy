@@ -1,0 +1,224 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '파이프라인 캐시: 컴파일 결과를 파일에 두고 다음 실행에 쓰기, 파일 검사, 캐시에 든 것만 만들기';
+
+파이프라인을 만들 때 드라이버는 셰이더를 GPU의 기계어로 컴파일하고, 여기에 시간이 많이 듭니다. **파이프라인 캐시**(`VkPipelineCache`)는 드라이버가 그 결과를 담아 두는 객체입니다. 파이프라인을 만드는 함수에 넘기면 드라이버가 캐시를 먼저 찾아보고, 없을 때만 컴파일해서 넣어 둡니다. 담긴 것은 바이트로 꺼내 파일에 두었다가 다음 실행에 다시 넣을 수 있습니다. 아래 프로그램은 두 번 실행한 셈 치고 그 과정을 밟은 다음, 쓰면 안 되는 파일 세 가지를 가려 봅니다.
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp,vkx_resource.hpp,vkx_bind.hpp,vkx_pipeline.hpp
+#include <filesystem>
+#include <fstream>
+#include "vkx_bind.hpp"
+#include "vkx_pipeline.hpp"
+
+namespace fs = std::filesystem;
+using Blob = std::vector<char>;
+
+// 특수화 상수의 값마다 다른 파이프라인이 되는 컴퓨트 셰이더
+const char* CS = R"(#version 450
+layout(local_size_x = 64) in;
+layout(constant_id = 0) const int ROUNDS = 1;
+layout(set = 0, binding = 0) buffer Data { float v[]; };
+void main() {
+    float x = v[gl_GlobalInvocationID.x];
+    for (int i = 0; i < ROUNDS; ++i) x = sin(x) * 1.5 + cos(x * 0.5);
+    v[gl_GlobalInvocationID.x] = x;
+})";
+
+// 앱이 캐시 데이터 앞에 붙이는 머리말. 드라이버가 쓰는 헤더에는 길이도
+// 검사합도 없어서, 파일이 온전한지는 앱이 가려야 한다
+struct FileHeader {
+    uint32_t magic = 0x43504B56, bytes = 0;     // 표식 "VKPC", 캐시 데이터의 길이
+    uint64_t hash = 0;                          // 캐시 데이터의 FNV-1a 해시
+    uint32_t driver = 0, abi = sizeof(void*);   // 드라이버 버전, 포인터의 크기
+};
+
+uint64_t fnv1a(const char* p, size_t n) {
+    uint64_t h = 14695981039346656037ull;
+    for (size_t i = 0; i < n; ++i) h = (h ^ uint8_t(p[i])) * 1099511628211ull;
+    return h;
+}
+
+Blob pack(const Blob& cache, const VkPhysicalDeviceProperties& gpu) {
+    FileHeader f;
+    f.bytes = uint32_t(cache.size());
+    f.hash = fnv1a(cache.data(), cache.size());
+    f.driver = gpu.driverVersion;
+    Blob file(sizeof f + cache.size());
+    std::memcpy(file.data(), &f, sizeof f);
+    std::memcpy(file.data() + sizeof f, cache.data(), cache.size());
+    return file;
+}
+
+// 쓸 수 없는 파일이면 까닭을, 쓸 수 있으면 nullptr를 돌려준다
+const char* reject(const Blob& file, const VkPhysicalDeviceProperties& gpu) {
+    FileHeader f, expect;
+    VkPipelineCacheHeaderVersionOne h;   // 드라이버가 데이터 맨 앞에 쓰는 32바이트
+    if (file.size() < sizeof f) return "없거나 너무 짧음";
+    std::memcpy(&f, file.data(), sizeof f);
+    const char* cache = file.data() + sizeof f;
+    if (f.magic != expect.magic || f.bytes != file.size() - sizeof f ||
+        f.bytes < sizeof h)
+        return "길이가 맞지 않음";
+    if (f.hash != fnv1a(cache, f.bytes)) return "내용이 망가짐";
+    std::memcpy(&h, cache, sizeof h);
+    if (f.driver != gpu.driverVersion || f.abi != expect.abi ||
+        h.headerSize != sizeof h ||
+        h.headerVersion != VK_PIPELINE_CACHE_HEADER_VERSION_ONE ||
+        h.vendorID != gpu.vendorID || h.deviceID != gpu.deviceID ||
+        std::memcmp(h.pipelineCacheUUID, gpu.pipelineCacheUUID, VK_UUID_SIZE))
+        return "다른 장치나 다른 드라이버의 것";
+    return nullptr;
+}
+
+Blob read_file(const fs::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    return Blob(std::istreambuf_iterator<char>(in), {});
+}
+
+// 임시 파일에 다 쓴 다음 이름을 바꾼다. 쓰는 도중에 꺼져도 예전 파일이 남는다
+void write_file(const fs::path& path, const Blob& file) {
+    fs::path tmp = path;
+    tmp += ".tmp";
+    std::ofstream(tmp, std::ios::binary)
+        .write(file.data(), std::streamsize(file.size()));
+    fs::rename(tmp, path);
+}
+
+struct Tally { int made = 0, hits = 0, waiting = 0; };
+
+// 특수화 값 1, 2, 3으로 파이프라인 셋을 만들어 본다.
+// cache_only면 컴파일이 필요한 것은 만들지 않고 돌아온다
+Tally build(const vkx::Device& dev, VkPipelineCache cache, VkShaderModule cs,
+            VkPipelineLayout layout, bool cache_only) {
+    Tally t;
+    const auto HIT =
+        VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT;
+    VkPipelineCreateFlags flags = 0;
+    if (cache_only)
+        flags |= VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT;
+    for (int rounds = 1; rounds <= 3; ++rounds) {
+        VkSpecializationMapEntry entry{0, 0, sizeof rounds};
+        VkSpecializationInfo spec{1, &entry, sizeof rounds, &rounds};
+        VkPipelineCreationFeedback whole{}, stage{};   // 드라이버가 채워 주는 보고
+        VkPipelineCreationFeedbackCreateInfo feedback{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO,
+            .pPipelineCreationFeedback = &whole,
+            .pipelineStageCreationFeedbackCount = 1,
+            .pPipelineStageCreationFeedbacks = &stage};
+        VkComputePipelineCreateInfo ci{
+            .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .pNext = &feedback, .flags = flags,
+            .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                      .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = cs,
+                      .pName = "main", .pSpecializationInfo = &spec},
+            .layout = layout};
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        VkResult r =   // 둘째 인자가 캐시다. 찾아보고, 없으면 컴파일해서 넣는다
+            vkCreateComputePipelines(dev.handle, cache, 1, &ci, nullptr, &pipeline);
+        if (r == VK_PIPELINE_COMPILE_REQUIRED) { ++t.waiting; continue; }
+        vkx::check(r, "컴퓨트 파이프라인");
+        ++t.made;
+        if (whole.flags & HIT) ++t.hits;
+        vkDestroyPipeline(dev.handle, pipeline, nullptr);
+    }
+    return t;
+}
+
+int main() {
+    vkx::Instance inst = vkx::make_instance();
+    vkx::Device dev = vkx::make_device(inst.handle);
+    vkx::Bindings set =
+        vkx::make_bindings(dev, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER});
+    VkPipelineLayout layout = vkx::make_layout(dev, {set.layout});
+    VkShaderModule cs =
+        vkx::make_shader(dev, vkx::compile(CS, shaderc_compute_shader));
+    // 실제 앱은 사용자별 캐시 폴더에 둔다
+    const fs::path path = fs::temp_directory_path() / "nefty_pipeline.cache";
+    fs::remove(path);   // 처음 실행하는 것으로 친다
+
+    Blob data;
+    for (int run = 1; run <= 2; ++run) {   // 프로그램을 두 번 실행한 셈이다
+        Blob file = read_file(path);
+        const char* why = reject(file, dev.props);
+        std::printf("[실행 %d] 파일 %zu바이트: %s\n", run, file.size(),
+                    why ? why : "쓸 수 있음, 캐시에 넣고 시작");
+        VkPipelineCacheCreateInfo cci{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+        if (!why) {
+            cci.initialDataSize = file.size() - sizeof(FileHeader);
+            cci.pInitialData = file.data() + sizeof(FileHeader);
+        }
+        VkPipelineCache cache;
+        vkx::check(vkCreatePipelineCache(dev.handle, &cci, nullptr, &cache),
+                   "파이프라인 캐시");
+
+        Tally quick = build(dev, cache, cs, layout, true);
+        Tally full = build(dev, cache, cs, layout, false);
+        std::printf("  캐시에 든 것만: %d개 만듦, %d개는 컴파일이 필요\n",
+                    quick.made, quick.waiting);
+        std::printf("  컴파일을 허락: %d개 만듦, 그중 캐시 적중 %d개\n",
+                    full.made, full.hits);
+
+        size_t size = 0;   // 크기를 먼저 묻고, 그만큼 받는다
+        vkGetPipelineCacheData(dev.handle, cache, &size, nullptr);
+        data.resize(size);
+        vkGetPipelineCacheData(dev.handle, cache, &size, data.data());
+        write_file(path, pack(data, dev.props));
+        std::printf("  캐시 데이터 %zu바이트를 꺼내 저장\n", size);
+        vkDestroyPipelineCache(dev.handle, cache, nullptr);
+    }
+
+    VkPipelineCacheHeaderVersionOne h;
+    std::memcpy(&h, data.data(), sizeof h);
+    std::printf("드라이버의 헤더: 길이 %u, 버전 %d, vendorID 0x%x, deviceID 0x%x\n",
+                h.headerSize, h.headerVersion, h.vendorID, h.deviceID);
+
+    Blob file = read_file(path), cut(file.begin(), file.end() - 5), flipped = file;
+    flipped.back() ^= 1;
+    Blob foreign = data;
+    foreign[12] ^= 1;   // deviceID가 있는 자리
+    std::printf("쓰다가 끊긴 파일: %s\n", reject(cut, dev.props));
+    std::printf("한 비트가 뒤집힌 파일: %s\n", reject(flipped, dev.props));
+    std::printf("다른 장치에서 만든 파일: %s\n",
+                reject(pack(foreign, dev.props), dev.props));
+
+    fs::remove(path);
+    vkDestroyShaderModule(dev.handle, cs, nullptr);
+    vkDestroyPipelineLayout(dev.handle, layout, nullptr);
+    vkx::destroy(dev, set);
+    vkx::destroy(dev);
+    vkx::destroy(inst);
+}
+```
+
+```text
+[실행 1] 파일 0바이트: 없거나 너무 짧음
+  캐시에 든 것만: 0개 만듦, 3개는 컴파일이 필요
+  컴파일을 허락: 3개 만듦, 그중 캐시 적중 0개
+  캐시 데이터 32바이트를 꺼내 저장
+[실행 2] 파일 56바이트: 쓸 수 있음, 캐시에 넣고 시작
+  캐시에 든 것만: 0개 만듦, 3개는 컴파일이 필요
+  컴파일을 허락: 3개 만듦, 그중 캐시 적중 0개
+  캐시 데이터 32바이트를 꺼내 저장
+드라이버의 헤더: 길이 32, 버전 1, vendorID 0x10005, deviceID 0x0
+쓰다가 끊긴 파일: 길이가 맞지 않음
+한 비트가 뒤집힌 파일: 내용이 망가짐
+다른 장치에서 만든 파일: 다른 장치나 다른 드라이버의 것
+```
+
+- **캐시 객체**: `vkCreatePipelineCache`로 만들어 `vkCreateComputePipelines`나 `vkCreateGraphicsPipelines`의 둘째 인자로 넘깁니다(이 책의 도우미들은 그 자리를 비워 두었습니다). 같은 실행 안에서도 닮은 파이프라인끼리 결과를 나눠 쓸 수 있고, 캐시 하나를 여러 스레드가 함께 써도 됩니다. 스레드마다 따로 두었다면 `vkMergePipelineCaches`로 합칩니다
+- **꺼내서 저장하기**: `vkGetPipelineCacheData`로 크기를 묻고 그만큼 받습니다. 로딩이 끝났을 때나 프로그램을 끝낼 때처럼 파이프라인이 더 늘지 않는 때에 합니다
+- **파일 검사**: 데이터는 만든 장치와 드라이버에서만 뜻이 있습니다. 맨 앞 32바이트 헤더의 vendorID, deviceID, `pipelineCacheUUID`를 `VkPhysicalDeviceProperties`와 견주면 가릴 수 있습니다. 명세는 받았던 데이터를 그대로 돌려줄 것을 요구하고 헤더에는 길이도 검사합도 없으므로, 잘리거나 망가진 파일은 앱이 머리말을 붙여 걸러 냅니다
+- **캐시에 든 것만 만들기**: `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT`을 주면 컴파일이 필요할 때 만들지 않고 바로 `VK_PIPELINE_COMPILE_REQUIRED`를 돌려줍니다(오류가 아닌 성공 코드이고 핸들은 비어 있습니다). 그리는 스레드는 이렇게 먼저 해 보고, 안 되면 다른 스레드에 컴파일을 맡겨 프레임이 끊기지 않게 합니다. `make_device`가 켜 둔 `pipelineCreationCacheControl` 기능이 있어야 씁니다
+- **적중 확인**: `VkPipelineCreationFeedbackCreateInfo`를 `pNext`에 달면 드라이버가 걸린 시간과 캐시 적중 여부를 적어 줍니다. 캐시가 실제로 듣는지 재는 데 씁니다
+- **이 출력에 대하여**: 출력을 낸 lavapipe(Mesa 25.2)는 캐시에 헤더만 담습니다. 그래서 데이터가 32바이트이고 실행 2가 실행 1과 같습니다. 컴파일 결과를 담는 드라이버라면 실행 2에서 셋 다 캐시만으로 만들어지고 적중으로 표시되는 것이 기대하는 결과입니다
+
+<Note>
+드라이버가 스스로 디스크 캐시를 두기도 합니다(Mesa의 RADV가 그렇습니다). 그런 환경에서는 앱이 저장하지 않아도 다음 실행이 빨라지지만, 모든 드라이버가 그렇지는 않으므로 앱의 캐시는 그대로 둡니다. 어느 쪽이든 캐시는 첫 실행을 돕지 못합니다. 첫 실행의 끊김은 쓸 파이프라인을 로딩할 때 미리 만들어야 없어지고, [「동적 상태」](#/read/cpp-vulkan/ps-dynamic)로 파이프라인 수를 줄여 두면 그 시간이 짧아집니다.
+</Note>
+
+## 정리
+
+- 파이프라인 캐시는 드라이버의 컴파일 결과를 담는 객체이고, 꺼낸 데이터를 파일에 두면 다음 실행에서 컴파일을 건너뛴다
+- 캐시 데이터는 장치와 드라이버에 묶여 있으므로 헤더를 견주고, 파일이 온전한지는 앱이 길이와 해시로 확인한다
+- 캐시에 든 것만 만드는 플래그로 그리는 스레드를 멈추지 않게 하고, 나머지 컴파일은 다른 스레드에 맡긴다

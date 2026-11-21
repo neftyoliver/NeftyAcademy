@@ -18,7 +18,7 @@ void main() {
 })";
 
 // 색 첨부물 target(과 깊이 첨부물 depth)에 그리기를 연다. 이전 내용은 버리고
-// clear(깊이는 1.0)로 지우며, 뷰포트와 시저를 이미지 전체로 맞춘다
+// clear(깊이는 1.0, 스텐실은 0)로 지우며, 뷰포트와 시저를 이미지 전체로 맞춘다
 inline void begin_drawing(VkCommandBuffer cmd, const Image& target,
                           VkClearColorValue clear = {},
                           const Image* depth = nullptr) {
@@ -34,7 +34,7 @@ inline void begin_drawing(VkCommandBuffer cmd, const Image& target,
         .storeOp = VK_ATTACHMENT_STORE_OP_STORE, .clearValue = {.color = clear}};
     VkRenderingAttachmentInfo zbuf{
         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
         .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
         .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
         .clearValue = {.depthStencil = {1.0f, 0}}};
@@ -42,16 +42,18 @@ inline void begin_drawing(VkCommandBuffer cmd, const Image& target,
         const auto TESTS = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
                            VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
         transition(cmd, *depth, VK_IMAGE_LAYOUT_UNDEFINED,
-                   VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                   VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
                    VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE, TESTS,
                    VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
                        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
         zbuf.imageView = depth->view;
     }
+    const bool stencil = depth && (depth->aspect & VK_IMAGE_ASPECT_STENCIL_BIT);
     VkRenderingInfo info{.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
                          .renderArea = {{0, 0}, target.extent}, .layerCount = 1,
                          .colorAttachmentCount = 1, .pColorAttachments = &color,
-                         .pDepthAttachment = depth ? &zbuf : nullptr};
+                         .pDepthAttachment = depth ? &zbuf : nullptr,
+                         .pStencilAttachment = stencil ? &zbuf : nullptr};
     vkCmdBeginRendering(cmd, &info);
     VkViewport viewport{0.0f, 0.0f, float(target.extent.width),
                         float(target.extent.height), 0.0f, 1.0f};
