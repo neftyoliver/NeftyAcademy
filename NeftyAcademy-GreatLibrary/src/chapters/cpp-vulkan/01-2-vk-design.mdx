@@ -1,0 +1,102 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '벌칸의 설계: 드러내 놓고 하는 API, 객체와 수명, sType과 pNext 사슬, 판과 확장, 검사 없는 드라이버';
+
+벌칸은 Khronos가 2016년에 내놓은 그래픽·컴퓨트 API입니다. OpenGL 드라이버가 뒤에서 몰래 하던 일, 곧 메모리 배치, 작업 사이의 동기화, 상태가 맞는지 검사하기, 셰이더를 언제 컴파일할지를 프로그램이 직접 정하게 했습니다. 코드는 길어지지만 드라이버가 얇아져서, 언제 무엇이 일어나는지 예측할 수 있고 여러 스레드에서 나눠 일할 수 있습니다.
+
+## 객체와 수명
+
+벌칸의 모든 것은 핸들입니다. `VkInstance`는 로더와 드라이버에 연결한 시작점이고, 그 아래에서 GPU를 나타내는 `VkPhysicalDevice`를 고르면(만들지 않고 나열합니다), 쓸 기능을 정해 논리 장치 `VkDevice`를 만들고, 그 장치에서 일을 넣을 `VkQueue`를 받습니다. 버퍼, 이미지, 파이프라인 같은 나머지 객체는 모두 장치에 딸립니다. 만든 것은 `vkCreate*`/`vkDestroy*`로, 할당하는 것(풀에서 꺼내는 커맨드 버퍼와 디스크립터 세트, 장치 메모리)은 `vkAllocate*`/`vkFree*`로 짝을 맞추고, 부모는 자식보다 늦게 없앱니다. 마지막 인자 `pAllocator`로 CPU 쪽 메모리 할당을 가로챌 수 있는데, 보통은 `nullptr`을 줍니다.
+
+## sType과 pNext
+
+벌칸의 구조체는 첫 두 멤버가 늘 같습니다. `sType`은 이 구조체가 무엇인지 적고, `pNext`는 다음 구조체를 가리킵니다. 새 판이나 확장이 필드를 더할 때 옛 구조체를 고치지 않고 새 구조체를 사슬에 엮게 하려는 설계입니다. 아래 프로그램은 속성과 기능을 이 사슬로 한꺼번에 묻습니다. C++20의 지정 초기화로 필요한 멤버만 채우고 나머지는 0으로 둡니다.
+
+```cpp vk
+#include <vulkan/vulkan.h>
+#include <cstdio>
+
+int main() {
+    VkApplicationInfo app{.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+                          .pApplicationName = "design",
+                          .apiVersion = VK_API_VERSION_1_3};
+    VkInstanceCreateInfo ici{.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+                             .pApplicationInfo = &app};
+    VkInstance instance;
+    if (vkCreateInstance(&ici, nullptr, &instance) != VK_SUCCESS) return 1;
+    uint32_t count = 1;
+    VkPhysicalDevice gpu;                          // 첫 장치 하나만 본다
+    vkEnumeratePhysicalDevices(instance, &count, &gpu);
+
+    // 속성: 구조체를 pNext로 엮어 한 번에 묻는다
+    VkPhysicalDeviceSubgroupProperties subgroup{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+    VkPhysicalDeviceDriverProperties driver{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES,
+        .pNext = &subgroup};
+    VkPhysicalDeviceProperties2 props{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &driver};
+    vkGetPhysicalDeviceProperties2(gpu, &props);
+    uint32_t v = props.properties.apiVersion;
+    std::printf("장치 %s, 벌칸 %u.%u, 드라이버 %s\n", props.properties.deviceName,
+                VK_API_VERSION_MAJOR(v), VK_API_VERSION_MINOR(v),
+                driver.driverName);
+    std::printf("서브그룹 크기 %u, 최대 이미지 %u×%u\n", subgroup.subgroupSize,
+                props.properties.limits.maxImageDimension2D,
+                props.properties.limits.maxImageDimension2D);
+
+    // 기능: 판마다 늘어난 기능 구조체를 같은 방식으로 엮는다
+    VkPhysicalDeviceVulkan13Features f13{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+    VkPhysicalDeviceVulkan12Features f12{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+        .pNext = &f13};
+    VkPhysicalDeviceFeatures2 features{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &f12};
+    vkGetPhysicalDeviceFeatures2(gpu, &features);
+    struct { const char* name; VkBool32 on; } list[] = {
+        {"samplerAnisotropy (1.0)", features.features.samplerAnisotropy},
+        {"geometryShader (1.0)", features.features.geometryShader},
+        {"timelineSemaphore (1.2)", f12.timelineSemaphore},
+        {"bufferDeviceAddress (1.2)", f12.bufferDeviceAddress},
+        {"descriptorIndexing (1.2)", f12.descriptorIndexing},
+        {"synchronization2 (1.3)", f13.synchronization2},
+        {"dynamicRendering (1.3)", f13.dynamicRendering},
+    };
+    for (auto& f : list)
+        std::printf("  %-27s %s\n", f.name, f.on ? "있음" : "없음");
+    vkDestroyInstance(instance, nullptr);
+}
+```
+
+```text
+장치 llvmpipe (LLVM 20.1.2, 256 bits), 벌칸 1.4, 드라이버 llvmpipe
+서브그룹 크기 8, 최대 이미지 16384×16384
+  samplerAnisotropy (1.0)     있음
+  geometryShader (1.0)        있음
+  timelineSemaphore (1.2)     있음
+  bufferDeviceAddress (1.2)   있음
+  descriptorIndexing (1.2)    있음
+  synchronization2 (1.3)      있음
+  dynamicRendering (1.3)      있음
+```
+
+- **묻고 나서 켠다**: `vkGetPhysicalDeviceFeatures2`는 지원하는 기능을 알려 줄 뿐 켜지는 않습니다. 쓸 기능은 같은 구조체 사슬을 `VkDeviceCreateInfo`의 `pNext`에 걸어 논리 장치를 만들 때 켜고, 켜지 않은 기능을 쓰면 오류입니다([「물리 장치와 논리 장치」](#/read/cpp-vulkan/setup-device))
+- **판과 확장**: 새 기능은 먼저 확장으로 나오고, 널리 쓰이면 다음 판의 핵심으로 올라갑니다. 동적 렌더링은 `VK_KHR_dynamic_rendering` 확장이었다가 1.3에서 핵심이 되어 `Vulkan13Features`에 들어왔습니다. 2024년 12월의 1.4는 푸시 디스크립터, 동적 렌더링 로컬 읽기, maintenance5·6 등을 핵심으로 올리고 8K 렌더링을 보장합니다. 확장 이름의 `KHR`은 Khronos가 승인한 것, `EXT`는 여러 회사가 함께 만든 것, `NV`나 `AMD`는 한 회사의 것입니다
+- **장치마다 다른 답**: 위 출력은 GPU 없이 CPU에서 도는 Mesa의 소프트웨어 구현(lavapipe)의 것입니다. 실제 GPU에서는 이름과 수치가 다르고, 서브그룹 크기도 NVIDIA는 32, AMD는 32나 64입니다. 장치가 무엇을 지원할지 짐작하지 않고 늘 물어봅니다
+
+## 드라이버는 검사하지 않는다
+
+벌칸 드라이버는 잘못 쓴 호출을 검사하지 않습니다. 크기가 0인 버퍼를 만들거나 아직 쓰는 중인 이미지를 없애도 오류 코드가 돌아오지 않고, 결과는 정의되지 않습니다. 화면이 깨지거나, 한참 뒤에 엉뚱한 곳에서 죽거나, 장치를 잃습니다(`VK_ERROR_DEVICE_LOST`). 반환값은 메모리가 모자라거나 스왑체인이 낡은 것처럼 실행 중에 생기는 상황만 알려 줍니다. 그래서 개발하는 동안에는 호출을 가로채 규칙을 검사하는 **검증 레이어**를 켭니다([「개발 환경과 검증 레이어」](#/read/cpp-vulkan/vk-environment)).
+
+스레드도 같은 생각입니다. 대부분의 함수는 여러 스레드에서 불러도 되지만, 명세가 "외부에서 동기화"하라고 적은 인자(같은 `VkQueue`에 넣기, 같은 `VkCommandPool`에서 꺼내기)는 프로그램이 직접 막아야 합니다. 대신 스레드마다 커맨드 풀을 따로 두면 잠금 없이 동시에 기록할 수 있습니다([「스레드별 커맨드 풀」](#/read/cpp-vulkan/vsync-threads)).
+
+<Note>
+벌칸 머리 파일에는 C++ 감싸개 Vulkan-Hpp(`vulkan.hpp`, RAII 판 `vulkan_raii.hpp`)도 들어 있습니다. `sType`을 알아서 채우고, 오류를 예외로 바꾸고, 소멸자에서 객체를 없애 줍니다. 이 책은 구조체의 모든 필드가 눈에 보이도록 C API를 지정 초기화와 함께 쓰는데, Vulkan-Hpp의 이름은 C API와 하나씩 대응하므로 옮겨 쓰기 쉽습니다.
+</Note>
+
+## 정리
+
+- 벌칸은 메모리, 동기화, 검사, 셰이더 컴파일 시점을 프로그램이 정하게 한 API이고, 인스턴스 → 물리 장치 → 논리 장치 → 큐로 시작해 모든 객체를 짝을 맞춰 만들고 없앤다
+- 구조체는 sType과 pNext로 사슬을 이뤄 판과 확장이 늘린 속성·기능을 담고, 기능은 물어본 뒤 장치를 만들 때 켠다
+- 드라이버는 잘못된 사용을 검사하지 않아 결과가 정의되지 않으므로, 개발 중에는 검증 레이어를 켜고 장치마다 다른 값은 늘 물어본다
