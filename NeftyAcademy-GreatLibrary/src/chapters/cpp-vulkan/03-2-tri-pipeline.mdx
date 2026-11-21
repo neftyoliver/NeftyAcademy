@@ -1,0 +1,252 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '그래픽 파이프라인: shaderc로 SPIR-V 만들기, 셰이더 모듈, 고정 기능 상태, 동적 상태, 첫 삼각형';
+
+그래픽 파이프라인은 정점이 픽셀이 되기까지 거치는 모든 단계의 설정을 한 객체로 굳힌 것입니다. 셰이더와 고정 기능 설정(정점을 어떻게 모으고, 래스터화하고, 섞을지)을 미리 정해 만들어 두므로, 그리는 순간에 셰이더를 다시 컴파일할 일이 없습니다. 아래 도우미는 GLSL을 SPIR-V로 번역하고, 이 책에서 쓸 설정으로 파이프라인을 만듭니다.
+
+```cpp vk file=vkx_pipeline.hpp with=vkx_instance.hpp,vkx_device.hpp
+#pragma once
+#include <cstring>
+#include <shaderc/shaderc.h>
+#include "vkx_device.hpp"
+
+namespace vkx {
+
+// GLSL 원문을 실행 중에 SPIR-V(32비트 낱말의 배열)로 번역한다
+inline std::vector<uint32_t> compile(const char* glsl, shaderc_shader_kind kind) {
+    shaderc_compiler_t compiler = shaderc_compiler_initialize();
+    shaderc_compile_options_t opts = shaderc_compile_options_initialize();
+    shaderc_compile_options_set_target_env(opts, shaderc_target_env_vulkan,
+                                           shaderc_env_version_vulkan_1_3);
+    shaderc_compilation_result_t r = shaderc_compile_into_spv(
+        compiler, glsl, std::strlen(glsl), kind, "shader", "main", opts);
+    if (shaderc_result_get_compilation_status(r) !=
+        shaderc_compilation_status_success) {
+        std::fprintf(stderr, "%s", shaderc_result_get_error_message(r));
+        std::exit(1);
+    }
+    auto* words = reinterpret_cast<const uint32_t*>(shaderc_result_get_bytes(r));
+    std::vector<uint32_t> spirv(words, words + shaderc_result_get_length(r) / 4);
+    shaderc_result_release(r);
+    shaderc_compile_options_release(opts);
+    shaderc_compiler_release(compiler);
+    return spirv;
+}
+
+inline VkShaderModule make_shader(const Device& d,
+                                  const std::vector<uint32_t>& spirv) {
+    VkShaderModuleCreateInfo ci{
+        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .codeSize = spirv.size() * 4, .pCode = spirv.data()};
+    VkShaderModule m;
+    check(vkCreateShaderModule(d.handle, &ci, nullptr, &m), "셰이더 모듈");
+    return m;
+}
+
+struct GraphicsDesc {
+    VkShaderModule vertex = VK_NULL_HANDLE, fragment = VK_NULL_HANDLE;
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    VkFormat color = VK_FORMAT_UNDEFINED;   // 색 첨부물(없으면 깊이만 그린다)
+    VkFormat depth = VK_FORMAT_UNDEFINED;   // 깊이 첨부물(있으면 깊이 시험을 켠다)
+    VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkCullModeFlags cull = VK_CULL_MODE_NONE;
+    const VkPipelineVertexInputStateCreateInfo* vertex_input = nullptr;
+    const VkPipelineColorBlendAttachmentState* blend = nullptr;   // 없으면 덮어쓴다
+    VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
+};
+
+inline VkPipeline make_pipeline(const Device& d, const GraphicsDesc& g) {
+    VkPipelineShaderStageCreateInfo stages[2] = {
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+         .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = g.vertex, .pName = "main"},
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+         .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = g.fragment,
+         .pName = "main"}};
+    VkPipelineVertexInputStateCreateInfo no_input{   // 정점 버퍼 없음
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo assembly{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = g.topology};
+    VkPipelineViewportStateCreateInfo viewport{   // 값은 그릴 때 정한다
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1, .scissorCount = 1};
+    VkPipelineRasterizationStateCreateInfo raster{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = g.cull,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE, .lineWidth = 1.0f};
+    VkPipelineMultisampleStateCreateInfo multisample{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = g.samples};
+    bool has_depth = g.depth != VK_FORMAT_UNDEFINED;
+    VkPipelineDepthStencilStateCreateInfo depth{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = has_depth, .depthWriteEnable = has_depth,
+        .depthCompareOp = VK_COMPARE_OP_LESS};
+    VkPipelineColorBlendAttachmentState write_all{.colorWriteMask = 0xF};  // RGBA
+    uint32_t colors = g.color != VK_FORMAT_UNDEFINED;
+    VkPipelineColorBlendStateCreateInfo blend{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount = colors, .pAttachments = g.blend ? g.blend : &write_all};
+    VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamic{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .dynamicStateCount = 2, .pDynamicStates = dyn};
+    VkPipelineRenderingCreateInfo rendering{   // 렌더 패스 대신 첨부물 포맷
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .colorAttachmentCount = colors, .pColorAttachmentFormats = &g.color,
+        .depthAttachmentFormat = g.depth};
+    VkGraphicsPipelineCreateInfo ci{
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext = &rendering, .stageCount = 2, .pStages = stages,
+        .pVertexInputState = g.vertex_input ? g.vertex_input : &no_input,
+        .pInputAssemblyState = &assembly, .pViewportState = &viewport,
+        .pRasterizationState = &raster, .pMultisampleState = &multisample,
+        .pDepthStencilState = &depth, .pColorBlendState = &blend,
+        .pDynamicState = &dynamic, .layout = g.layout};
+    VkPipeline p;
+    check(vkCreateGraphicsPipelines(d.handle, VK_NULL_HANDLE, 1, &ci, nullptr, &p),
+          "그래픽 파이프라인");
+    return p;
+}
+
+}  // namespace vkx
+```
+
+- **셰이더 번역**: 벌칸 드라이버는 GLSL이 아니라 SPIR-V를 받습니다. `compile`은 shaderc 라이브러리로 실행 중에 번역하는데, 실제 프로그램은 대개 빌드할 때 `glslc`로 미리 번역합니다([「glslang과 shaderc」](#/read/cpp-vulkan/spv-compile))
+- **고정 기능 상태**: 정점 입력, 입력 조립(점·선·삼각형), 래스터화(채우기, 뒷면 버리기), 다중 샘플, 깊이 시험, 블렌딩을 구조체마다 적습니다. 뒤 장들이 쓸 정점 버퍼, 깊이, 블렌딩, 샘플 수는 `GraphicsDesc`로 바꿉니다
+- **동적 상태와 렌더링 정보**: 뷰포트와 시저는 굳히지 않고 그릴 때 정하므로, 창 크기가 바뀌어도 파이프라인을 다시 만들지 않습니다. 렌더 패스 객체 대신 `VkPipelineRenderingCreateInfo`로 첨부물 포맷만 알립니다
+
+이제 [「GPU 파이프라인」](#/read/cpp-vulkan/vk-gpu-pipeline)에서 CPU로 흉내 낸 삼각형을 GPU로 그립니다. 같은 40×20 크기에 밝기를 32비트 실수(R32_SFLOAT)로 남겨 같은 문자로 찍습니다. 파이프라인 레이아웃은 셰이더가 받을 리소스의 모양인데, 아직 받을 것이 없어 비어 있습니다([「세트와 레이아웃」](#/read/cpp-vulkan/desc-sets)).
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp,vkx_cmd.hpp,vkx_pipeline.hpp,vkx_resource.hpp
+#include "vkx_cmd.hpp"
+#include "vkx_pipeline.hpp"
+#include "vkx_resource.hpp"
+
+// 1.1의 삼각형: 정점마다 위치와 밝기
+const char* VS = R"(#version 450
+layout(location = 0) out float shade;
+const vec2 pos[3] = vec2[](vec2(0.0, -0.9), vec2(0.9, 0.8), vec2(-0.9, 0.8));
+const float tone[3] = float[](0.0, 1.0, 0.5);
+void main() {
+    gl_Position = vec4(pos[gl_VertexIndex], 0.0, 1.0);
+    shade = tone[gl_VertexIndex];
+})";
+
+const char* FS = R"(#version 450
+layout(location = 0) in float shade;    // 보간된 밝기
+layout(location = 0) out float value;   // 색 첨부물 0번
+void main() { value = shade; })";
+
+int main() {
+    vkx::Instance inst = vkx::make_instance();
+    vkx::Device dev = vkx::make_device(inst.handle);
+    vkx::Commands cmds = vkx::make_commands(dev);
+    const uint32_t W = 40, H = 20;
+    vkx::Image target = vkx::make_image(
+        dev, {W, H}, VK_FORMAT_R32_SFLOAT,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    vkx::Buffer pixels = vkx::make_buffer(dev, W * H * 4,
+                                          VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+
+    auto vs = vkx::make_shader(dev, vkx::compile(VS, shaderc_vertex_shader));
+    auto fs = vkx::make_shader(dev, vkx::compile(FS, shaderc_fragment_shader));
+    VkPipelineLayoutCreateInfo lci{   // 셰이더가 받을 리소스가 아직 없다
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    VkPipelineLayout layout;
+    vkCreatePipelineLayout(dev.handle, &lci, nullptr, &layout);
+    VkPipeline pipeline = vkx::make_pipeline(dev, {.vertex = vs, .fragment = fs,
+                                                   .layout = layout,
+                                                   .color = target.format});
+
+    const auto OUT = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    const auto WRITE = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+    const auto ATTACHMENT = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    VkCommandBuffer cmd = vkx::begin(cmds);
+    vkx::transition(cmd, target, VK_IMAGE_LAYOUT_UNDEFINED, ATTACHMENT,
+                    VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE, OUT, WRITE);
+    VkRenderingAttachmentInfo color{   // 덮지 않은 픽셀은 -1로 남는다
+        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView = target.view, .imageLayout = ATTACHMENT,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        .clearValue = {.color = {{-1.0f}}}};
+    VkRenderingInfo info{.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+                         .renderArea = {{0, 0}, target.extent}, .layerCount = 1,
+                         .colorAttachmentCount = 1, .pColorAttachments = &color};
+    vkCmdBeginRendering(cmd, &info);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    VkViewport viewport{0.0f, 0.0f, float(W), float(H), 0.0f, 1.0f};
+    VkRect2D scissor{{0, 0}, target.extent};
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    vkCmdDraw(cmd, 3, 1, 0, 0);   // 정점 3개, 인스턴스 1개
+    vkCmdEndRendering(cmd);
+    vkx::transition(cmd, target, ATTACHMENT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    OUT, WRITE, VK_PIPELINE_STAGE_2_COPY_BIT,
+                    VK_ACCESS_2_TRANSFER_READ_BIT);
+    vkx::copy_to_buffer(cmd, target, pixels);
+    vkx::submit_and_wait(dev, cmds);
+
+    auto* v = static_cast<const float*>(pixels.mapped);
+    const char* ramp = ".:-=+*#%@";   // 1.1과 같은 밝기 문자
+    int fragments = 0;
+    for (uint32_t i = 0; i < W * H; ++i) {
+        if (i % W == 0) std::putchar('|');
+        std::putchar(v[i] < 0 ? ' ' : ramp[int(v[i] * 8.999f)]);
+        fragments += v[i] >= 0;
+        if (i % W == W - 1) std::puts("|");
+    }
+    std::printf("정점 3개 → 프래그먼트 %d개\n", fragments);
+    vkDestroyPipeline(dev.handle, pipeline, nullptr);
+    vkDestroyPipelineLayout(dev.handle, layout, nullptr);
+    vkDestroyShaderModule(dev.handle, vs, nullptr);
+    vkDestroyShaderModule(dev.handle, fs, nullptr);
+    vkx::destroy(dev, pixels);
+    vkx::destroy(dev, target);
+    vkx::destroy(dev, cmds);
+    vkx::destroy(dev);
+    vkx::destroy(inst);
+}
+```
+
+```text
+|                                        |
+|                   ..                   |
+|                  ....                  |
+|                 ...:::                 |
+|                .:::::::                |
+|               :::::::---               |
+|              :::::-------              |
+|             ::--------====             |
+|            --------========            |
+|           ------========++++           |
+|          ----========++++++++          |
+|         --========++++++++****         |
+|        =======++++++++********#        |
+|       =====++++++++********#####       |
+|      ===++++++++********########%      |
+|     =++++++++********########%%%%%     |
+|    +++++++********########%%%%%%%%@    |
+|   +++++********########%%%%%%%%@@@@@   |
+|                                        |
+|                                        |
+정점 3개 → 프래그먼트 306개
+```
+
+1.1의 출력과 한 글자도 다르지 않고 프래그먼트 수도 306개로 같습니다. GPU도 픽셀 가운데가 삼각형 안에 드는지 보고, 정점 값을 무게 중심 좌표로 섞기 때문입니다.
+
+- **정점 셰이더**: 정점 버퍼가 없어도 `gl_VertexIndex`(0, 1, 2)로 배열에서 위치를 꺼냅니다. `gl_Position`에 쓴 좌표는 w가 1이라 그대로 정규화 장치 좌표가 되고, 뷰포트 변환을 거쳐 픽셀 좌표가 됩니다(1.1의 `to_screen`과 같은 계산)
+- **보간**: 정점 셰이더의 `out`과 프래그먼트 셰이더의 `in`은 같은 location으로 이어지고, 그 사이에서 래스터라이저가 값을 보간합니다
+- **변 위의 픽셀**: 명세는 변을 함께 쓰는 두 삼각형 가운데 정확히 하나만 그 픽셀을 덮으라고 정합니다(Direct3D는 왼쪽 위 규칙으로 못박음). 이 삼각형에는 가운데가 변 위에 놓인 픽셀이 없어서 1.1의 단순한 비교와 결과가 같습니다
+- **그리는 명령**: `vkCmdDraw`의 인자는 정점 수, 인스턴스 수, 첫 정점, 첫 인스턴스입니다. 시저 밖의 픽셀은 버려지므로, 렌더 영역 밖으로 그리지 않게 막는 데에도 시저를 씁니다
+
+<Note>
+파이프라인을 만들 때 드라이버는 셰이더를 GPU 기계어로 컴파일합니다. 그리는 도중에 만들면 프레임이 끊기므로 로딩할 때 미리 만들고, 파이프라인 캐시에 저장해 다음 실행에 다시 씁니다([「파이프라인 캐시」](#/read/cpp-vulkan/ps-cache)). 상태 조합이 많은 프로그램을 위해 파이프라인 없이 셰이더를 따로 묶는 VK_EXT_shader_object도 있습니다.
+</Note>
+
+## 정리
+
+- 그래픽 파이프라인은 셰이더(SPIR-V)와 고정 기능 상태를 미리 굳힌 객체이고, 뷰포트·시저처럼 자주 바뀌는 값은 동적 상태로 남긴다
+- 동적 렌더링에서는 렌더 패스 대신 첨부물 포맷을 파이프라인에 알리고, 그릴 때는 바인드한 뒤 `vkCmdDraw`를 기록한다
+- GPU 래스터라이저는 1.1의 CPU 흉내와 같은 규칙(픽셀 가운데, 무게 중심 보간)으로 같은 그림을 만든다

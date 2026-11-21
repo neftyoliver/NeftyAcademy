@@ -1,0 +1,229 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '렌더 패스: 첨부물과 load·store 연산, 렌더 영역, 렌더 패스 객체와 서브패스, 동적 렌더링';
+
+GPU가 그림을 쓰는 이미지를 **첨부물**(attachment)이라 하고, 첨부물 몇 개에 그리는 한 구간을 **렌더 패스**라고 부릅니다. 벌칸은 구간을 시작할 때 첨부물의 원래 값을 어떻게 할지(load 연산), 끝날 때 결과를 메모리에 남길지(store 연산)를 미리 밝히게 합니다. 먼저 그릴 이미지와 결과를 읽을 버퍼를 만드는 도우미입니다.
+
+```cpp vk file=vkx_resource.hpp with=vkx_instance.hpp,vkx_device.hpp
+#pragma once
+#include "vkx_device.hpp"
+
+namespace vkx {
+
+// 리소스가 받아 주는 메모리 타입 가운데 want 성질을 모두 가진 첫 타입에서 받는다
+inline VkDeviceMemory allocate(const Device& d, VkMemoryRequirements req,
+                               VkMemoryPropertyFlags want) {
+    for (uint32_t i = 0; i < d.memory.memoryTypeCount; ++i) {
+        VkMemoryPropertyFlags has = d.memory.memoryTypes[i].propertyFlags;
+        if (!(req.memoryTypeBits >> i & 1) || (has & want) != want) continue;
+        VkMemoryAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                                .allocationSize = req.size, .memoryTypeIndex = i};
+        VkDeviceMemory m;
+        check(vkAllocateMemory(d.handle, &ai, nullptr, &m), "vkAllocateMemory");
+        return m;
+    }
+    check(VK_ERROR_OUT_OF_DEVICE_MEMORY, "맞는 메모리 타입 찾기");
+    return VK_NULL_HANDLE;
+}
+
+struct Buffer {
+    VkBuffer handle = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkDeviceSize size = 0;
+    void* mapped = nullptr;   // host 버퍼면 CPU에서 쓰는 주소
+};
+
+// host면 CPU가 읽고 쓰는 메모리에 만들어 매핑해 두고, 아니면 GPU 전용 메모리에
+inline Buffer make_buffer(const Device& d, VkDeviceSize size,
+                          VkBufferUsageFlags usage, bool host) {
+    Buffer b{.size = size};
+    VkBufferCreateInfo ci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                          .size = size, .usage = usage};
+    check(vkCreateBuffer(d.handle, &ci, nullptr, &b.handle), "vkCreateBuffer");
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(d.handle, b.handle, &req);
+    b.memory = allocate(d, req, host ? VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+                                     : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    vkBindBufferMemory(d.handle, b.handle, b.memory, 0);
+    if (host) vkMapMemory(d.handle, b.memory, 0, VK_WHOLE_SIZE, 0, &b.mapped);
+    return b;
+}
+
+struct Image {
+    VkImage handle = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;   // 이미지 전체를 보는 뷰
+    VkFormat format = VK_FORMAT_UNDEFINED;
+    VkImageAspectFlags aspect = 0;       // 색 면인지, 깊이·스텐실 면인지
+    VkExtent2D extent{};
+};
+
+// GPU 전용 메모리에 2D 이미지와 뷰를 만든다. 깊이 포맷이면 깊이 면을 본다
+inline Image make_image(const Device& d, VkExtent2D extent, VkFormat format,
+                        VkImageUsageFlags usage, uint32_t mips = 1,
+                        VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT) {
+    Image im{.format = format, .aspect = VK_IMAGE_ASPECT_COLOR_BIT,
+             .extent = extent};
+    if (format == VK_FORMAT_D32_SFLOAT || format == VK_FORMAT_D16_UNORM)
+        im.aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+    if (format == VK_FORMAT_D24_UNORM_S8_UINT ||
+        format == VK_FORMAT_D32_SFLOAT_S8_UINT)
+        im.aspect = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+    VkImageCreateInfo ci{.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                         .imageType = VK_IMAGE_TYPE_2D, .format = format,
+                         .extent = {extent.width, extent.height, 1},
+                         .mipLevels = mips, .arrayLayers = 1, .samples = samples,
+                         .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = usage};
+    check(vkCreateImage(d.handle, &ci, nullptr, &im.handle), "vkCreateImage");
+    VkMemoryRequirements req;
+    vkGetImageMemoryRequirements(d.handle, im.handle, &req);
+    im.memory = allocate(d, req, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    vkBindImageMemory(d.handle, im.handle, im.memory, 0);
+    VkImageViewCreateInfo vci{.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                              .image = im.handle, .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                              .format = format,
+                              .subresourceRange = {im.aspect, 0, mips, 0, 1}};
+    check(vkCreateImageView(d.handle, &vci, nullptr, &im.view), "이미지 뷰");
+    return im;
+}
+
+// 레이아웃을 from에서 to로 바꾼다. src 단계의 접근(쓰기)이 끝나고 보인 뒤에
+// dst 단계의 접근이 시작된다
+inline void transition(VkCommandBuffer cmd, const Image& im, VkImageLayout from,
+                       VkImageLayout to, VkPipelineStageFlags2 src,
+                       VkAccessFlags2 src_access, VkPipelineStageFlags2 dst,
+                       VkAccessFlags2 dst_access) {
+    VkImageMemoryBarrier2 b{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, .srcStageMask = src,
+        .srcAccessMask = src_access, .dstStageMask = dst,
+        .dstAccessMask = dst_access, .oldLayout = from, .newLayout = to,
+        .image = im.handle,
+        .subresourceRange = {im.aspect, 0, VK_REMAINING_MIP_LEVELS, 0, 1}};
+    VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                         .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b};
+    vkCmdPipelineBarrier2(cmd, &dep);
+}
+
+// TRANSFER_SRC 레이아웃인 이미지의 밉 0을 버퍼로 복사하고, CPU가 읽게 한다
+inline void copy_to_buffer(VkCommandBuffer cmd, const Image& im, const Buffer& b) {
+    VkBufferImageCopy region{.imageSubresource = {im.aspect, 0, 0, 1},
+                             .imageExtent = {im.extent.width, im.extent.height, 1}};
+    vkCmdCopyImageToBuffer(cmd, im.handle, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           b.handle, 1, &region);
+    VkMemoryBarrier2 host{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+                          .srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
+                          .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                          .dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT,
+                          .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT};
+    VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                         .memoryBarrierCount = 1, .pMemoryBarriers = &host};
+    vkCmdPipelineBarrier2(cmd, &dep);
+}
+
+inline void destroy(const Device& d, Buffer& b) {
+    vkDestroyBuffer(d.handle, b.handle, nullptr);
+    vkFreeMemory(d.handle, b.memory, nullptr);   // 매핑도 함께 풀린다
+}
+
+inline void destroy(const Device& d, Image& im) {
+    vkDestroyImageView(d.handle, im.view, nullptr);
+    vkDestroyImage(d.handle, im.handle, nullptr);
+    vkFreeMemory(d.handle, im.memory, nullptr);
+}
+
+}  // namespace vkx
+```
+
+- **메모리 고르기**: 리소스의 요구 사항(크기, 정렬, 받아 줄 메모리 타입 비트)을 물어 원하는 성질을 모두 가진 첫 타입에서 받습니다. 실제 프로그램은 큰 덩어리를 받아 나눠 씁니다([「메모리 할당과 VMA」](#/read/cpp-vulkan/buf-alloc)). `host` 버퍼는 CPU에서 보이는(HOST_VISIBLE, HOST_COHERENT) 메모리에 놓아 매핑한 주소로 바로 읽습니다
+- **뷰와 레이아웃**: 렌더링은 이미지를 직접 쓰지 않고 어느 부분을 어떻게 볼지 정한 뷰를 거칩니다([「이미지, 뷰, 샘플러」](#/read/cpp-vulkan/tex-image)). 이미지는 쓰임새마다 메모리 안의 배치(레이아웃)가 다를 수 있어서 첨부물로 쓰기 전과 복사하기 전에 바꾸고, `transition`은 그 김에 앞 단계의 쓰기가 끝나고 보인 뒤에 뒤 단계가 시작되게 합니다. `copy_to_buffer`의 마지막 배리어는 복사한 값을 CPU가 읽게 합니다([「레이아웃 전환」](#/read/cpp-vulkan/tex-layout))
+
+아래 프로그램은 12×4 이미지에 두 번 렌더링합니다. 첫 번째는 전체를 파랑으로, 두 번째는 렌더 영역을 가운데 4×2칸으로 좁혀 빨강으로 지웁니다(지우는 것은 load 연산). 명령은 [「큐 패밀리」](#/read/cpp-vulkan/setup-queues)의 `vkx_cmd.hpp`로 냅니다.
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp,vkx_cmd.hpp,vkx_resource.hpp
+#include "vkx_cmd.hpp"
+#include "vkx_resource.hpp"
+
+int main() {
+    vkx::Instance inst = vkx::make_instance();
+    vkx::Device dev = vkx::make_device(inst.handle);
+    vkx::Commands cmds = vkx::make_commands(dev);
+    vkx::Image target = vkx::make_image(
+        dev, {12, 4}, VK_FORMAT_R8G8B8A8_UNORM,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    vkx::Buffer pixels = vkx::make_buffer(dev, 12 * 4 * 4,
+                                          VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+    const auto OUT = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    const auto WRITE = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+    const auto ATTACHMENT = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    VkCommandBuffer cmd = vkx::begin(cmds);
+    vkx::transition(cmd, target, VK_IMAGE_LAYOUT_UNDEFINED, ATTACHMENT,
+                    VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE, OUT, WRITE);
+    // 첨부물 하나: 시작할 때 파랑으로 지우고(CLEAR), 끝나면 메모리에 남긴다(STORE)
+    VkRenderingAttachmentInfo color{
+        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView = target.view, .imageLayout = ATTACHMENT,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        .clearValue = {.color = {{0.0f, 0.0f, 1.0f, 1.0f}}}};
+    VkRenderingInfo info{.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+                         .renderArea = {{0, 0}, target.extent}, .layerCount = 1,
+                         .colorAttachmentCount = 1, .pColorAttachments = &color};
+    vkCmdBeginRendering(cmd, &info);
+    vkCmdEndRendering(cmd);   // 그리는 명령은 다음 쪽부터
+
+    // 두 번째 렌더링: 빨강으로 지우되 렌더 영역은 가운데 4×2칸만
+    vkx::transition(cmd, target, ATTACHMENT, ATTACHMENT, OUT, WRITE, OUT, WRITE);
+    color.clearValue = {.color = {{1.0f, 0.0f, 0.0f, 1.0f}}};
+    info.renderArea = {{4, 1}, {4, 2}};
+    vkCmdBeginRendering(cmd, &info);
+    vkCmdEndRendering(cmd);
+
+    vkx::transition(cmd, target, ATTACHMENT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    OUT, WRITE, VK_PIPELINE_STAGE_2_COPY_BIT,
+                    VK_ACCESS_2_TRANSFER_READ_BIT);
+    vkx::copy_to_buffer(cmd, target, pixels);
+    vkx::submit_and_wait(dev, cmds);
+
+    auto* rgba = static_cast<const uint8_t*>(pixels.mapped);
+    for (int i = 0; i < 12 * 4; ++i) {
+        const uint8_t* p = rgba + 4 * i;   // 픽셀 하나는 R, G, B, A 네 바이트
+        std::putchar(p[0] == 255 ? 'R' : p[2] == 255 ? 'B' : '?');
+        if (i % 12 == 11) std::putchar('\n');
+    }
+    vkx::destroy(dev, pixels);
+    vkx::destroy(dev, target);
+    vkx::destroy(dev, cmds);
+    vkx::destroy(dev);
+    vkx::destroy(inst);
+}
+```
+
+```text
+BBBBBBBBBBBB
+BBBBRRRRBBBB
+BBBBRRRRBBBB
+BBBBBBBBBBBB
+```
+
+- **load 연산**: `CLEAR`는 렌더 영역을 `clearValue`로 채우고, `LOAD`는 원래 값을 이어 쓰고, `DONT_CARE`는 원래 값이 필요 없다는 뜻이라 무엇이 남을지 모릅니다
+- **store 연산**: `STORE`는 결과를 메모리에 쓰고 `DONT_CARE`는 버려도 된다는 뜻이라, 프레임이 끝나면 필요 없는 깊이 첨부물에 씁니다
+- **렌더 영역**: load와 store는 렌더 영역 안의 픽셀에만 미칩니다. 두 번째 `CLEAR`가 가운데만 칠한 까닭입니다
+- **렌더링 사이의 배리어**: 같은 이미지에 잇달아 쓰므로 첫 렌더링의 쓰기가 끝난 뒤 두 번째가 시작되게 합니다(레이아웃이 같으면 순서만 겁니다). 빼도 lavapipe에서는 결과가 같지만 명세로는 순서가 정해지지 않습니다
+
+## 렌더 패스 객체
+
+벌칸 1.0에서는 렌더 패스를 미리 객체로 만들었습니다. `VkRenderPass`에 첨부물마다 포맷, load·store 연산, 시작과 끝 레이아웃을 적고, 첨부물을 쓰는 **서브패스**들과 그 사이의 의존성을 적습니다. 이미지 뷰는 `VkFramebuffer`로 묶고, 파이프라인도 어느 렌더 패스의 몇 번째 서브패스에서 쓸지 정해 만듭니다. 서브패스는 앞 서브패스가 쓴 값을 같은 픽셀 자리에서 읽을 수 있어(입력 첨부물) 타일 GPU는 중간 결과를 칩 안 타일 메모리에 둔 채 이어 그립니다.
+
+그러나 미리 정할 것이 많아, 서브패스로 얻는 것이 거의 없는 데스크톱 GPU에서는 번거롭기만 했습니다. 그래서 2021년 1.2.197에 VK_KHR_dynamic_rendering이 나와 1.3에서 핵심이 되었습니다. 동적 렌더링은 기록하는 자리에서 `VkRenderingInfo`로 첨부물을 넘기고, 파이프라인은 첨부물 포맷만 알면 됩니다. 타일 메모리 읽기는 1.4에 들어온 지역 읽기(local read)가 맡습니다. 이 책은 동적 렌더링만 씁니다.
+
+<Note>
+타일 기반 GPU(모바일 대부분과 애플 GPU)는 타일마다 칩 안 메모리에서 그려 바깥 메모리로 옮깁니다. load는 시작할 때 타일로 읽어 올지를, store는 끝날 때 바깥으로 쓸지를 정하므로 `CLEAR`와 `DONT_CARE`를 잘 고르면 대역폭과 전력을 아낍니다. 렌더 영역은 `vkGetRenderAreaGranularity`(동적 렌더링은 1.4의 `vkGetRenderingAreaGranularity`)로 묻는 단위에 맞을 때 가장 빠릅니다.
+</Note>
+
+## 정리
+
+- 렌더 패스는 첨부물에 그리는 한 구간이고, 시작의 load(CLEAR·LOAD·DONT_CARE)와 끝의 store(STORE·DONT_CARE)로 원래 값과 결과를 어떻게 할지 밝힌다
+- load와 store는 렌더 영역 안에만 미치고, 같은 첨부물에 잇달아 쓰는 렌더링 사이에는 배리어가 필요하다
+- 1.3부터는 렌더 패스 객체와 프레임버퍼 없이 동적 렌더링으로 기록하는 자리에서 첨부물을 넘기고, 서브패스의 타일 메모리 읽기는 1.4의 지역 읽기가 맡는다

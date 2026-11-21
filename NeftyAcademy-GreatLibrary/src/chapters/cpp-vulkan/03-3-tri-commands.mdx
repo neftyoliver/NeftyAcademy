@@ -1,0 +1,214 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '커맨드 버퍼: 기록과 실행, 상태의 순환, 다시 내기, 풀과 스레드, 보조 커맨드 버퍼';
+
+`vkCmd`로 시작하는 함수는 GPU에 일을 시키지 않고 커맨드 버퍼에 적어 두기만 합니다. 실제 실행은 제출한 뒤에 일어나므로, 기록하는 시점과 실행하는 시점이 다릅니다. [「큐 패밀리」](#/read/cpp-vulkan/setup-queues)의 `vkx_cmd.hpp`가 감춰 둔 과정을 이 쪽에서 열어 봅니다. 커맨드 버퍼는 다음 상태를 돕니다.
+
+| 상태 | 들어가는 때 | 할 수 있는 일 |
+| --- | --- | --- |
+| 처음 | 할당, 리셋 | 기록 시작 |
+| 기록 중 | `vkBeginCommandBuffer` | `vkCmd…` 기록, 끝내기 |
+| 실행 가능 | `vkEndCommandBuffer`, 실행 끝 | 제출, 리셋 |
+| 대기 | 제출 | GPU가 끝낼 때까지 손대지 않음 |
+| 무효 | 쓰던 리소스를 없앰, 한 번만 낸 뒤 | 리셋 |
+
+아래 프로그램은 복사 명령과 갱신 명령을 한 번 기록해 세 번 냅니다. 제출할 때마다 CPU가 복사의 원본 값을 바꿉니다.
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp,vkx_cmd.hpp,vkx_resource.hpp
+#include "vkx_cmd.hpp"
+#include "vkx_resource.hpp"
+
+int main() {
+    vkx::Instance inst = vkx::make_instance();
+    vkx::Device dev = vkx::make_device(inst.handle);
+    vkx::Commands c = vkx::make_commands(dev);
+    auto src = vkx::make_buffer(dev, 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true);
+    auto dst = vkx::make_buffer(dev, 8, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+
+    // 한 번만 기록한다. ONE_TIME_SUBMIT을 주지 않았으니 몇 번이고 낼 수 있다
+    VkCommandBufferBeginInfo bi{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    vkBeginCommandBuffer(c.cmd, &bi);
+    VkBufferCopy region{.size = 4};
+    // 복사는 실행할 때 src를 읽는다
+    vkCmdCopyBuffer(c.cmd, src.handle, dst.handle, 1, &region);
+    uint32_t value = 7;
+    vkCmdUpdateBuffer(c.cmd, dst.handle, 4, 4, &value);   // 7이 기록에 담긴다
+    value = 100;                                           // 이제 바꿔도 소용없다
+    VkMemoryBarrier2 host{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+                          .srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+                          .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                          .dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT,
+                          .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT};
+    VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                         .memoryBarrierCount = 1, .pMemoryBarriers = &host};
+    vkCmdPipelineBarrier2(c.cmd, &dep);
+    vkEndCommandBuffer(c.cmd);
+
+    VkCommandBufferSubmitInfo one{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+        .commandBuffer = c.cmd};
+    VkSubmitInfo2 si{.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+                     .commandBufferInfoCount = 1, .pCommandBufferInfos = &one};
+    auto* in = static_cast<uint32_t*>(src.mapped);
+    auto* out = static_cast<const uint32_t*>(dst.mapped);
+    for (uint32_t round = 1; round <= 3; ++round) {
+        in[0] = round * 10;   // 제출하기 전에 원본을 바꾼다
+        vkQueueSubmit2(dev.queue, 1, &si, c.done);
+        vkWaitForFences(dev.handle, 1, &c.done, VK_TRUE, UINT64_MAX);
+        vkResetFences(dev.handle, 1, &c.done);
+        std::printf("%u번째 제출: 복사한 값 %u, 갱신한 값 %u\n", round, out[0],
+                    out[1]);
+    }
+    vkx::destroy(dev, src);
+    vkx::destroy(dev, dst);
+    vkx::destroy(dev, c);
+    vkx::destroy(dev);
+    vkx::destroy(inst);
+}
+```
+
+```text
+1번째 제출: 복사한 값 10, 갱신한 값 7
+2번째 제출: 복사한 값 20, 갱신한 값 7
+3번째 제출: 복사한 값 30, 갱신한 값 7
+```
+
+- **다시 내기**: `ONE_TIME_SUBMIT` 없이 기록한 버퍼는 실행이 끝나면 실행 가능 상태로 돌아와 다시 낼 수 있습니다. 한 번만 내겠다고 밝히면 드라이버가 그에 맞게 최적화할 수 있는 대신, 실행 뒤에 무효가 됩니다. 대기 중인 버퍼를 또 내려면 `SIMULTANEOUS_USE`가 필요합니다
+- **기록에 담기는 것**: 명령, 핸들, 인자입니다. 버퍼에 든 값은 실행할 때 읽으므로 복사한 값은 10, 20, 30으로 바뀝니다. `vkCmdUpdateBuffer`는 데이터를 기록할 때 커맨드 버퍼 안에 복사해 두므로(64KB까지) 늘 7입니다
+- **CPU의 쓰기**: HOST_COHERENT 메모리에 CPU가 쓴 값은 그 뒤의 제출에서 GPU에 보입니다. 거꾸로 GPU가 쓴 값을 CPU가 읽을 때는 HOST 배리어와 펜스가 필요합니다
+
+## 풀과 스레드
+
+커맨드 풀은 그 풀의 버퍼와 함께 한 번에 한 스레드만 써야 합니다. 그래서 여러 스레드가 기록할 때는 스레드마다 풀을 둡니다([「스레드별 커맨드 풀」](#/read/cpp-vulkan/vsync-threads)). `TRANSIENT`는 버퍼를 짧게 쓰고 버린다는 힌트이고, `RESET_COMMAND_BUFFER`는 버퍼를 하나씩 리셋하게 해 줍니다. 프레임마다 풀 하나를 통째로 리셋(`vkResetCommandPool`)하는 쪽이 버퍼를 하나씩 리셋하는 것보다 대개 쌉니다.
+
+## 보조 커맨드 버퍼
+
+주 커맨드 버퍼만 큐에 낼 수 있고, 보조 커맨드 버퍼는 주 버퍼 안에서 `vkCmdExecuteCommands`로 실행됩니다. 아래는 [「그래픽 파이프라인」](#/read/cpp-vulkan/tri-pipeline)의 삼각형 그리기를 보조 버퍼에 담아 실행합니다.
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp,vkx_cmd.hpp,vkx_pipeline.hpp,vkx_resource.hpp
+#include "vkx_cmd.hpp"
+#include "vkx_pipeline.hpp"
+#include "vkx_resource.hpp"
+
+const char* VS = R"(#version 450
+layout(location = 0) out float shade;
+const vec2 pos[3] = vec2[](vec2(0.0, -0.9), vec2(0.9, 0.8), vec2(-0.9, 0.8));
+const float tone[3] = float[](0.0, 1.0, 0.5);
+void main() {
+    gl_Position = vec4(pos[gl_VertexIndex], 0.0, 1.0);
+    shade = tone[gl_VertexIndex];
+})";
+
+const char* FS = R"(#version 450
+layout(location = 0) in float shade;
+layout(location = 0) out float value;
+void main() { value = shade; })";
+
+int main() {
+    vkx::Instance inst = vkx::make_instance();
+    vkx::Device dev = vkx::make_device(inst.handle);
+    vkx::Commands c = vkx::make_commands(dev);
+    vkx::Image target = vkx::make_image(
+        dev, {40, 20}, VK_FORMAT_R32_SFLOAT,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    vkx::Buffer pixels = vkx::make_buffer(
+        dev, 40 * 20 * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+    auto vs = vkx::make_shader(dev, vkx::compile(VS, shaderc_vertex_shader));
+    auto fs = vkx::make_shader(dev, vkx::compile(FS, shaderc_fragment_shader));
+    VkPipelineLayoutCreateInfo lci{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    VkPipelineLayout layout;
+    vkCreatePipelineLayout(dev.handle, &lci, nullptr, &layout);
+    VkPipeline pipeline = vkx::make_pipeline(dev, {.vertex = vs, .fragment = fs,
+                                                   .layout = layout,
+                                                   .color = target.format});
+
+    // 보조 커맨드 버퍼: 어떤 렌더링 안에서 실행될지(첨부물 포맷)를 미리 알린다
+    VkCommandBufferAllocateInfo ai{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = c.pool, .level = VK_COMMAND_BUFFER_LEVEL_SECONDARY,
+        .commandBufferCount = 1};
+    VkCommandBuffer draw;
+    vkAllocateCommandBuffers(dev.handle, &ai, &draw);
+    VkCommandBufferInheritanceRenderingInfo inherit{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_RENDERING_INFO,
+        .colorAttachmentCount = 1, .pColorAttachmentFormats = &target.format,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
+    VkCommandBufferInheritanceInfo ii{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO,
+        .pNext = &inherit};
+    VkCommandBufferBeginInfo bi{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT,
+        .pInheritanceInfo = &ii};
+    vkBeginCommandBuffer(draw, &bi);
+    // 주 버퍼의 상태를 물려받지 않으므로 파이프라인과 동적 상태를 여기서 정한다
+    vkCmdBindPipeline(draw, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    VkViewport viewport{0.0f, 0.0f, 40.0f, 20.0f, 0.0f, 1.0f};
+    VkRect2D scissor{{0, 0}, target.extent};
+    vkCmdSetViewport(draw, 0, 1, &viewport);
+    vkCmdSetScissor(draw, 0, 1, &scissor);
+    vkCmdDraw(draw, 3, 1, 0, 0);
+    vkEndCommandBuffer(draw);
+
+    // 주 버퍼: 내용을 보조 버퍼로 채우겠다고 밝히고 렌더링을 연다
+    const auto OUT = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    const auto WRITE = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+    const auto ATTACHMENT = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    VkCommandBuffer cmd = vkx::begin(c);
+    vkx::transition(cmd, target, VK_IMAGE_LAYOUT_UNDEFINED, ATTACHMENT,
+                    VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE, OUT, WRITE);
+    VkRenderingAttachmentInfo color{
+        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView = target.view, .imageLayout = ATTACHMENT,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        .clearValue = {.color = {{-1.0f}}}};
+    VkRenderingInfo info{
+        .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+        .flags = VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT,
+        .renderArea = {{0, 0}, target.extent}, .layerCount = 1,
+        .colorAttachmentCount = 1, .pColorAttachments = &color};
+    vkCmdBeginRendering(cmd, &info);
+    vkCmdExecuteCommands(cmd, 1, &draw);
+    vkCmdEndRendering(cmd);
+    vkx::transition(cmd, target, ATTACHMENT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    OUT, WRITE, VK_PIPELINE_STAGE_2_COPY_BIT,
+                    VK_ACCESS_2_TRANSFER_READ_BIT);
+    vkx::copy_to_buffer(cmd, target, pixels);
+    vkx::submit_and_wait(dev, c);
+
+    auto* v = static_cast<const float*>(pixels.mapped);
+    int fragments = 0;
+    for (int i = 0; i < 40 * 20; ++i) fragments += v[i] >= 0;
+    std::printf("보조 커맨드 버퍼가 그린 프래그먼트 %d개\n", fragments);
+    vkDestroyPipeline(dev.handle, pipeline, nullptr);
+    vkDestroyPipelineLayout(dev.handle, layout, nullptr);
+    vkDestroyShaderModule(dev.handle, vs, nullptr);
+    vkDestroyShaderModule(dev.handle, fs, nullptr);
+    vkx::destroy(dev, pixels);
+    vkx::destroy(dev, target);
+    vkx::destroy(dev, c);   // 풀과 함께 보조 버퍼도 풀린다
+    vkx::destroy(dev);
+    vkx::destroy(inst);
+}
+```
+
+```text
+보조 커맨드 버퍼가 그린 프래그먼트 306개
+```
+
+- **물려받는 것**: 보조 버퍼는 어떤 렌더링 안에서 실행될지(첨부물 포맷, 샘플 수)를 상속 정보로 받고 `RENDER_PASS_CONTINUE`로 시작합니다. 주 버퍼의 상태는 물려받지 않으므로 파이프라인과 뷰포트를 안에서 다시 정합니다
+- **주 버퍼 쪽**: 렌더링을 열 때 `CONTENTS_SECONDARY_COMMAND_BUFFERS`를 주면, 그 렌더링의 내용은 보조 버퍼로만 채웁니다
+- **쓰임새**: 여러 스레드가 장면의 부분을 보조 버퍼에 나눠 기록하고, 한 스레드가 주 버퍼에 모아 냅니다
+
+<Note>
+다시 내기가 늘 이득은 아닙니다. 장면은 프레임마다 바뀌고 기록은 여러 스레드로 나눌 수 있어서, 많은 엔진은 커맨드 버퍼를 프레임마다 새로 기록합니다. 그대로 다시 내는 것은 후처리처럼 매번 같은 일에 어울립니다.
+</Note>
+
+## 정리
+
+- `vkCmd` 함수는 기록만 하고, 커맨드 버퍼는 처음 → 기록 중 → 실행 가능 → 대기 → (실행 가능 또는 무효)를 돈다
+- 기록에는 명령과 핸들, 인자가 담기고 버퍼의 값은 실행할 때 읽으며, 대기 중인 버퍼에는 손대지 않는다
+- 풀은 스레드마다 두고, 보조 커맨드 버퍼는 상속 정보로 렌더링 안에 들어가 여러 스레드의 기록을 모으는 데 쓴다
