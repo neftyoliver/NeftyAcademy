@@ -1,0 +1,91 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '정적 분석: 컴파일러 경고, cppcheck, clang-tidy를 실수 다섯 개에 돌려 보기, 실행 시 검사와 함께';
+
+사람의 코드 검토는 피곤하면 놓치고, 같은 실수를 백 번째에도 같은 정성으로 보지 못합니다. **정적 분석**은 코드를 실행하지 않고 읽어서 실수를 찾는 도구이고, 안전 관련 개발에서는 [「IEC 61508」](#/read/cpp-industrial/safe-iec61508)이 높은 SIL에 강력 권장하는 기법입니다. 정적 분석 도구는 종류가 많고 도구마다 보는 눈이 다르므로, 실제로 돌려 보는 것이 가장 빨리 감을 잡는 길입니다.
+
+## 실수 다섯 개
+
+밸브 제어 코드에 흔한 실수 다섯 개를 일부러 심었습니다. 이 코드는 고의로 틀린 예제라 검사 실행에서는 빼었습니다.
+
+```cpp nocheck
+// 정적 분석에 걸리라고 일부러 실수를 심은 밸브 제어 코드
+#include <cstdio>
+#include <string>
+#include <utility>
+#include <vector>
+
+struct Valve { std::string name; int percent; };
+
+int readSensor(int channel) { return channel * 10; }
+
+int average(const int* samples, int n) {
+    int sum;                                     // 실수 1: 초기화하지 않음
+    for (int i = 0; i <= n; ++i) sum += samples[i];   // 실수 2: <= 로 한 칸 넘음
+    return sum / n;
+}
+
+void open(Valve& v, long percent) {
+    v.percent = percent;                         // 실수 3: long → int 좁히기
+}
+
+int main() {
+    const int samples[4] = {readSensor(1), readSensor(2), readSensor(3),
+                            readSensor(4)};
+    std::vector<Valve> valves;
+    Valve v{"inlet", 0};
+    valves.push_back(std::move(v));
+    std::printf("%s\n", v.name.c_str());         // 실수 4: 옮긴 뒤에 씀
+    FILE* log = std::fopen("valve.log", "w");
+    if (!log) return 1;
+    open(valves[0], 45);
+    if (valves[0].percent > 50) return 2;        // 실수 5: log를 닫지 않고 나감
+    std::fclose(log);
+    return average(samples, 4);
+}
+```
+
+이 파일에 GCC 14의 경고(`-Wall -Wextra -Wconversion`), cppcheck 2.13, clang-tidy 20(bugprone, 정적 분석기, 초기화 검사)을 차례로 돌렸습니다. 출력은 쪽 너비에 맞춰 파일 이름을 빼고 긴 줄을 접었습니다.
+
+```text nocheck
+$ g++-14 -std=c++20 -Wall -Wextra -Wconversion -c valve.cpp
+18:17 warning: conversion from 'long int' to 'int' may change value
+      [-Wconversion]
+
+$ cppcheck --enable=warning,style,performance --inconclusive valve.cpp
+27: warning: Access of moved variable 'v'. [accessMoved]
+14: warning: Uninitialized variable: sum [uninitvar]
+13: error: Uninitialized variable: sum [legacyUninitvar]
+
+$ clang-tidy-20 --checks='-*,bugprone-*,clang-analyzer-*,\
+      cppcoreguidelines-init-variables' valve.cpp
+12:9  warning: variable 'sum' is not initialized
+      [cppcoreguidelines-init-variables]
+18:17 warning: narrowing conversion from 'long' to signed type 'int'
+      is implementation-defined [bugprone-narrowing-conversions]
+27:25 warning: 'v' used after it was moved [bugprone-use-after-move]
+31:40 warning: Opened stream never closed. Potential resource leak
+      [clang-analyzer-unix.Stream]
+```
+
+| 실수 | GCC 경고 | cppcheck | clang-tidy |
+| --- | --- | --- | --- |
+| 1 초기화 안 함 | - | 찾음 | 찾음 |
+| 2 한 칸 넘음 | - | - | - |
+| 3 좁히기 | 찾음 | - | 찾음 |
+| 4 옮긴 뒤 씀 | - | 찾음 | 찾음 |
+| 5 파일 안 닫음 | - | - | 찾음 |
+
+- **도구마다 눈이 다르다**: 같은 파일인데 찾은 것이 다릅니다. GCC는 좁히기만, cppcheck는 초기화와 옮긴 뒤 쓰기를, clang-tidy는 다섯 중 넷을 찾았습니다. 그래서 하나만 믿지 않고 여럿을 겹쳐 씁니다. (clang-tidy는 실수 1의 결과를 따라간 경고도 한 줄 더 냈는데, 위 출력에서는 뺐습니다)
+- **아무도 못 찾은 것**: 실수 2(`<=`로 배열을 한 칸 넘음)는 `n`이 함수 밖에서 정해지므로 세 도구 모두 놓쳤습니다. 이것은 실행 시 검사가 잡습니다. 같은 파일을 AddressSanitizer로 빌드해 돌리자 `stack-buffer-overflow ... valve.cpp:13 in average`로 정확한 줄을 가리켰습니다. 정적 분석과 시험, 실행 시 검사는 서로를 대신하지 않습니다
+- **분석기도 길을 멈춘다**: 처음에는 배열 밖 읽기를 하나 더 심었는데, clang의 분석기가 그 자리에서 경로 탐색을 멈추는 바람에 그 뒤의 파일 누수를 찾지 못했습니다. 경고를 고치고 다시 돌리면 새 경고가 나오는 까닭입니다
+
+<Note>
+안전 관련 개발에서는 MISRA 지침을 검사하는 상용 도구(Polyspace, Helix QAC, Parasoft, Coverity 등)를 쓰는 경우가 많고, 추상 해석으로 "이 코드에는 0으로 나누기와 배열 밖 접근이 **없다**"를 증명하는 도구도 있습니다. 어떤 도구든 빌드마다 자동으로 돌리고(CI), 새 경고가 생기면 빌드를 실패시키며, 거짓 경보로 판단해 끄는 경고는 [「MISRA C++」](#/read/cpp-industrial/safe-misra)의 일탈처럼 이유를 남겨야 효과가 있습니다.
+</Note>
+
+## 정리
+
+- 정적 분석은 코드를 실행하지 않고 실수를 찾으며, 컴파일러 경고, cppcheck, clang-tidy는 서로 다른 실수를 찾으므로 겹쳐 쓴다
+- 함수 밖에서 정해지는 값에 달린 실수처럼 정적 분석이 놓치는 것은 시험과 AddressSanitizer 같은 실행 시 검사가 잡는다
+- 분석은 빌드마다 자동으로 돌리고 새 경고는 빌드를 실패시키며, 끄는 경고에는 이유를 남긴다

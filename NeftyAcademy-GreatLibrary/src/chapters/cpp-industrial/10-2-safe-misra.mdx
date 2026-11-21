@@ -1,0 +1,93 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'MISRA C++: 안전 필수 시스템용 C++17 부분 집합, 규칙과 범주, 일탈 절차, 규칙이 막는 함정';
+
+C++는 강력하지만, 정의되지 않은 동작과 미묘한 형 변환이 곳곳에 숨어 있어 "컴파일되고 시험도 통과했는데 특정 조건에서만 틀리는" 코드를 쓰기 쉽습니다. 안전 관련 소프트웨어에서는 이런 코드를 아예 쓰지 못하게 언어를 좁혀 씁니다. 그 대표가 **MISRA C++** 지침입니다. 자동차 업계에서 시작한 MISRA의 C++ 지침은 2008년판과 자동차 업계의 AUTOSAR C++14 지침으로 나뉘어 있다가, 2023년 10월 C++17을 대상으로 한 **MISRA C++:2023**으로 합쳐졌습니다.
+
+## 지침의 모양
+
+MISRA C++:2023에는 지침이 179개 있습니다. 도구로 기계적으로 검사할 수 있을 만큼 분명한 **규칙** 175개와, 설계 의도나 문서처럼 도구가 볼 수 없는 것을 다루는 **지시** 4개입니다. 각 지침은 범주를 가집니다.
+
+- **필수**(mandatory): 반드시 지켜야 하고 예외가 없습니다
+- **요구**(required): 지켜야 하지만, 정해진 절차를 거친 **일탈**(deviation)을 허용합니다
+- **권고**(advisory): 합리적인 만큼 따릅니다
+
+일탈은 "이 자리에서 이 규칙을 어기는 까닭, 그래도 안전한 근거, 승인한 사람"을 기록하는 공식 절차입니다. MISRA 준수를 주장하려면 어떤 도구로 어떤 지침을 검사했는지, 어떤 일탈이 있는지를 문서로 보여 줄 수 있어야 합니다. 지침의 본문은 MISRA가 판매하는 문서이므로, 이 책에서는 그 생각만 설명합니다.
+
+## 규칙이 막는 함정
+
+규칙 대부분은 "C++의 이 구석은 사람이 틀리기 쉽다"는 경험에서 나왔습니다. 그런 함정 몇 가지를 직접 돌려 보았습니다.
+
+```cpp
+// MISRA 같은 규칙이 막으려는 함정들: 정수 승격, 부호 섞기, 좁히기, 빠진 case
+#include <cstdint>
+#include <cstdio>
+
+enum class Mode : uint8_t { Off, Manual, Auto, Service };
+
+const char* describe(Mode m) {
+    // 모든 열거값을 다루고 default를 두지 않으면
+    switch (m) {
+    case Mode::Off: return "꺼짐";               // 새 값을 더했을 때 컴파일러가
+    case Mode::Manual: return "수동";            // (-Wswitch로) 빠진 곳을 알려 준다
+    case Mode::Auto: return "자동";
+    case Mode::Service: return "정비";
+    }
+    return "알 수 없음";                         // 범위 밖 값이 들어온 경우
+}
+
+int main() {
+    // 1) 작은 부호 없는 형식끼리 빼면 int로 승격되어 음수가 된다
+    const uint16_t a = 1, b = 2;
+    const auto d16 = a - b;                      // int -1
+    const uint32_t x = 1, y = 2;
+    const auto d32 = x - y;                      // uint32_t로 돌아서 4294967295
+    std::printf("uint16 빼기: %d, uint32 빼기: %u\n", int(d16), unsigned(d32));
+
+    // 2) 부호 있는 값과 없는 값을 비교하면 -1이 아주 큰 수가 된다
+    const int error = -1;
+    const unsigned limit = 10;
+    std::printf("-1 < 10u ? %s\n", (unsigned(error) < limit) ? "참" : "거짓");
+
+    // 3) 넓은 값을 좁은 형식에 넣으면 조용히 잘린다
+    const int setpoint = 300;
+    const uint8_t pwm = uint8_t(setpoint);       // 300 → 44
+    std::printf("300을 uint8_t에: %u\n", unsigned(pwm));
+
+    // 4) 규칙을 지킨 쪽: 범위를 확인하고, 실패를 값으로 알린다
+    auto toPwm = [](int v, uint8_t& out) -> bool {
+        if (v < 0 || v > 255) return false;
+        out = static_cast<uint8_t>(v);
+        return true;
+    };
+    uint8_t safe = 0;
+    std::printf("범위를 검사하면: %s\n", toPwm(setpoint, safe) ? "변환" : "거부");
+    std::printf("모드: %s, 범위 밖: %s\n", describe(Mode::Auto),
+                describe(static_cast<Mode>(7)));
+}
+```
+
+```text
+uint16 빼기: -1, uint32 빼기: 4294967295
+-1 < 10u ? 거짓
+300을 uint8_t에: 44
+범위를 검사하면: 거부
+모드: 자동, 범위 밖: 알 수 없음
+```
+
+- **정수 승격**: 같은 "부호 없는 1 빼기 2"인데 `uint16_t`는 `int`로 승격되어 -1이 되고, `uint32_t`는 그대로 돌아 42억이 됩니다. 형식에 따라 결과의 부호까지 바뀝니다. 그래서 MISRA는 형식이 섞이는 산술과 암시적 변환을 엄격하게 제한합니다
+- **부호 섞기**: -1과 10u를 비교하면 -1이 부호 없는 아주 큰 수로 바뀌어 "-1 < 10"이 거짓이 됩니다. 오류 코드 -1을 받아 한계와 비교하는 코드에서 실제로 생기는 버그입니다
+- **좁히기**: 300을 8비트에 넣자 조용히 44가 되었습니다. PWM 출력이라면 거의 꺼진 것과 같습니다. 규칙을 지키는 쪽은 범위를 먼저 확인하고, 실패를 값으로 돌려줍니다
+- **빠짐없는 switch**: 열거형의 모든 값을 `case`로 다루고 `default`를 두지 않으면, 나중에 값을 하나 더할 때 컴파일러가 빠진 곳을 알려 줍니다. 범위 밖 값(통신으로 들어온 쓰레기)은 switch 뒤에서 따로 처리합니다
+
+이 밖에도 정의되지 않은 동작과 명세되지 않은 동작을 피하는 것, 동적 메모리와 예외의 사용을 제한하는 것, `goto` 같은 흐름을 막는 것 등이 지침의 큰 줄기입니다. 앞에서 본 [「메모리 잠금과 할당 금지」](#/read/cpp-industrial/rt-memory)의 원칙과도 겹칩니다.
+
+<Note>
+MISRA를 따르는 것이 곧 안전한 것은 아닙니다. 지침은 언어의 함정을 줄일 뿐, 요구 사항이 틀렸거나 설계가 잘못된 것은 잡지 못합니다. 그리고 지침 검사는 사람이 아니라 도구가 해야 일관됩니다. 다음 쪽 [「정적 분석」](#/read/cpp-industrial/safe-analysis)이 그 도구들을 다룹니다. 안전 관련이 아닌 코드에서도 컴파일러의 `-Wconversion -Wsign-conversion` 경고를 켜는 것만으로 위 함정의 상당수를 잡을 수 있습니다.
+</Note>
+
+## 정리
+
+- MISRA C++:2023은 C++17을 대상으로 한 안전 필수 시스템용 지침이며, MISRA C++:2008과 AUTOSAR C++14를 합쳤다
+- 지침은 규칙과 지시로 나뉘고 필수, 요구, 권고 범주를 가지며, 요구 규칙을 어길 때는 근거와 승인을 남기는 일탈 절차를 거친다
+- 지침은 정수 승격, 부호 섞기, 좁히기, 빠진 case 같은 언어의 함정을 막지만, 요구 사항과 설계의 오류는 따로 검증해야 한다

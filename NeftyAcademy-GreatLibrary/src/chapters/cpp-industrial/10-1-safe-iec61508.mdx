@@ -1,0 +1,93 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'IEC 61508: 안전 수명 주기, SIL과 PFD, 시험 주기와 공통 원인 고장, 체계적 고장과 소프트웨어';
+
+[「안전과 인증」](#/read/cpp-industrial/land-safety)에서 기능 안전 표준들의 바탕이 IEC 61508이라고 했습니다. 이 표준은 전기·전자·프로그래머블 장치로 된 안전 기능이 "충분히 안전하다"는 것을 어떻게 정하고 증명하는지를 일곱 부분에 걸쳐 정합니다. 소프트웨어 요구는 3부에 있습니다. 핵심 생각은 두 가지입니다. 고장에는 **우연 고장**(부품이 언젠가 망가짐)과 **체계적 고장**(설계와 코드의 실수)이 있고, 둘은 다르게 다룬다는 것입니다.
+
+## 안전 수명 주기
+
+IEC 61508은 안전을 마지막에 시험해서 얻는 것이 아니라 처음부터 끝까지의 과정으로 봅니다. 위험 분석 → 안전 요구 사항(무엇을, 어느 SIL로) → 설계와 구현 → 검증과 확인 → 설치와 운전 → 변경과 폐기까지 각 단계에서 무엇을 하고 무엇을 남겨야 하는지가 정해져 있습니다. 운전 중의 변경도 같은 절차를 다시 거칩니다.
+
+## 우연 고장: 숫자로 다룬다
+
+부품의 우연 고장은 확률로 계산합니다. 1년에 몇 번 쓰이지 않는 안전 기능(낮은 요구 빈도)은 **요구가 왔을 때 작동하지 않을 평균 확률**(PFDavg)로 SIL을 정합니다. SIL 1은 10⁻²~10⁻¹, SIL 2는 10⁻³~10⁻², SIL 3은 10⁻⁴~10⁻³입니다. 구조와 정기 시험 주기에 따라 이 값이 어떻게 바뀌는지 계산했습니다. 진단과 수리 시간을 무시한 간단한 식입니다.
+
+```cpp
+// 안전 기능의 고장 확률(PFDavg)을 구조와 시험 주기에 따라 계산하고 SIL로 읽는다
+#include <cstdio>
+#include <initializer_list>
+
+// IEC 61508의 낮은 요구 빈도 SIL 구간(평균 요구 시 고장 확률)
+const char* silOf(double pfd) {
+    if (pfd < 1e-5) return "SIL 4 넘음";
+    if (pfd < 1e-4) return "SIL 4";
+    if (pfd < 1e-3) return "SIL 3";
+    if (pfd < 1e-2) return "SIL 2";
+    if (pfd < 1e-1) return "SIL 1";
+    return "SIL 없음";
+}
+
+// 진단과 수리 시간을 무시한 간단한 식. lambdaDU: 감지되지 않는 위험 고장률(/h),
+// t1: 정기 시험 주기(h), beta: 두 채널이 함께 고장 나는 공통 원인 비율
+double pfd1oo1(double l, double t1) { return l * t1 / 2; }
+double pfd1oo2(double l, double t1, double beta) {
+    const double ind = (1 - beta) * l * t1;      // 서로 따로 고장
+    return ind * ind / 3 + beta * l * t1 / 2;    // + 함께 고장
+}
+double pfd2oo3(double l, double t1, double beta) {
+    const double ind = (1 - beta) * l * t1;
+    return ind * ind + beta * l * t1 / 2;
+}
+
+int main() {
+    // 채널 하나(센서+논리+밸브), 시간당
+    const double lambdaDU = 2e-6;
+    for (double years : {1.0, 5.0}) {
+        const double t1 = years * 8760;
+        std::printf("시험 주기 %.0f년\n", years);
+        const double p1 = pfd1oo1(lambdaDU, t1);
+        std::printf("  1oo1         PFD %.1e  %s\n", p1, silOf(p1));
+        for (double beta : {0.0, 0.05, 0.10}) {
+            const double p = pfd1oo2(lambdaDU, t1, beta);
+            std::printf("  1oo2 β=%2.0f%%  PFD %.1e  %s\n", beta * 100, p,
+                        silOf(p));
+        }
+        const double p3 = pfd2oo3(lambdaDU, t1, 0.05);
+        std::printf("  2oo3 β= 5%%  PFD %.1e  %s\n", p3, silOf(p3));
+    }
+}
+```
+
+```text
+시험 주기 1년
+  1oo1         PFD 8.8e-03  SIL 2
+  1oo2 β= 0%  PFD 1.0e-04  SIL 3
+  1oo2 β= 5%  PFD 5.3e-04  SIL 3
+  1oo2 β=10%  PFD 9.6e-04  SIL 3
+  2oo3 β= 5%  PFD 7.2e-04  SIL 3
+시험 주기 5년
+  1oo1         PFD 4.4e-02  SIL 1
+  1oo2 β= 0%  PFD 2.6e-03  SIL 2
+  1oo2 β= 5%  PFD 4.5e-03  SIL 2
+  1oo2 β=10%  PFD 6.5e-03  SIL 2
+  2oo3 β= 5%  PFD 9.1e-03  SIL 2
+```
+
+- **정기 시험**: 감지되지 않는 고장은 시험할 때까지 숨어 있으므로, PFD는 시험 주기에 거의 비례합니다. 같은 1oo1이 1년마다 시험하면 SIL 2, 5년마다면 SIL 1입니다
+- **채널을 둘로**: 둘 중 하나만 작동해도 되는 1oo2는 확률이 곱해져 크게 좋아집니다. 이론상(β=0) 1.0×10⁻⁴입니다
+- **공통 원인 고장이 지배한다**: 그런데 두 채널이 같은 원인(같은 전원, 같은 환경, 같은 설계 실수)으로 함께 고장 나는 비율 β를 5%만 잡아도 PFD가 다섯 배가 됩니다. 이 몫은 채널을 더 늘려도 줄지 않습니다. 그래서 다른 원리의 센서, 떨어진 배선, 다른 제조사를 섞는 **다양화**가 중요합니다
+- **2oo3**: 셋 중 둘이 작동해야 하는 2oo3는 안전성은 1oo2보다 조금 낮지만, 센서 하나가 잘못 울려도 공정을 세우지 않아 불필요한 정지가 적습니다
+
+## 체계적 고장: 과정으로 다룬다
+
+소프트웨어의 버그는 확률로 셀 수 없습니다. 같은 입력에서는 늘 같은 버그가 납니다. 그래서 IEC 61508은 SIL이 높을수록 더 엄격한 **방법과 기법**을 요구합니다. 3부의 표들은 요구 사항 추적, 모듈 설계, 코딩 표준([「MISRA C++」](#/read/cpp-industrial/safe-misra)), 정적 분석([「정적 분석」](#/read/cpp-industrial/safe-analysis)), 시험 커버리지, 독립 검증 같은 기법을 SIL별로 "강력 권장", "권장"으로 나열합니다. 쓰는 도구(컴파일러, 정적 분석기)도 결과에 미치는 영향에 따라 등급(T1~T3)을 나누어 신뢰할 근거를 요구합니다.
+
+<Note>
+위 계산은 감을 잡기 위한 것입니다. 실제 계산에는 부품 제조사의 고장 모드 분석(FMEDA)에서 나온 고장률, 진단이 잡아내는 비율, 수리 시간, 구조에 따른 하드웨어 고장 허용도의 제한까지 들어가며, 전용 도구와 안전 전문가가 합니다. PFD 숫자가 좋아도 구조가 허용하지 않으면 그 SIL을 주장할 수 없습니다.
+</Note>
+
+## 정리
+
+- IEC 61508은 안전을 위험 분석부터 폐기까지의 수명 주기 과정으로 다루며, 우연 고장과 체계적 고장을 따로 다룬다
+- 우연 고장은 PFDavg 같은 확률로 SIL을 정하며, 정기 시험 주기와 채널 구조, 특히 공통 원인 고장 비율이 결과를 좌우한다
+- 소프트웨어 같은 체계적 고장은 확률이 아니라 SIL별로 요구되는 방법과 기법, 도구의 신뢰 근거로 다룬다
