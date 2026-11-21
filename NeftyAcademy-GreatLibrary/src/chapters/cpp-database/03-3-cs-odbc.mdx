@@ -1,0 +1,132 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'ODBC: 드라이버 관리자와 드라이버, 핸들의 흐름, 같은 코드로 두 데이터베이스에, SQLSTATE와 이스케이프';
+
+**ODBC**(Open Database Connectivity)는 1992년에 마이크로소프트가 내놓은, 데이터베이스에 붙는 표준 C API입니다. 프로그램은 **드라이버 관리자**(윈도에는 들어 있고, 리눅스와 macOS에서는 unixODBC나 iODBC)를 부르고, 드라이버 관리자가 연결 문자열에 적힌 데이터베이스별 **드라이버**를 불러옵니다. 그래서 같은 코드로 여러 데이터베이스에 붙을 수 있고, 엑셀, BI 도구, SCADA의 이력 저장소 같은 많은 프로그램이 ODBC로 데이터베이스를 읽습니다. 자바의 JDBC도 ODBC를 본떠 만들어졌습니다.
+
+## 핸들의 흐름
+
+ODBC는 환경, 연결, 문장의 세 단계 **핸들**로 이루어집니다. 환경 핸들을 만들어 ODBC 3 방식을 쓰겠다고 알리고, 연결 핸들로 `SQLDriverConnect`에 연결 문자열을 넘겨 붙고, 문장 핸들로 SQL을 실행합니다. 값이 들어가는 문장은 `SQLPrepare`로 준비하고 `SQLBindParameter`로 변수를 묶은 뒤 `SQLExecute`하며, 결과는 `SQLFetch`로 한 행씩 당겨 `SQLGetData`로 칸마다 꺼냅니다. 함수는 성공, 정보가 딸린 성공, 실패 등을 돌려주므로 `SQL_SUCCEEDED`로 확인하고, 실패하면 `SQLGetDiagRec`으로 SQLSTATE와 설명을 얻습니다.
+
+아래 프로그램은 연결 문자열만 바꾸어 같은 코드로 PostgreSQL(psqlODBC 드라이버)과 MariaDB(Connector/ODBC 드라이버)에 붙습니다.
+
+```cpp flags=-lodbc
+#include <sql.h>
+#include <sqlext.h>
+#include <cstdio>
+#include <string>
+
+SQLCHAR* S(const char* s) {                    // ODBC는 SQLCHAR*로 문자열을 받는다
+    return reinterpret_cast<SQLCHAR*>(const_cast<char*>(s));
+}
+
+// 마지막 오류의 SQLSTATE와 설명 첫 줄 (드라이버가 붙인 [..] 머리는 뗀다)
+std::string diag(SQLSMALLINT type, SQLHANDLE h) {
+    SQLCHAR state[6], msg[512];
+    SQLINTEGER native;
+    SQLSMALLINT len;
+    SQLGetDiagRec(type, h, 1, state, &native, msg, sizeof msg, &len);
+    std::string m = reinterpret_cast<char*>(msg);
+    while (!m.empty() && m[0] == '[') m.erase(0, m.find(']') + 1);
+    return "SQLSTATE " + std::string(reinterpret_cast<char*>(state)) + "\n    " +
+           m.substr(0, m.find('\n'));
+}
+
+void demo(SQLHENV env, const char* conn_str) {
+    SQLHDBC dbc;
+    SQLAllocHandle(SQL_HANDLE_DBC, env, &dbc);
+    if (!SQL_SUCCEEDED(SQLDriverConnect(dbc, nullptr, S(conn_str), SQL_NTS, nullptr,
+                                        0, nullptr, SQL_DRIVER_NOPROMPT))) {
+        std::printf("연결 실패: %s\n", diag(SQL_HANDLE_DBC, dbc).c_str());
+        return;
+    }
+    SQLCHAR dbms[64], drv[64];
+    SQLGetInfo(dbc, SQL_DBMS_NAME, dbms, sizeof dbms, nullptr);
+    SQLGetInfo(dbc, SQL_DRIVER_NAME, drv, sizeof drv, nullptr);
+    std::printf("[%s, 드라이버 %s]\n", dbms, drv);
+
+    SQLHSTMT st;
+    SQLAllocHandle(SQL_HANDLE_STMT, dbc, &st);
+    SQLExecDirect(st, S("DROP TABLE IF EXISTS odbc_parts"), SQL_NTS);
+    SQLExecDirect(st, S("CREATE TABLE odbc_parts (id INTEGER PRIMARY KEY, "
+                        "name VARCHAR(20))"), SQL_NTS);
+    SQLPrepare(st, S("INSERT INTO odbc_parts VALUES (?, ?)"), SQL_NTS);
+    SQLINTEGER id;                     // 묶어 둔 변수의 값을 바꿔 가며 실행한다
+    SQLCHAR name[21];
+    SQLLEN name_len = SQL_NTS;
+    SQLBindParameter(st, 1, SQL_PARAM_INPUT, SQL_C_SLONG, SQL_INTEGER, 0, 0, &id, 0,
+                     nullptr);
+    SQLBindParameter(st, 2, SQL_PARAM_INPUT, SQL_C_CHAR, SQL_VARCHAR, 20, 0, name,
+                     sizeof name, &name_len);
+    struct { int id; const char* name; } rows[] = {{1, "bolt"}, {2, "nut"},
+                                                   {1, "washer"}};
+    for (auto& r : rows) {
+        id = r.id;
+        std::snprintf(reinterpret_cast<char*>(name), sizeof name, "%s", r.name);
+        if (SQL_SUCCEEDED(SQLExecute(st)))
+            std::printf("  넣음 %d %s\n", r.id, r.name);
+        else
+            std::printf("  거부 %d %s: %s\n", r.id, r.name,
+                        diag(SQL_HANDLE_STMT, st).c_str());
+    }
+    SQLFreeStmt(st, SQL_RESET_PARAMS);
+    SQLExecDirect(st, S("SELECT id, {fn UCASE(name)} FROM odbc_parts ORDER BY id"),
+                  SQL_NTS);
+    while (SQL_SUCCEEDED(SQLFetch(st))) {      // 한 행씩 당겨 와 칸마다 꺼낸다
+        SQLINTEGER rid;
+        SQLCHAR rname[21];
+        SQLLEN ind;
+        SQLGetData(st, 1, SQL_C_SLONG, &rid, 0, nullptr);
+        SQLGetData(st, 2, SQL_C_CHAR, rname, sizeof rname, &ind);
+        const char* text = reinterpret_cast<char*>(rname);
+        std::printf("  %d %s\n", rid, ind == SQL_NULL_DATA ? "(NULL)" : text);
+    }
+    SQLFreeHandle(SQL_HANDLE_STMT, st);
+    SQLDisconnect(dbc);
+    SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+}
+
+int main() {
+    SQLHENV env;
+    SQLAllocHandle(SQL_HANDLE_ENV, SQL_NULL_HANDLE, &env);
+    auto v3 = reinterpret_cast<SQLPOINTER>(SQL_OV_ODBC3);   // ODBC 3 방식으로
+    SQLSetEnvAttr(env, SQL_ATTR_ODBC_VERSION, v3, 0);
+    demo(env, "Driver={PostgreSQL Unicode};Server=localhost;Database=academy;"
+              "Uid=academy;Pwd=academy;");
+    demo(env, "Driver={MariaDB Unicode};Server=127.0.0.1;Database=academy;"
+              "Uid=academy;Pwd=academy;");
+    SQLFreeHandle(SQL_HANDLE_ENV, env);
+}
+```
+
+```text
+[PostgreSQL, 드라이버 psqlodbcw.so]
+  넣음 1 bolt
+  넣음 2 nut
+  거부 1 washer: SQLSTATE 23505
+    ERROR: duplicate key value violates unique constraint "odbc_parts_pkey"
+  1 BOLT
+  2 NUT
+[MariaDB, 드라이버 libmaodbc.so]
+  넣음 1 bolt
+  넣음 2 nut
+  거부 1 washer: SQLSTATE 23000
+    Duplicate entry '1' for key 'PRIMARY'
+  1 BOLT
+  2 NUT
+```
+
+- **같은 코드, 다른 데이터베이스**: 두 데이터베이스에서 달라진 것은 연결 문자열뿐입니다. DSN 없이 드라이버 이름을 직접 적었고, 자주 쓰는 연결은 설정 파일(`odbc.ini`)에 이름(DSN)을 붙여 둘 수도 있습니다
+- **SQLSTATE**: 같은 기본 키 중복이 PostgreSQL에서는 23505, MariaDB에서는 23000이었습니다. 앞 두 글자 23은 무결성 제약 위반이라는 표준 분류이므로, 여러 데이터베이스를 다루는 코드는 앞 두 글자로 갈래를 나눕니다. 설명 문장은 데이터베이스마다 전혀 다릅니다
+- **이스케이프 시퀀스**: `{fn UCASE(name)}`은 드라이버가 각 데이터베이스의 함수로 바꾸어 실행했습니다. 날짜(`{d '2026-11-22'}`)와 바깥 조인(`{oj ...}`)에도 이런 표기가 있습니다. 하지만 테이블을 만드는 문장의 타입이나 `LIMIT`과 `TOP` 같은 사투리까지 ODBC가 맞춰 주지는 않습니다
+- **묶은 변수**: `SQLBindParameter`는 변수의 주소를 묶어 두므로, 변수의 값만 바꾸고 다시 `SQLExecute`하면 됩니다. 그 대신 실행이 끝날 때까지 변수가 살아 있어야 하고, 길이 칸에는 `SQL_NTS`(널 문자로 끝남)나 `SQL_NULL_DATA`(NULL)를 넣습니다
+
+<Note>
+윈도의 ODBC 함수에는 UTF-16 문자열을 받는 W 판(`SQLDriverConnectW` 등)이 있고, 한글을 다룰 때는 이쪽을 쓰는 것이 안전합니다. 리눅스에서는 `odbcinst -q -d`로 설치된 드라이버를 확인합니다. ODBC 위에 C++다운 감싸개를 씌운 nanodbc 같은 라이브러리도 있고, SQL Server에 붙는 가장 흔한 길도 ODBC입니다([「SQL Server」](#/read/cpp-database/cs-mssql)).
+</Note>
+
+## 정리
+
+- ODBC는 프로그램이 드라이버 관리자를 거쳐 데이터베이스별 드라이버를 쓰는 표준 C API로, 연결 문자열만 바꿔 같은 코드로 여러 데이터베이스에 붙는다
+- 환경, 연결, 문장 핸들의 순서로 쓰고, 준비와 변수 묶기로 값을 넣으며, 결과는 SQLFetch와 SQLGetData로 꺼내고 오류는 SQLGetDiagRec으로 본다
+- SQLSTATE는 앞 두 글자로 분류하고, 이스케이프 시퀀스는 일부 함수와 날짜 표기만 맞춰 주므로 SQL의 사투리는 여전히 직접 다룬다
