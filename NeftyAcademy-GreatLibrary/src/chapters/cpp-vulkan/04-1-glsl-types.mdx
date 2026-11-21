@@ -1,0 +1,193 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'GLSL 타입과 내장 함수: 스칼라·벡터·행렬, 스위즐, 열 우선 행렬, 변환, mod와 fmod, 정밀도';
+
+벌칸의 GLSL은 `#version 450`(또는 460)에 벌칸용 규칙(GL_KHR_vulkan_glsl)을 더한 언어이고, [「그래픽 파이프라인」](#/read/cpp-vulkan/tri-pipeline)에서처럼 SPIR-V로 번역해 씁니다. 이 장에서는 셰이더를 자주 돌려 보므로, 그리기를 여닫는 일을 도우미로 묶어 둡니다.
+
+```cpp vk file=vkx_draw.hpp with=vkx_instance.hpp,vkx_device.hpp,vkx_resource.hpp
+#pragma once
+#include "vkx_resource.hpp"
+
+namespace vkx {
+
+// 정점 셰이더 하나로 뷰포트를 다 덮는 삼각형: (-1,-1), (3,-1), (-1,3)
+inline constexpr const char* FULLSCREEN_VS = R"(#version 450
+void main() {
+    vec2 p = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);
+    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+})";
+
+// 색 첨부물 target(과 깊이 첨부물 depth)에 그리기를 연다. 이전 내용은 버리고
+// clear(깊이는 1.0)로 지우며, 뷰포트와 시저를 이미지 전체로 맞춘다
+inline void begin_drawing(VkCommandBuffer cmd, const Image& target,
+                          VkClearColorValue clear = {},
+                          const Image* depth = nullptr) {
+    const auto OUT = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    transition(cmd, target, VK_IMAGE_LAYOUT_UNDEFINED,
+               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_NONE,
+               VK_ACCESS_2_NONE, OUT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+    VkRenderingAttachmentInfo color{
+        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView = target.view,
+        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE, .clearValue = {.color = clear}};
+    VkRenderingAttachmentInfo zbuf{
+        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .clearValue = {.depthStencil = {1.0f, 0}}};
+    if (depth) {
+        const auto TESTS = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                           VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+        transition(cmd, *depth, VK_IMAGE_LAYOUT_UNDEFINED,
+                   VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                   VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE, TESTS,
+                   VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                       VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+        zbuf.imageView = depth->view;
+    }
+    VkRenderingInfo info{.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+                         .renderArea = {{0, 0}, target.extent}, .layerCount = 1,
+                         .colorAttachmentCount = 1, .pColorAttachments = &color,
+                         .pDepthAttachment = depth ? &zbuf : nullptr};
+    vkCmdBeginRendering(cmd, &info);
+    VkViewport viewport{0.0f, 0.0f, float(target.extent.width),
+                        float(target.extent.height), 0.0f, 1.0f};
+    VkRect2D scissor{{0, 0}, target.extent};
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+}
+
+// 그리기를 닫고 target을 readback 버퍼로 옮겨 CPU가 읽게 한다
+inline void end_drawing(VkCommandBuffer cmd, const Image& target,
+                        const Buffer& readback) {
+    vkCmdEndRendering(cmd);
+    transition(cmd, target, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+               VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+               VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
+               VK_ACCESS_2_TRANSFER_READ_BIT);
+    copy_to_buffer(cmd, target, readback);
+}
+
+}  // namespace vkx
+```
+
+- **화면 전체 삼각형**: 정점 버퍼 없이 정점 셋으로 뷰포트를 다 덮는 삼각형을 만듭니다. 뷰포트 밖은 잘려 나가고, 모든 픽셀에서 프래그먼트 셰이더가 한 번씩 돕니다
+- **begin_drawing과 end_drawing**: 3장에서 매번 쓰던 레이아웃 전환, 렌더링 시작, 뷰포트·시저, 복사를 묶었습니다. 깊이 첨부물을 넘기면 함께 지웁니다([「깊이 버퍼」](#/read/cpp-vulkan/tex-depth))
+
+## 타입
+
+| 분류 | 타입 | 메모 |
+| --- | --- | --- |
+| 스칼라 | `bool` `int` `uint` `float` `double` | 정수와 `float`는 32비트, `double`은 장치 기능 |
+| 벡터 | `vec2`~`vec4`, `ivecN` `uvecN` `bvecN` | 성분은 xyzw, rgba, stpq로 부른다 |
+| 행렬 | `mat2`~`mat4`, `matCxR` | 열 C개와 행 R개, 열 우선 |
+| 그 밖 | 배열, 구조체, `sampler2D` 같은 불투명 타입 | 불투명 타입으로는 계산하지 않는다 |
+
+정수에서 실수로 가는 변환 같은 몇 가지만 저절로 되고, 실수를 정수로 바꿀 때는 `int(x)`처럼 생성자로 밝힙니다. 아래 프로그램은 8×1 이미지(픽셀마다 실수 넷, R32G32B32A32_SFLOAT)에 화면 전체 삼각형을 그려, x번째 픽셀이 x번째 식을 계산하게 합니다.
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp,vkx_cmd.hpp,vkx_resource.hpp,vkx_draw.hpp,vkx_pipeline.hpp
+#include <cmath>
+#include "vkx_cmd.hpp"
+#include "vkx_draw.hpp"
+#include "vkx_pipeline.hpp"
+
+// 픽셀 하나에 식 하나: x번째 픽셀은 x번째 줄의 결과를 vec4로 남긴다
+const char* FS = R"(#version 450
+layout(location = 0) out vec4 o;
+void main() {
+    int i = int(gl_FragCoord.x);              // 픽셀 가운데라 0.5, 1.5, ...
+    vec3 a = vec3(1.0, 2.0, 3.0), b = vec3(4.0, 5.0, 6.0);
+    mat2 m = mat2(1.0, 2.0, 3.0, 4.0);        // 열 우선: 첫 열이 (1, 2)
+    if (i == 0) o = vec4(a.zyx, a.x);
+    else if (i == 1) o = vec4(dot(a, b), length(vec2(3, 4)), distance(a, b), 0);
+    else if (i == 2) o = vec4(cross(a, b), 0);
+    else if (i == 3) o = vec4(m * vec2(1, 0), m[1]);
+    else if (i == 4) o = vec4(mix(0.0, 10.0, 0.25), clamp(7.0, 0.0, 5.0),
+                              smoothstep(0.0, 1.0, 0.25), step(0.5, 0.4));
+    else if (i == 5) o = vec4(fract(-1.25), mod(-1.25, 1.0), floor(-1.25),
+                              trunc(-1.25));
+    else if (i == 6) o = vec4(bitCount(0xF0u), findMSB(40),
+                              bitfieldExtract(0xABCDu, 4, 8), 7u / 2u);
+    else o = vec4(radians(180.0), degrees(3.14159265), atan(1.0, 1.0),
+                  inversesqrt(4.0));
+})";
+
+int main() {
+    vkx::Instance inst = vkx::make_instance();
+    vkx::Device dev = vkx::make_device(inst.handle);
+    vkx::Commands cmds = vkx::make_commands(dev);
+    vkx::Image target = vkx::make_image(
+        dev, {8, 1}, VK_FORMAT_R32G32B32A32_SFLOAT,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    vkx::Buffer pixels =
+        vkx::make_buffer(dev, 8 * 16, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+    auto vs = vkx::make_shader(dev, vkx::compile(vkx::FULLSCREEN_VS,
+                                                 shaderc_vertex_shader));
+    auto fs = vkx::make_shader(dev, vkx::compile(FS, shaderc_fragment_shader));
+    VkPipelineLayoutCreateInfo lci{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    VkPipelineLayout layout;
+    vkCreatePipelineLayout(dev.handle, &lci, nullptr, &layout);
+    VkPipeline pipeline = vkx::make_pipeline(dev, {.vertex = vs, .fragment = fs,
+                                                   .layout = layout,
+                                                   .color = target.format});
+
+    VkCommandBuffer cmd = vkx::begin(cmds);
+    vkx::begin_drawing(cmd, target);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkx::end_drawing(cmd, target, pixels);
+    vkx::submit_and_wait(dev, cmds);
+
+    const char* names[8] = {"a.zyx, a.x", "dot, length, distance", "cross(a, b)",
+                            "m * vec2(1, 0), m[1]", "mix, clamp, smoothstep, step",
+                            "fract, mod, floor, trunc",
+                            "bitCount, findMSB, bitfieldExtract, /",
+                            "radians, degrees, atan, inversesqrt"};
+    auto* v = static_cast<const float*>(pixels.mapped);
+    for (int i = 0; i < 8; ++i)
+        std::printf("%-38s %g %g %g %g\n", names[i], v[4 * i], v[4 * i + 1],
+                    v[4 * i + 2], v[4 * i + 3]);
+    std::printf("C++의 std::fmod(-1.25, 1.0) = %g\n", std::fmod(-1.25, 1.0));
+    vkDestroyPipeline(dev.handle, pipeline, nullptr);
+    vkDestroyPipelineLayout(dev.handle, layout, nullptr);
+    vkDestroyShaderModule(dev.handle, vs, nullptr);
+    vkDestroyShaderModule(dev.handle, fs, nullptr);
+    vkx::destroy(dev, pixels);
+    vkx::destroy(dev, target);
+    vkx::destroy(dev, cmds);
+    vkx::destroy(dev);
+    vkx::destroy(inst);
+}
+```
+
+```text
+a.zyx, a.x                             3 2 1 1
+dot, length, distance                  32 5 5.19615 0
+cross(a, b)                            -3 6 -3 0
+m * vec2(1, 0), m[1]                   1 2 3 4
+mix, clamp, smoothstep, step           2.5 5 0.15625 0
+fract, mod, floor, trunc               0.75 0.75 -2 -1
+bitCount, findMSB, bitfieldExtract, /  4 5 188 3
+radians, degrees, atan, inversesqrt    3.14159 180 0.785398 0.5
+C++의 std::fmod(-1.25, 1.0) = -0.25
+```
+
+- **스위즐과 성분별 연산**: `a.zyx`처럼 성분을 골라 순서를 바꾸고, 읽을 때는 같은 성분을 되풀이해도 됩니다(값을 넣는 쪽에서는 안 됩니다). `+`, `*` 같은 연산자는 성분마다 계산합니다
+- **행렬은 열 우선**: `mat2(1, 2, 3, 4)`의 첫 열은 (1, 2)이고 `m[1]`은 둘째 열 (3, 4)입니다. 행렬과 벡터 사이의 `*`만 선형대수의 곱이고, 성분끼리 곱하려면 `matrixCompMult`를 씁니다
+- **mod는 fmod가 아니다**: GLSL의 `mod(x, y)`는 x - y·floor(x/y)라서 -1.25에 0.75를 주지만, C++의 `std::fmod`는 0 쪽으로 버려 -0.25를 줍니다. 셰이더 계산을 CPU 코드로 옮길 때 흔히 틀리는 곳입니다
+- **정수 함수**: `bitCount`는 켜진 비트 수, `findMSB`는 가장 높은 켜진 비트의 자리(40 = 101000₂이라 5), `bitfieldExtract(v, 4, 8)`은 4번 비트부터 8비트를 꺼냅니다(0xBC = 188)
+
+<Note>
+GPU의 내장 함수는 CPU의 수학 라이브러리보다 오차를 넉넉히 허용합니다. 벌칸 명세는 32비트 `sin`과 `cos`의 절대 오차를 [-π, π] 안에서 2⁻¹¹까지 허용합니다. `mediump`는 벌칸 GLSL에서 낮은 정밀도로 계산해도 된다는 힌트(RelaxedPrecision 장식)일 뿐이라, 무시하는 장치도 많습니다.
+</Note>
+
+## 정리
+
+- 벌칸 GLSL은 `#version 450`에 벌칸 규칙을 더한 언어이고, 스칼라·벡터·행렬(열 우선)·배열·구조체·불투명 타입이 있다
+- 연산자는 성분마다 계산하고 행렬과의 `*`만 선형대수의 곱이며, 성분은 스위즐로 고르고 좁히는 변환은 생성자로 밝힌다
+- 내장 함수에는 C와 정의가 다른 것(`mod`)과 넉넉한 오차 한계가 있으니, CPU 결과와 맞출 때 조심한다
