@@ -1,0 +1,121 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '워치독: 심장 박동으로 멈춘 스레드 찾기, 안전 상태와 다시 시작, systemd와 하드웨어 워치독';
+
+현장의 프로그램은 몇 달씩 쉬지 않고 돕니다. 그동안 언젠가는 교착 상태, 무한 루프, 응답 없는 장치를 기다리는 호출 같은 일로 **멈춥니다**. 멈춘 프로그램이 마지막 출력을 그대로 내보내고 있으면(히터를 켠 채로, 밸브를 연 채로) 위험합니다. 워치독은 "주기적으로 살아 있다는 신호가 오지 않으면 무언가 잘못되었다"고 보고 정해진 조치를 하는 장치입니다. 핵심은 감시하는 쪽이 감시받는 쪽과 **함께 멈추지 않아야** 한다는 것입니다.
+
+## 멈춘 스레드 찾기
+
+스레드 셋(통신, 제어, 기록)이 주기마다 자기 심장 박동 시각을 갱신하고, 감시자가 100ms마다 모두를 살핍니다. 제어 스레드는 20주기째에 누군가 쥔 채 잊어버린 잠금을 기다리다 멈추게 했습니다.
+
+```cpp
+// 소프트웨어 워치독: 스레드마다 심장 박동을 올리고, 감시자가 멈춘 스레드를 찾아낸다
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <mutex>
+#include <thread>
+
+using namespace std::chrono;
+using Clock = steady_clock;
+
+struct Heartbeat {                               // 일하는 스레드가 주기마다 올린다
+    const char* name;
+    std::atomic<Clock::rep> last{0};
+    void beat() { last = Clock::now().time_since_epoch().count(); }
+    double ageSec() const {
+        return duration<double>(Clock::now().time_since_epoch() -
+                                Clock::duration(last.load())).count();
+    }
+};
+
+std::array<Heartbeat, 3> beats{{{"통신"}, {"제어"}, {"기록"}}};
+std::atomic<bool> stop{false};
+std::mutex forgottenLock;                        // 누군가 잠그고 풀지 않은 잠금
+
+void worker(int i, milliseconds period) {
+    for (int cycle = 1; !stop; ++cycle) {
+        beats[i].beat();
+        if (i == 1 && cycle == 20) {             // 20주기째에 제어 스레드가 걸린다
+            forgottenLock.lock();                // 다른 곳에서 이미 쥐고 있다
+            forgottenLock.unlock();
+        }
+        std::this_thread::sleep_for(period);
+    }
+}
+
+int main() {
+    forgottenLock.lock();                        // 버그: 이 잠금을 쥔 채 잊어버렸다
+    for (auto& b : beats) b.beat();
+    std::thread t0(worker, 0, 50ms), t1(worker, 1, 10ms), t2(worker, 2, 100ms);
+
+    int exitCode = 0;                            // 감시자: 100ms마다 모두 살핀다
+    for (int tick = 0; tick < 30 && exitCode == 0; ++tick) {
+        std::this_thread::sleep_for(100ms);
+        for (const Heartbeat& b : beats)
+            if (b.ageSec() > 0.5) {              // 0.5초 넘게 소식이 없다
+                std::printf("감시: '%s' 스레드가 0.5초 넘게 멈춤\n", b.name);
+                std::printf("감시: 출력을 안전 상태로 바꾸고 "
+                            "종료 코드 3으로 끝낸다\n");
+                exitCode = 3;
+            }
+    }
+    stop = true;
+    forgottenLock.unlock();                      // 예제를 깨끗이 끝내려고 푼다
+    t0.join(); t1.join(); t2.join();
+    std::printf("다른 스레드들은 멈추기 전까지 정상: %s\n",
+                beats[0].ageSec() < 1 && beats[2].ageSec() < 1 ? "예" : "아니요");
+    // 실제 프로그램은 exitCode를 돌려주어 systemd 같은 관리자가 다시 시작하게 한다
+    return exitCode == 3 ? 0 : 1;
+}
+```
+
+```text
+감시: '제어' 스레드가 0.5초 넘게 멈춤
+감시: 출력을 안전 상태로 바꾸고 종료 코드 3으로 끝낸다
+다른 스레드들은 멈추기 전까지 정상: 예
+```
+
+- **살아 있음이 아니라 진행을 본다**: 스레드가 존재하는지가 아니라 **할 일을 하고 있는지**를 봅니다. 그래서 심장 박동은 주기의 맨 끝이나 실제로 일을 마친 자리에서 올립니다. 제어 스레드는 살아 있었지만 박동이 멈췄으므로 걸렸습니다
+- **스레드마다 따로**: 통신과 기록 스레드는 계속 박동했습니다. 프로그램 전체에 박동 하나만 두면 다른 스레드가 박동을 대신 올려 멈춘 스레드를 가립니다
+- **조치는 단순하게**: 멈춘 프로그램 안에서 복잡한 복구를 시도하면 그것도 멈출 수 있습니다. 출력을 안전 상태로 돌리고, 기록을 남기고, 종료 코드를 내고 끝냅니다. 다시 시작은 바깥의 관리자(systemd 등)가 합니다
+
+## 바깥의 감시자들
+
+프로세스 전체가 멈추거나 운영 체제가 얼면 안쪽 감시자도 함께 멈춥니다. 그래서 감시를 겹겹이 둡니다.
+
+- **systemd**: 서비스 단위에 `WatchdogSec=2`를 두고 프로그램이 `sd_notify(0, "WATCHDOG=1")`로 주기적으로 알리면, 알림이 끊길 때 systemd가 프로세스를 죽이고 `Restart=`에 따라 다시 시작합니다. 위의 안쪽 감시자가 모든 스레드가 정상일 때만 알리게 하면 둘이 이어집니다
+- **하드웨어 워치독**: 산업용 PC와 임베디드 보드에는 CPU와 따로 도는 감시 회로가 있습니다. 운영 체제까지 얼면 보드를 재시작합니다
+
+```cpp nocheck
+// 하드웨어 워치독: 정해진 시간 안에 "살아 있다"가 없으면 보드가 스스로 재시작한다
+#include <fcntl.h>
+#include <linux/watchdog.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+
+int fd = open("/dev/watchdog", O_WRONLY);       // 여는 순간부터 감시가 시작된다
+int timeout = 5;                                 // 5초
+ioctl(fd, WDIOC_SETTIMEOUT, &timeout);
+// 소프트웨어 감시가 모두 정상일 때만
+while (allTasksHealthy()) {
+    ioctl(fd, WDIOC_KEEPALIVE, 0);               // 먹이를 준다
+    sleep(1);
+}
+// 정상 종료라면 'V'를 쓰고 닫아 감시를 끈다(드라이버가 지원할 때)
+write(fd, "V", 1);
+close(fd);
+```
+
+- **통신 감시**: PC와 PLC는 서로의 심장 박동 카운터를 주고받습니다. PLC는 PC의 카운터가 정해진 시간 동안 바뀌지 않으면 PC가 죽었다고 보고, PC가 명령하던 장비를 안전하게 멈춥니다. [「PROFINET과 EtherNet/IP」](#/read/cpp-industrial/fb-ethernet)의 연결 시간 초과도 같은 생각입니다
+
+<Note>
+워치독이 프로그램을 다시 시작시켰다면 그것은 고쳐진 것이 아니라 숨겨진 것입니다. 재시작할 때마다 원인을 찾을 기록(멈춘 스레드, 그 직전의 로그, 가능하면 스택 덤프)을 남기고, 재시작 횟수를 세어 일정 횟수를 넘으면 더 시도하지 않고 사람을 부르게 합니다([「로그와 진단」](#/read/cpp-industrial/rel-diagnostics)).
+</Note>
+
+## 정리
+
+- 워치독은 주기적인 살아 있음 신호가 끊기면 조치하는 장치이며, 감시하는 쪽이 감시받는 쪽과 함께 멈추지 않아야 한다
+- 스레드마다 일을 마친 자리에서 심장 박동을 올리고, 멈춘 것을 찾으면 출력을 안전 상태로 돌리고 종료해 바깥 관리자가 다시 시작하게 한다
+- systemd의 WatchdogSec, 하드웨어 워치독, PC와 PLC의 심장 박동 카운터로 감시를 겹겹이 두고, 재시작마다 원인 기록을 남긴다

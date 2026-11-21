@@ -1,0 +1,143 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '오류에서 돌아오기: 오류 나누기, 원자적 저장으로 이어서 하기, 회로 차단기, 다시 켤 때의 확인';
+
+현장의 오류는 대부분 예외가 아니라 일상입니다. 통신선은 가끔 끊기고, 센서는 가끔 엉뚱한 값을 내고, 정전은 언제든 옵니다. 좋은 장비 소프트웨어는 오류가 없는 소프트웨어가 아니라 **오류에서 돌아오는** 소프트웨어입니다. 먼저 오류를 세 가지로 나눕니다.
+
+- **일시 오류**: 다시 하면 대개 됩니다(통신 시간 초과 한 번). 정해진 횟수와 간격으로 다시 시도합니다([「폴링 설계」](#/read/cpp-industrial/plc-polling)의 물러서기)
+- **지속 오류**: 다시 해도 안 됩니다(장치 고장, 케이블 빠짐). 그 기능만 멈추거나 줄여서 돌고, 사람에게 알립니다
+- **치명 오류**: 계속하면 위험합니다(안전 장치 이상, 상태를 믿을 수 없음). 안전하게 멈춥니다
+
+## 이어서 하기와 쉬게 하기
+
+여러 단계로 된 작업 도중에 정전이 나도 다시 켰을 때 이어서 할 수 있도록 진행 상황을 저장하고, 자꾸 실패하는 장치를 회로 차단기로 쉬게 했습니다.
+
+```cpp
+// 오류에서 돌아오기: 진행 상황을 원자적으로 저장해 이어서 하고,
+// 자꾸 실패하는 장치는 회로 차단기로 잠시 쉬게 한다
+#include <fcntl.h>
+#include <unistd.h>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <optional>
+#include <string>
+
+namespace fs = std::filesystem;
+
+struct Progress { int batch, step; };
+
+unsigned checksum(const std::string& s) {
+    unsigned h = 2166136261u;                    // FNV-1a
+    for (unsigned char c : s) h = (h ^ c) * 16777619u;
+    return h;
+}
+
+// 임시 파일에 다 쓰고, 디스크에 내리고(fsync), 이름을 바꾼다(rename은 원자적)
+void save(const fs::path& file, Progress p) {
+    const std::string body = std::to_string(p.batch) + " " + std::to_string(p.step);
+    const std::string text = body + " " + std::to_string(checksum(body)) + "\n";
+    const fs::path tmp = file.string() + ".tmp";
+    const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (::write(fd, text.data(), text.size()) != ssize_t(text.size())) return;
+    ::fsync(fd);
+    ::close(fd);
+    // 옛 파일이 새 파일로 한순간에 바뀐다
+    fs::rename(tmp, file);
+}
+
+std::optional<Progress> load(const fs::path& file) {
+    std::ifstream in(file);
+    int b, s;
+    unsigned sum;
+    if (!(in >> b >> s >> sum)) return std::nullopt;
+    if (checksum(std::to_string(b) + " " + std::to_string(s)) != sum)
+        return std::nullopt;                     // 깨진 내용은 믿지 않는다
+    return Progress{b, s};
+}
+
+// 연속 실패 3번이면 열고, 5번 쉬고 한 번 시험
+class CircuitBreaker {
+    enum { Closed, Open, HalfOpen } state = Closed;
+    int failures = 0, skipped = 0;
+public:
+    const char* call(bool deviceOk) {
+        if (state == Open && ++skipped < 5) return "열림: 부르지 않음";
+        if (state == Open) state = HalfOpen;     // 쉴 만큼 쉬었다: 한 번만 시험
+        if (deviceOk) { state = Closed; failures = 0; return "성공"; }
+        if (state == HalfOpen || ++failures >= 3) {
+            state = Open;
+            skipped = 0;
+            return "실패 → 열림";
+        }
+        return "실패";
+    }
+};
+
+int main() {
+    const fs::path file = fs::temp_directory_path() / "recovery-demo.chk";
+    fs::remove(file);
+    save(file, {12, 3});                         // 12번 배치의 3단계까지 끝냄
+    // 4단계를 저장하다 정전: 임시 파일만 반쯤
+    {
+        std::ofstream half(file.string() + ".tmp");
+        half << "12 ";
+    }
+    if (auto p = load(file))
+        std::printf("다시 켬: 배치 %d, 단계 %d부터 이어서\n", p->batch,
+                    p->step + 1);
+    {                                            // 내용이 깨진 파일
+        std::ofstream bad(file);
+        bad << "12 9 1234\n";
+    }
+    const bool trusted = load(file).has_value();
+    std::printf("깨진 파일: %s\n",
+                trusted ? "읽음" : "믿지 않고 사람에게 확인 요청");
+    fs::remove(file);
+    fs::remove(file.string() + ".tmp");
+
+    CircuitBreaker cb;
+    // 11번부터 회복
+    const bool ok[] = {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1};
+    for (int i = 0; i < 15; ++i)
+        std::printf("호출 %2d: %s\n", i + 1, cb.call(ok[i]));
+}
+```
+
+```text
+다시 켬: 배치 12, 단계 4부터 이어서
+깨진 파일: 믿지 않고 사람에게 확인 요청
+호출  1: 성공
+호출  2: 실패
+호출  3: 실패
+호출  4: 실패 → 열림
+호출  5: 열림: 부르지 않음
+호출  6: 열림: 부르지 않음
+호출  7: 열림: 부르지 않음
+호출  8: 열림: 부르지 않음
+호출  9: 실패 → 열림
+호출 10: 열림: 부르지 않음
+호출 11: 열림: 부르지 않음
+호출 12: 열림: 부르지 않음
+호출 13: 열림: 부르지 않음
+호출 14: 성공
+호출 15: 성공
+```
+
+- **원자적 저장**: 파일을 제자리에서 고쳐 쓰다 정전이 나면 반쯤 쓴 파일이 남습니다. 그래서 임시 파일에 다 쓰고, `fsync`로 디스크에 확실히 내린 뒤, `rename`으로 이름을 바꿉니다. 리눅스에서 같은 파일 시스템 안의 `rename`은 원자적이어서, 다시 켰을 때 남는 것은 온전한 옛 파일 아니면 온전한 새 파일입니다. 4단계를 쓰다 정전이 난 경우에도 3단계까지의 기록을 읽어 4단계부터 이어 갔습니다
+- **믿지 못하면 묻는다**: 체크섬이 맞지 않는 기록은 쓰지 않았습니다. 깨진 기록으로 "어디까지 했는지"를 추측해 기계를 움직이는 것보다 사람에게 확인을 받는 것이 안전합니다
+- **회로 차단기**: 연속 3번 실패하자 차단기가 열려 그 장치를 부르지 않았습니다. 응답하지 않는 장치를 계속 부르면 시간 초과를 기다리느라 다른 일까지 막힙니다. 5번 쉰 뒤 한 번만 시험해 보고(반열림), 실패하면 다시 쉬고, 성공하면 닫아 평소대로 돌아갑니다
+
+## 다시 켤 때
+
+정전 뒤에 소프트웨어가 기억하는 상태와 실제 기계의 상태가 같다고 가정하면 안 됩니다. 정전 중에 누군가 축을 손으로 돌렸을 수도 있고, 컨베이어 위의 제품이 치워졌을 수도 있습니다. 그래서 다시 켤 때는 축의 원점을 다시 잡거나 절대 엔코더 값을 확인하고, 센서로 실제 상태를 읽어 저장된 기록과 맞는지 보고, 맞지 않으면 작업자에게 확인을 받습니다. 그리고 저절로 다시 움직이지 않고 사람의 시작 명령을 기다립니다([「안전과 인증」](#/read/cpp-industrial/land-safety)).
+
+<Note>
+다시 시도해도 안전한 명령인지도 따져야 합니다. "위치 100mm로 가라"는 두 번 보내도 결과가 같지만, "10mm 더 가라"는 두 번 실행되면 20mm를 갑니다. 응답을 못 받았다고 다시 보내는 명령은 반드시 몇 번을 실행해도 결과가 같은(멱등) 형태로 설계하거나, 명령 번호를 붙여 받는 쪽이 중복을 버리게 합니다.
+</Note>
+
+## 정리
+
+- 오류는 일시(다시 시도), 지속(기능을 줄이고 알림), 치명(안전하게 정지)으로 나누어 다르게 다룬다
+- 진행 상황은 임시 파일, fsync, rename으로 원자적으로 저장하고 체크섬으로 검증하며, 믿을 수 없으면 사람에게 묻는다
+- 자꾸 실패하는 장치는 회로 차단기로 쉬게 하고, 다시 켤 때는 실제 기계 상태를 확인한 뒤 사람의 명령을 기다리며, 재전송하는 명령은 멱등하게 만든다
