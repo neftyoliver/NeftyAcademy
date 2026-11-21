@@ -1,0 +1,139 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '주기 작업: 실시간 주기 스레드의 뼈대, 넘침 감지와 건너뛰기, 잠금 없는 큐로 바깥 스레드와 주고받기';
+
+앞의 세 쪽에서 본 것을 모아 실시간 주기 스레드 하나를 짭니다. 대부분의 제어 프로그램은 이 뼈대 위에 서 있습니다. 중요한 것은 실시간 스레드가 하는 일과 하지 않는 일을 나누는 것입니다. 실시간 스레드는 정해진 시각에 깨어나 입력을 읽고, 계산하고, 출력을 쓰고, 다시 잠듭니다. 화면, 파일, 네트워크, 로그처럼 언제 끝날지 모르는 일은 모두 보통 스레드가 맡고, 둘 사이는 **기다리지 않는 큐**로 잇습니다.
+
+## 뼈대
+
+5ms 주기로 200번 도는 스레드입니다. 바깥에서 설정값을 받아 값이 그쪽으로 따라가게 하고, 40주기마다 기록할 값을 내보냅니다. 넘침 처리를 보이려고 100번째 주기에서 일부러 12ms 동안 멈추게 했습니다.
+
+```cpp norun
+// 실시간 주기 스레드의 뼈대: 절대 시각, 넘침 감지, 잠금 없는 큐로 바깥과 주고받기
+#include <pthread.h>
+#include <sched.h>
+#include <sys/mman.h>
+#include <array>
+#include <atomic>
+#include <cstdio>
+#include <ctime>
+#include <optional>
+
+// 생산자 하나, 소비자 하나, 잠금 없음
+template <class T, size_t N> class SpscQueue {
+    std::array<T, N> buf{};
+    alignas(64) std::atomic<size_t> head{0};     // 소비자가 읽을 자리
+    alignas(64) std::atomic<size_t> tail{0};     // 생산자가 쓸 자리
+public:
+    // 가득 차면 버린다(기다리지 않는다)
+    bool push(const T& v) {
+        const size_t t = tail.load(std::memory_order_relaxed);
+        if (t - head.load(std::memory_order_acquire) == N) return false;
+        buf[t % N] = v;
+        tail.store(t + 1, std::memory_order_release);
+        return true;
+    }
+    std::optional<T> pop() {
+        const size_t h = head.load(std::memory_order_relaxed);
+        if (h == tail.load(std::memory_order_acquire)) return std::nullopt;
+        T v = buf[h % N];
+        head.store(h + 1, std::memory_order_release);
+        return v;
+    }
+};
+
+struct Telemetry { int cycle; double value; };
+SpscQueue<double, 16> commands;                  // 바깥 → 실시간: 설정값
+SpscQueue<Telemetry, 64> telemetry;              // 실시간 → 바깥: 기록할 값
+std::atomic<bool> running{true};
+int executed = 0, missed = 0;                    // join 뒤에 main이 읽는다
+
+constexpr long kPeriodNs = 5'000'000;            // 5ms
+void advance(timespec& t, long ns) {
+    t.tv_nsec += ns;
+    while (t.tv_nsec >= 1'000'000'000) { t.tv_nsec -= 1'000'000'000; ++t.tv_sec; }
+}
+long long diffNs(const timespec& a, const timespec& b) {
+    return (a.tv_sec - b.tv_sec) * 1'000'000'000LL + (a.tv_nsec - b.tv_nsec);
+}
+
+void* cyclicTask(void*) {
+    volatile char stackTouch[64 * 1024];         // 쓸 스택을 미리 만져 둔다
+    for (size_t i = 0; i < sizeof stackTouch; i += 4096) stackTouch[i] = 0;
+
+    double setpoint = 0, value = 0;
+    timespec next;
+    clock_gettime(CLOCK_MONOTONIC, &next);
+    for (int cycle = 0; cycle < 200 && running; ++cycle) {
+        advance(next, kPeriodNs);
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, nullptr);
+
+        while (auto c = commands.pop()) setpoint = *c;          // 1) 입력
+        value += (setpoint - value) * 0.1;                      // 2) 계산
+        if (cycle % 40 == 0) telemetry.push({cycle, value});    // 3) 출력
+        ++executed;
+        if (cycle == 100) {                      // 일부러 한 번 12ms 동안 늦어진다
+            timespec stall{0, 12'000'000};
+            nanosleep(&stall, nullptr);
+        }
+        // 4) 넘침 확인: 다음 경계를 이미 지났나
+        timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        const long long over = diffNs(now, next);
+        if (over > kPeriodNs) {                  // 통째로 놓친 주기는 건너뛴다
+            const int skip = int(over / kPeriodNs);
+            missed += skip;
+            cycle += skip;
+            advance(next, skip * kPeriodNs);
+        }
+    }
+    return nullptr;
+}
+
+int main() {
+    mlockall(MCL_CURRENT | MCL_FUTURE);
+    commands.push(100.0);                        // 처음 설정값
+    pthread_attr_t a;
+    pthread_attr_init(&a);
+    pthread_attr_setinheritsched(&a, PTHREAD_EXPLICIT_SCHED);
+    pthread_attr_setschedpolicy(&a, SCHED_FIFO);
+    sched_param p{};
+    p.sched_priority = 80;
+    pthread_attr_setschedparam(&a, &p);
+    pthread_t t;
+    if (pthread_create(&t, &a, cyclicTask, nullptr) != 0)     // 권한이 없으면
+        pthread_create(&t, nullptr, cyclicTask, nullptr);      // 보통 스레드로
+    pthread_attr_destroy(&a);
+    pthread_join(t, nullptr);
+
+    while (auto m = telemetry.pop())             // 기록은 보통 스레드가 한다
+        std::printf("주기 %3d: 값 %.2f\n", m->cycle, m->value);
+    std::printf("실행 %d주기, 놓쳐서 건너뜀 %d주기\n", executed, missed);
+}
+```
+
+```text nocheck
+주기   0: 값 10.00
+주기  40: 값 98.67
+주기  80: 값 99.98
+주기 120: 값 100.00
+주기 160: 값 100.00
+실행 198주기, 놓쳐서 건너뜀 2주기
+```
+
+- **시작할 때 준비**: 메모리를 고정하고([「메모리 잠금과 할당 금지」](#/read/cpp-industrial/rt-memory)), 실시간 스레드는 쓸 스택을 미리 만집니다. 스레드는 `pthread_attr`로 처음부터 `SCHED_FIFO` 80으로 만듭니다. `std::thread`는 만든 뒤에야 우선순위를 바꿀 수 있어 시작 직후 잠깐 보통 스레드로 돕니다. 권한이 없으면 보통 스레드로 물러나 돌게 했습니다
+- **절대 시각으로 깨어나기**: 다음 깨어날 시각을 주기만큼 더해 가며 `clock_nanosleep(TIMER_ABSTIME)`으로 잡니다([「실시간이라는 요구」](#/read/cpp-industrial/land-realtime))
+- **넘침 감지**: 일을 마친 시각이 이미 다음 경계를 지났는지 봅니다. 12ms 멈춤으로 주기 두 개를 통째로 놓쳤고, 밀린 주기를 몰아서 돌리는 대신 건너뛰고 다음 경계에 맞추었습니다. 몰아서 돌리면 짧은 시간에 출력이 여러 번 바뀌어 기계에 충격을 줄 수 있기 때문입니다. 어느 쪽이 맞는지는 장비가 정하며, 넘침이 일정 횟수를 넘으면 안전 정지로 가는 것이 보통입니다
+- **잠금 없는 큐**: `SpscQueue`는 쓰는 쪽 하나와 읽는 쪽 하나만 있다고 정해서 원자 변수 두 개로 동작합니다. 가득 차면 넣기를 포기하고 돌아오므로 실시간 스레드가 기다리는 일이 없습니다. `head`와 `tail`을 다른 캐시 줄에 둔 것은 두 스레드가 같은 캐시 줄을 두고 다투지 않게 하려는 것입니다
+
+이 예제의 출력은 시각에 따라 달라질 수 있습니다. 가상 기계가 5ms 넘게 멈칫하면 건너뛴 주기가 늘고 기록되는 값도 조금 바뀝니다. 그런 일이 몇 번 실제로 일어났기 때문에 출력 비교를 하지 않는 예제로 두었습니다. 실시간 프로그램을 시험할 때는 출력값보다 **넘침 횟수와 지연의 분포**를 봅니다.
+
+<Note>
+값을 하나만 주고받는 경우(최신 위치, 최신 설정)에는 큐보다 세 칸 버퍼(triple buffer)가 맞습니다. 쓰는 쪽은 늘 빈 칸에 쓰고 원자적으로 바꿔 놓으며, 읽는 쪽은 늘 가장 최근 칸을 읽으므로 양쪽 모두 기다리지 않습니다. 반대로 실시간 스레드에서 `std::mutex`를 잡는 것은 [「PREEMPT_RT」](#/read/cpp-industrial/rt-preempt)에서 본 우선순위 역전의 문을 여는 일입니다.
+</Note>
+
+## 정리
+
+- 실시간 주기 스레드는 메모리를 고정하고 스택을 미리 만진 뒤, 처음부터 실시간 우선순위로 만들어 절대 시각으로 깨어난다
+- 일을 마친 시각으로 넘침을 감지하고, 놓친 주기는 몰아서 돌리기보다 건너뛰며, 넘침이 잦으면 안전하게 멈춘다
+- 실시간 스레드와 보통 스레드는 잠금 대신 기다리지 않는 SPSC 큐나 세 칸 버퍼로 주고받는다

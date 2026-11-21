@@ -1,0 +1,131 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '측정: 지연 히스토그램을 프로그램 안에서 모으기, 부하를 걸고 오래 재기, cyclictest, 원인 찾는 도구';
+
+실시간 시스템은 "빠르다"가 아니라 "최악이 얼마다"로 말한다고 했습니다. 그 최악은 계산으로 얻기 어렵고, 결국 재서 압니다. 다만 몇 초 재고 끝내면 안 됩니다. 드문 지연일수록 문제가 되므로, **실제보다 나쁜 조건에서 오래** 재고 그 분포를 봅니다.
+
+## 히스토그램으로 모으기
+
+모든 지연 값을 저장하면 메모리가 모자라고, 주기 안에서 파일에 쓰면 그것이 지연을 만듭니다. 그래서 구간별 개수만 세는 히스토그램을 씁니다. 기록은 비교 몇 번과 덧셈뿐이라 주기 안에서 해도 됩니다. 1ms 주기를 20초 동안 돌리며, 한 번은 조용할 때, 한 번은 stress-ng로 CPU, 메모리, 디스크에 부하를 걸고 재었습니다(가상 기계, 보통 커널, SCHED_FIFO 80).
+
+```cpp norun
+// 주기 스레드 안에서 지연을 히스토그램으로 모은다: 기록은 싸게, 출력은 끝나고
+#include <pthread.h>
+#include <sched.h>
+#include <sys/mman.h>
+#include <array>
+#include <cstdio>
+#include <ctime>
+
+class LatencyHistogram {                         // 실시간 스레드 하나만 쓴다고 정함
+    static constexpr std::array<long, 9> kEdgesUs = {10, 20, 50, 100, 200, 500,
+                                                     1000, 2000, 5000};
+    std::array<long, kEdgesUs.size() + 1> count{};
+    long maxUs = 0, total = 0;
+public:
+    void add(long us) {                          // 할당도 잠금도 없는 몇 줄
+        size_t i = 0;
+        while (i < kEdgesUs.size() && us >= kEdgesUs[i]) ++i;
+        ++count[i];
+        ++total;
+        if (us > maxUs) maxUs = us;
+    }
+    void print() const {
+        long lo = 0;
+        for (size_t i = 0; i < count.size(); ++i) {
+            if (i < kEdgesUs.size())
+                std::printf("%5ld~%-5ldµs %7ld  ", lo, kEdgesUs[i], count[i]);
+            else
+                std::printf("%5ldµs 이상  %7ld  ", lo, count[i]);
+            for (long b = 0; b < count[i] * 40 / total; ++b) std::putchar('#');
+            std::printf("\n");
+            if (i < kEdgesUs.size()) lo = kEdgesUs[i];
+        }
+        std::printf("최대 %ldµs (%ld번 중)\n", maxUs, total);
+    }
+};
+
+LatencyHistogram histogram;
+
+void* task(void*) {
+    timespec next, now;
+    clock_gettime(CLOCK_MONOTONIC, &next);
+    for (int i = 0; i < 20000; ++i) {            // 1ms × 2만 = 20초
+        next.tv_nsec += 1'000'000;
+        if (next.tv_nsec >= 1'000'000'000) {
+            next.tv_nsec -= 1'000'000'000;
+            ++next.tv_sec;
+        }
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, nullptr);
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        histogram.add(((now.tv_sec - next.tv_sec) * 1'000'000'000L +
+                       (now.tv_nsec - next.tv_nsec)) / 1000);
+    }
+    return nullptr;
+}
+
+int main() {
+    mlockall(MCL_CURRENT | MCL_FUTURE);
+    pthread_attr_t a;
+    pthread_attr_init(&a);
+    pthread_attr_setinheritsched(&a, PTHREAD_EXPLICIT_SCHED);
+    pthread_attr_setschedpolicy(&a, SCHED_FIFO);
+    sched_param p{};
+    p.sched_priority = 80;
+    pthread_attr_setschedparam(&a, &p);
+    pthread_t t;
+    if (pthread_create(&t, &a, task, nullptr) != 0)   // 권한이 없으면 보통 스레드로
+        pthread_create(&t, nullptr, task, nullptr);
+    pthread_join(t, nullptr);
+    histogram.print();
+}
+```
+
+```text nocheck
+조용할 때
+    0~10   µs       0
+   10~20   µs     844  #
+   20~50   µs   16127  ################################
+   50~100  µs    2431  ####
+  100~200  µs     467
+  200~500  µs      61
+  500~1000 µs      29
+ 1000~2000 µs      24
+ 2000~5000 µs      17
+ 5000µs 이상        0
+최대 4282µs (20000번 중)
+
+부하를 걸었을 때(앞부분 같은 모양이라 줄임)
+  200~500  µs      55
+  500~1000 µs      26
+ 1000~2000 µs      19
+ 2000~5000 µs      19
+ 5000µs 이상       16
+최대 14833µs (20000번 중)
+```
+
+- **몸통과 꼬리**: 대부분(90% 넘게)은 100µs 안에 깨어났지만, 1ms를 넘긴 것도 수십 번 있습니다. 평균만 보면 50µs쯤인 시스템이지만, 1ms 주기의 제어에는 쓸 수 없다는 것을 꼬리가 말해 줍니다
+- **부하는 꼬리를 늘린다**: 부하를 걸자 5ms를 넘긴 것이 16번 생기고 최대가 15ms 가까이 되었습니다. 현장의 제어기도 HMI, 로그, 통신, 백업이 동시에 돌므로, 측정은 그보다 나쁜 부하 아래에서 합니다
+- 이 숫자는 가상 기계와 보통 커널의 값입니다. 실시간 커널과 맞춘 하드웨어에서는 최대가 수십 마이크로초까지 내려갑니다. 히스토그램은 그런 개선이 실제로 꼬리를 줄였는지 확인하는 도구입니다
+
+## cyclictest
+
+리눅스 실시간 진영의 표준 측정 도구는 rt-tests 묶음의 `cyclictest`입니다. 위 프로그램과 같은 일을 여러 스레드, 여러 CPU에서 하고 결과를 한 줄로 요약하거나 히스토그램으로 냅니다.
+
+```text nocheck
+$ sudo cyclictest -m -p 80 -i 1000 -l 10000 -q
+# /dev/cpu_dma_latency set to 0us
+T: 0 (25758) P:80 I:1000 C:  10000 Min:     19 Act:   34 Avg:   51 Max:    5148
+```
+
+`-m`은 메모리 고정, `-p 80`은 우선순위, `-i 1000`은 주기(µs), `-l`은 반복 횟수이고, 결과의 Min, Avg, Max가 지연(µs)입니다. 첫 줄을 보면 cyclictest는 도는 동안 `/dev/cpu_dma_latency`에 0을 써서 CPU가 깊은 절전 상태에 들어가지 않게 합니다. [「지연과 지터」](#/read/cpp-industrial/rt-jitter)에서 본 "쉬는 CPU가 더 늦다"를 막는 방법이며, 실시간 프로그램도 이 파일을 열어 0을 쓰고 열어 둔 채로 돌면 같은 효과를 얻습니다. 장비를 고를 때는 cyclictest를 부하와 함께 몇 시간에서 며칠 동안 돌려 최대값을 봅니다.
+
+<Note>
+큰 지연이 보이면 어디서 왔는지 찾아야 합니다. 커널의 ftrace와 그것을 감싼 trace-cmd, 그리고 실시간 분석 도구 rtla(timerlat, osnoise)는 지연이 생긴 순간 커널이 무엇을 하고 있었는지 보여 줍니다. 입력이 들어와서 출력이 나가기까지의 전체 응답 시간은 소프트웨어 시계로는 잴 수 없으므로, 입력 신호와 출력 핀을 오실로스코프나 로직 분석기로 함께 찍어 잽니다. 그리고 잰 최대값은 보장이 아니므로 여유를 두고, 그것을 넘는 경우는 [「워치독」](#/read/cpp-industrial/rel-watchdog)이 잡게 합니다.
+</Note>
+
+## 정리
+
+- 지연은 주기 안에서 구간별 개수만 세는 히스토그램으로 모으고, 평균보다 꼬리와 최대값을 본다
+- 측정은 실제보다 나쁜 부하를 걸고 오래 하며, 리눅스에서는 cyclictest가 표준 도구다
+- 큰 지연의 원인은 ftrace와 rtla로 찾고, 전체 응답 시간은 신호를 오실로스코프로 찍어 잰다
