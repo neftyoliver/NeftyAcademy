@@ -1,0 +1,175 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '연결 풀: 연결의 값, 빌리고 돌려주는 RAII 핸들, 돌려받을 때 정리, 기다림의 끝, 풀 크기와 PgBouncer';
+
+연결을 맺는 일은 쿼리 하나보다 훨씬 비쌉니다. TCP 연결, TLS 핸드셰이크, 인증을 거쳐야 하고, PostgreSQL은 연결마다 서버 프로세스를 하나씩 띄웁니다. 이 책의 검사 기계에서 localhost TCP로 연결해 `SELECT 1` 하나를 하고 끊는 데 약 7ms가 걸렸고, 이미 맺어 둔 연결의 `SELECT 1`은 약 0.05ms였습니다. **연결 풀**은 연결 몇 개를 열어 둔 채 일이 있는 스레드에게 빌려 주고 돌려받습니다.
+
+## 빌리고 돌려주기
+
+풀은 놀고 있는 연결의 줄(`std::deque`)과 그것을 지키는 뮤텍스, 빈 연결이 생기기를 기다리는 조건 변수로 이루어집니다. `acquire`는 연결을 빌려 `Lease` 객체에 담아 주고, `Lease`가 사라질 때 소멸자가 연결을 돌려줍니다. 줄의 앞에서 빌려 주고 뒤로 돌려받으므로 연결들이 고르게 쓰입니다.
+
+```cpp pkg=libpq
+#include <libpq-fe.h>
+#include <chrono>
+#include <condition_variable>
+#include <cstdio>
+#include <deque>
+#include <mutex>
+#include <set>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
+
+using namespace std::chrono_literals;
+
+class Pool {
+public:
+    class Lease {                        // 빌린 연결. 사라질 때 저절로 돌아간다
+    public:
+        Lease(Pool* p, PGconn* c) : pool_(p), conn_(c) {}
+        Lease(Lease&& o) noexcept
+            : pool_(o.pool_), conn_(std::exchange(o.conn_, nullptr)) {}
+        Lease& operator=(Lease&&) = delete;
+        ~Lease() { if (conn_) pool_->give_back(conn_); }
+        PGconn* get() const { return conn_; }
+    private:
+        Pool* pool_;
+        PGconn* conn_;
+    };
+
+    Pool(const std::string& conninfo, int size, bool clean) : clean_(clean) {
+        for (int i = 0; i < size; ++i) {
+            PGconn* c = PQconnectdb(conninfo.c_str());
+            if (PQstatus(c) != CONNECTION_OK) {
+                std::string err = PQerrorMessage(c);
+                PQfinish(c);
+                for (PGconn* x : idle_) PQfinish(x);
+                throw std::runtime_error(err);
+            }
+            idle_.push_back(c);
+        }
+    }
+    ~Pool() { for (PGconn* c : idle_) PQfinish(c); }    // 빌려 준 것이 다 돌아온 뒤
+
+    Lease acquire(std::chrono::milliseconds timeout = 2s) {
+        std::unique_lock lock(m_);
+        if (!cv_.wait_for(lock, timeout, [&] { return !idle_.empty(); }))
+            throw std::runtime_error("빈 연결을 기다리다 시간 초과");
+        PGconn* c = idle_.front();              // 앞에서 빌려 주고 뒤로 돌려받는다
+        idle_.pop_front();
+        return Lease(this, c);
+    }
+private:
+    void give_back(PGconn* c) {
+        if (clean_) {                            // 다음 사람에게 깨끗한 연결을 준다
+            if (PQtransactionStatus(c) != PQTRANS_IDLE)    // 열린 트랜잭션
+                PQclear(PQexec(c, "ROLLBACK"));
+            PQclear(PQexec(c, "DISCARD ALL"));   // SET, 임시 테이블, 준비된 문장
+        }
+        {
+            std::lock_guard lock(m_);
+            idle_.push_back(c);
+        }
+        cv_.notify_one();
+    }
+
+    bool clean_;
+    std::mutex m_;
+    std::condition_variable cv_;
+    std::deque<PGconn*> idle_;
+};
+
+std::string one(PGconn* c, const char* sql) {
+    PGresult* r = PQexec(c, sql);
+    std::string v = PQntuples(r) > 0 ? PQgetvalue(r, 0, 0) : "";
+    PQclear(r);
+    return v;
+}
+
+const char* kConn = "host=localhost dbname=academy user=academy password=academy "
+                    "application_name=pool_demo";
+
+int main() {
+    {
+        Pool pool(kConn, 3, true);
+        std::mutex m;
+        std::set<std::string> pids;
+        int borrows = 0;
+        {
+            std::vector<std::jthread> workers;
+            for (int t = 0; t < 8; ++t)
+                workers.emplace_back([&] {
+                    for (int i = 0; i < 25; ++i) {
+                        auto lease = pool.acquire();
+                        std::string pid =
+                            one(lease.get(), "SELECT pg_backend_pid()");
+                        std::lock_guard lock(m);
+                        pids.insert(pid);
+                        ++borrows;
+                    }
+                });
+        }
+        std::printf("연결 3개짜리 풀을 스레드 8개가 25번씩 빌림\n");
+        std::printf("  빌린 횟수 %d, 쓰인 서버 프로세스 %zu개\n", borrows,
+                    pids.size());
+        auto lease = pool.acquire();
+        const char* sql = "SELECT count(*) FROM pg_stat_activity "
+                          "WHERE application_name = 'pool_demo'";
+        std::printf("  서버에 보이는 pool_demo 연결 %s개\n",
+                    one(lease.get(), sql).c_str());
+    }
+    for (bool clean : {false, true}) {
+        Pool pool(kConn, 1, clean);
+        {
+            auto a = pool.acquire();             // 설정을 바꾸고, 커밋을 잊었다
+            PQclear(PQexec(a.get(), "SET statement_timeout = '5s'"));
+            PQclear(PQexec(a.get(), "BEGIN"));
+        }
+        auto b = pool.acquire();
+        bool in_tx = PQtransactionStatus(b.get()) != PQTRANS_IDLE;
+        std::printf("%s 풀에서 다음 사람이 받은 연결: statement_timeout %s, %s\n",
+                    clean ? "정리하는" : "정리하지 않는",
+                    one(b.get(), "SHOW statement_timeout").c_str(),
+                    in_tx ? "남의 트랜잭션 안" : "트랜잭션 밖");
+        if (clean) {
+            try {
+                pool.acquire(100ms);             // 하나뿐인 연결을 b가 들고 있다
+            } catch (const std::exception& e) {
+                std::printf("  하나 더 빌리기: %s\n", e.what());
+            }
+        }
+    }
+}
+```
+
+```text
+연결 3개짜리 풀을 스레드 8개가 25번씩 빌림
+  빌린 횟수 200, 쓰인 서버 프로세스 3개
+  서버에 보이는 pool_demo 연결 3개
+정리하지 않는 풀에서 다음 사람이 받은 연결: statement_timeout 5s, 남의 트랜잭션 안
+정리하는 풀에서 다음 사람이 받은 연결: statement_timeout 0, 트랜잭션 밖
+  하나 더 빌리기: 빈 연결을 기다리다 시간 초과
+```
+
+- **빌림은 RAII로**: 예외가 나거나 함수가 일찍 끝나도 `Lease`의 소멸자가 연결을 돌려줍니다. `Lease`는 옮길 수만 있고 복사할 수 없어서 한 연결을 두 곳이 쥐지 않습니다. 대신 풀보다 오래 살면 안 됩니다
+- **적은 연결로 많은 일**: 200번의 빌림을 서버 프로세스 3개가 다 처리했습니다. 연결 문자열의 `application_name`은 서버의 `pg_stat_activity`에 보여서 어느 프로그램의 연결인지 가릴 수 있습니다([「모니터링」](#/read/cpp-database/dbops-monitor))
+- **돌려받을 때 정리**: 정리하지 않는 풀은 다음 사람에게 남이 연 트랜잭션과 바꿔 둔 `statement_timeout`이 그대로 남은 연결을 주었습니다. 이 사람의 문장은 앞사람의 트랜잭션 안에서 돕니다. 정리하는 풀은 `PQtransactionStatus`로 열린 트랜잭션을 찾아 `ROLLBACK`하고, `DISCARD ALL`로 SET, 임시 테이블, 준비된 문장, LISTEN, 권고 잠금을 지웁니다. `DISCARD ALL`은 트랜잭션 안에서 부르면 오류(25001)이므로 순서가 중요합니다. 연결 문자열로 정한 `application_name`은 남습니다
+- **기다림에는 끝을**: `wait_for`로 기다리는 시간에 끝을 두었습니다. 마지막 줄처럼 연결 하나를 쥔 스레드가 하나를 더 빌리려 하면, 모든 스레드가 그러는 순간 풀 전체가 멈춥니다. 시간 초과는 그런 교착을 오류로 바꿔 드러냅니다
+
+## 풀의 크기와 바깥 풀러
+
+풀이 클수록 좋은 것은 아닙니다. 연결이 많으면 서버의 CPU와 디스크를 두고 서로 다투고, PostgreSQL의 `max_connections`(기본 100)는 모든 프로그램의 풀을 합친 수가 넘지 말아야 할 선입니다. PostgreSQL 위키는 활성 연결 수의 출발점으로 (실제 코어 수 × 2) + 동시에 일하는 디스크 수를 제시하고, 실제 부하로 재 보며 맞추라고 합니다.
+
+프로그램 밖에 풀러를 둘 수도 있습니다. **PgBouncer**는 클라이언트와 서버 사이에서 서버 연결을 나눠 줍니다. 세션 모드는 클라이언트가 끊을 때까지 한 서버 연결을 주고, 트랜잭션 모드는 트랜잭션 하나 동안만 주어서 적은 서버 연결로 수많은 클라이언트를 받습니다. 대신 트랜잭션 모드에서는 세션 상태에 기대는 SET, LISTEN, WITH HOLD 커서, SQL의 PREPARE, 세션 단위 권고 잠금을 쓸 수 없습니다. 프로토콜 수준의 준비된 문장은 1.21부터 `max_prepared_statements`를 켜면 됩니다. libpq와 libpqxx에는 풀이 없고, SOCI에는 `soci::connection_pool`이 있습니다. SQLite는 서버 프로세스가 없으므로, 풀은 [「스레드 모드」](#/read/cpp-database/sqlite-threads)의 "스레드마다 연결 하나"를 지키면서 연결 수를 묶어 두는 데 씁니다.
+
+<Note>
+풀이 정리하지 못한 채 트랜잭션을 열어 둔 연결은 잠금과 오래된 스냅숏을 쥐고 있어 다른 쓰기와 VACUUM을 막습니다. PostgreSQL의 `idle_in_transaction_session_timeout`을 정해 두면 트랜잭션 안에서 그 시간 넘게 놀고 있는 세션을 서버가 끊습니다. 끊긴 연결을 알아보고 다시 맺는 일은 [「재연결과 타임아웃」](#/read/cpp-database/pool-reconnect)에서 다룹니다.
+</Note>
+
+## 정리
+
+- 연결은 쿼리보다 훨씬 비싸므로 풀이 몇 개를 열어 두고 빌려 주며, 빌림은 RAII 핸들로 감싸 예외에도 돌아오게 한다
+- 돌려받은 연결은 열린 트랜잭션을 ROLLBACK하고 DISCARD ALL로 세션 상태를 지운 뒤 다음 사람에게 주고, 기다림에는 시간 초과를 둔다
+- 풀 크기는 코어와 디스크에 맞춰 작게 시작해 재 보며 정하고, PgBouncer의 트랜잭션 모드는 세션 상태에 기대는 기능을 쓸 수 없다

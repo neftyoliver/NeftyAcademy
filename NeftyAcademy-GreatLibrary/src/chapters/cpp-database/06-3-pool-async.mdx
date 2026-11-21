@@ -1,0 +1,156 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '비동기 쿼리: 보내 놓고 나중에 받기, 소켓을 poll로, 파이프라인과 동기화 지점, 쿼리 취소';
+
+`PQexec`는 결과가 다 올 때까지 부른 스레드를 붙잡아 둡니다. 요청을 많이 받는 서버나 화면을 그리는 스레드는 그렇게 멈출 수 없습니다. libpq에는 쿼리를 보내 놓고 바로 돌아온 뒤, 결과가 오면 그때 거두는 비동기 API가 있습니다. 연결의 소켓을 `poll`이나 epoll, Asio, Qt 같은 이벤트 루프에 맡겨 지켜보면 됩니다.
+
+## 보내 놓고 나중에 받기
+
+`PQsendQuery`와 `PQsendQueryParams`는 보내기만 하고 돌아옵니다. `PQsocket`이 준 소켓에 읽을 것이 생기면 `PQconsumeInput`으로 들어온 데이터를 읽어 두고, `PQisBusy`가 거짓이 되면 결과 하나가 다 온 것이므로 `PQgetResult`로 꺼냅니다. `PQgetResult`가 `nullptr`을 줄 때까지 꺼내야 그 쿼리가 끝납니다.
+
+```cpp pkg=libpq
+#include <libpq-fe.h>
+#include <poll.h>
+#include <chrono>
+#include <cstdio>
+#include <string>
+#include <thread>
+#include <vector>
+
+using namespace std::chrono_literals;
+const char* kConn = "host=localhost dbname=academy user=academy password=academy";
+
+struct Job {
+    PGconn* c;
+    const char* sql;
+    bool done = false;
+};
+
+// 보낸 쿼리들의 소켓을 poll로 지켜보다가, 결과가 다 온 것부터 거둔다
+void run_together(std::vector<Job>& jobs) {
+    for (Job& j : jobs) PQsendQuery(j.c, j.sql);        // 보내고 기다리지 않는다
+    for (std::size_t left = jobs.size(); left > 0;) {
+        std::vector<pollfd> fds;
+        for (Job& j : jobs)
+            if (!j.done) fds.push_back({PQsocket(j.c), POLLIN, 0});
+        poll(fds.data(), fds.size(), 5000);
+        for (Job& j : jobs) {
+            if (j.done) continue;
+            PQconsumeInput(j.c);                        // 소켓에 온 것을 읽어 둔다
+            while (!j.done && !PQisBusy(j.c)) {         // 결과 하나가 다 왔으면
+                PGresult* r = PQgetResult(j.c);
+                if (r == nullptr) {                     // 이 쿼리의 결과는 끝
+                    j.done = true;
+                    --left;
+                    std::printf("  끝남: %s\n", j.sql);
+                }
+                PQclear(r);
+            }
+        }
+    }
+}
+
+// 파이프라인에서는 확장 프로토콜 함수만 쓴다 (PQsendQuery는 쓸 수 없다)
+void send(PGconn* c, const char* sql) {
+    PQsendQueryParams(c, sql, 0, nullptr, nullptr, nullptr, nullptr, 0);
+}
+
+const char* status(PGresult* r) {
+    switch (PQresultStatus(r)) {
+    case PGRES_COMMAND_OK: return "성공";
+    case PGRES_FATAL_ERROR: return PQresultErrorField(r, PG_DIAG_SQLSTATE);
+    case PGRES_PIPELINE_ABORTED: return "건너뜀(PIPELINE_ABORTED)";
+    default: return PQresStatus(PQresultStatus(r));
+    }
+}
+
+int main() {
+    PGconn* a = PQconnectdb(kConn);
+    PGconn* b = PQconnectdb(kConn);
+    std::printf("두 연결에 동시에 보내기\n");
+    std::vector<Job> jobs = {{a, "SELECT pg_sleep(0.3)"},
+                             {b, "SELECT pg_sleep(0.1)"}};
+    auto t0 = std::chrono::steady_clock::now();
+    run_together(jobs);
+    auto took = std::chrono::steady_clock::now() - t0;
+    std::printf("  함께 걸린 시간이 0.4초보다 짧음: %s\n",
+                took < 380ms ? "예" : "아니오");
+
+    std::printf("파이프라인: 결과를 기다리지 않고 보내기\n");
+    PQclear(PQexec(a, "SET client_min_messages = warning"));
+    PQclear(PQexec(a, "DROP TABLE IF EXISTS async_t"));
+    PQclear(PQexec(a, "CREATE TABLE async_t (v int)"));
+    PQenterPipelineMode(a);
+    send(a, "INSERT INTO async_t VALUES (1)");
+    send(a, "INSERT INTO async_t VALUES (2)");
+    send(a, "SELECT 1 / 0");                            // 여기서 오류가 난다
+    send(a, "INSERT INTO async_t VALUES (3)");
+    PQpipelineSync(a);                                  // 여기까지가 한 묶음
+    send(a, "INSERT INTO async_t VALUES (4)");
+    PQpipelineSync(a);
+    for (int syncs = 0; syncs < 2;) {
+        PGresult* r = PQgetResult(a);
+        if (r == nullptr) continue;                     // 쿼리 하나의 끝 표시
+        if (PQresultStatus(r) == PGRES_PIPELINE_SYNC) {
+            ++syncs;
+            std::printf("  -- 동기화 지점\n");
+        } else {
+            std::printf("  %s\n", status(r));
+        }
+        PQclear(r);
+    }
+    PQexitPipelineMode(a);
+    PGresult* r = PQexec(a, "SELECT string_agg(v::text, ', ') FROM async_t");
+    std::printf("  테이블에 남은 값: %s\n", PQgetvalue(r, 0, 0));
+    PQclear(r);
+
+    std::printf("오래 걸리는 쿼리 취소하기\n");
+    PQsendQuery(b, "SELECT pg_sleep(10)");
+    std::this_thread::sleep_for(100ms);
+    PGcancel* cancel = PQgetCancel(b);                  // 취소 요청은 따로 보낸다
+    char err[256];
+    PQcancel(cancel, err, sizeof err);
+    PQfreeCancel(cancel);
+    while ((r = PQgetResult(b)) != nullptr) {
+        if (PQresultStatus(r) == PGRES_FATAL_ERROR)
+            std::printf("  %s %s\n", PQresultErrorField(r, PG_DIAG_SQLSTATE),
+                        PQresultErrorField(r, PG_DIAG_MESSAGE_PRIMARY));
+        PQclear(r);
+    }
+    PQfinish(a);
+    PQfinish(b);
+}
+```
+
+```text
+두 연결에 동시에 보내기
+  끝남: SELECT pg_sleep(0.1)
+  끝남: SELECT pg_sleep(0.3)
+  함께 걸린 시간이 0.4초보다 짧음: 예
+파이프라인: 결과를 기다리지 않고 보내기
+  성공
+  성공
+  22012
+  건너뜀(PIPELINE_ABORTED)
+  -- 동기화 지점
+  성공
+  -- 동기화 지점
+  테이블에 남은 값: 4
+오래 걸리는 쿼리 취소하기
+  57014 canceling statement due to user request
+```
+
+- **두 쿼리를 함께**: 0.3초와 0.1초 걸리는 쿼리를 두 연결에 함께 보내자 짧은 쪽이 먼저 끝났고, 모두 끝나는 데 0.4초가 걸리지 않았습니다. 연결 하나는 한 번에 쿼리 하나만 돌리므로, 서버에서 동시에 돌리려면 연결이 여럿 있어야 합니다([「연결 풀」](#/read/cpp-database/pool-pool))
+- **파이프라인**: PostgreSQL 14부터 `PQenterPipelineMode`로 들어가면 앞 결과를 기다리지 않고 쿼리를 잇달아 보낼 수 있습니다. 검사 기계의 localhost에서 INSERT 1000개를 하나씩 보내면 약 52ms, 파이프라인으로는 약 6.5ms였습니다. 네트워크 왕복이 길수록 차이는 커집니다. 파이프라인에서는 `PQsendQuery`를 쓸 수 없어서 `send`는 `PQsendQueryParams`를 부릅니다
+- **동기화 지점까지는 한 묶음**: 세 번째 쿼리가 0으로 나누어 오류가 나자 네 번째는 실행되지 않고 `PGRES_PIPELINE_ABORTED`로 왔습니다. 앞서 성공한 두 INSERT도 되돌려져서 테이블에는 다음 묶음의 4만 남았습니다. `PQpipelineSync`까지가 하나의 암묵적 트랜잭션처럼 움직이므로, 동기화 지점은 트랜잭션의 경계에 둡니다
+- **쿼리 취소**: `PQgetCancel`과 `PQcancel`은 서버에 따로 연결해 취소를 요청하고, 돌던 쿼리는 57014로 끝납니다. 이 예제가 돈 libpq 16에는 이 방법뿐입니다. libpq 17부터는 `PQcancelCreate`와 `PQcancelBlocking`(기다리지 않으려면 `PQcancelStart`)을 씁니다. 옛 `PQcancel`은 원래 연결이 암호화를 요구해도 취소 요청을 암호화하지 않아서, 17의 문서는 새 코드에서 쓰지 말라고 합니다
+
+<Note>
+결과가 아주 크면 `PQgetResult`가 모든 행을 메모리에 다 받은 뒤에야 돌아옵니다. 쿼리를 보낸 직후 `PQsetSingleRowMode`를 부르면 행 하나씩 `PGRES_SINGLE_TUPLE` 결과로 받을 수 있고, libpq 17의 `PQsetChunkedRowsMode`는 정한 행 수만큼씩 묶어 줍니다. 대량으로 넣을 때는 쿼리 대신 `COPY`가 훨씬 빠릅니다([「배치 삽입」](#/read/cpp-database/dbperf-batch)).
+</Note>
+
+## 정리
+
+- 비동기 API는 보내기와 받기를 나누고, 소켓을 이벤트 루프에서 지켜보다 PQconsumeInput, PQisBusy, PQgetResult로 nullptr이 나올 때까지 결과를 거둔다
+- 파이프라인은 왕복을 기다리지 않고 쿼리를 잇달아 보내며, 동기화 지점까지가 한 묶음이라 오류가 나면 앞의 성공도 되돌려진다
+- 오래 걸리는 쿼리는 취소 요청으로 끊을 수 있고, libpq 17부터는 취소 요청도 암호화하는 PQcancelCreate 계열 함수를 쓴다
