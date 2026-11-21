@@ -1,0 +1,147 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '풀: 세트 수와 종류별 디스크립터 수, 넘칠 때의 드라이버 차이, 풀째 비우기, 수명에 따라 풀 나누기';
+
+디스크립터 세트는 **디스크립터 풀**에서 받습니다. 풀을 만들 때 내줄 세트 수와 종류별 디스크립터 수를 정해 두면, 세트를 하나씩 만들고 지우는 대신 풀째로 비우거나 없앨 수 있습니다. 그래서 수명이 같은 세트를 한 풀에 모으는 것이 기본 전략입니다. 아래 프로그램은 작은 풀이 넘칠 때 무슨 일이 생기는지 보고, 한 프레임 쓰고 버리는 세트를 내주는 할당기를 만듭니다.
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp
+#include "vkx_device.hpp"
+
+const auto UBO = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+const auto TEXTURE = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+
+VkDescriptorPool make_pool(const vkx::Device& d, uint32_t sets, uint32_t ubos,
+                           uint32_t textures) {
+    // 크기는 세트 하나의 몫이 아니라 이 풀에서 나갈 모든 세트의 합계다
+    VkDescriptorPoolSize sizes[] = {{UBO, ubos}, {TEXTURE, textures}};
+    VkDescriptorPoolCreateInfo ci{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = sets,
+        .poolSizeCount = 2, .pPoolSizes = sizes};
+    VkDescriptorPool pool;
+    vkx::check(vkCreateDescriptorPool(d.handle, &ci, nullptr, &pool), "풀 만들기");
+    return pool;
+}
+
+VkResult allocate(const vkx::Device& d, VkDescriptorPool pool,
+                  VkDescriptorSetLayout layout, VkDescriptorSet* set) {
+    VkDescriptorSetAllocateInfo ai{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = pool, .descriptorSetCount = 1, .pSetLayouts = &layout};
+    return vkAllocateDescriptorSets(d.handle, &ai, set);
+}
+
+// 한 프레임 쓰고 버리는 세트를 내주는 할당기. 풀 하나에서 PER_POOL개까지 받고,
+// 다 차면 다음 풀로 넘어가며(없으면 만든다), 프레임이 끝나면 풀째로 비운다
+class FrameSets {
+public:
+    explicit FrameSets(const vkx::Device& d) : dev_(d) {}
+    ~FrameSets() {
+        for (VkDescriptorPool p : pools_)
+            vkDestroyDescriptorPool(dev_.handle, p, nullptr);
+    }
+    VkDescriptorSet allocate(VkDescriptorSetLayout layout) {
+        for (;;) {
+            if (current_ == pools_.size())   // 세트마다 UBO 2개, 텍스처 4개로 어림
+                pools_.push_back(
+                    make_pool(dev_, PER_POOL, PER_POOL * 2, PER_POOL * 4));
+            if (used_ < PER_POOL) {
+                VkDescriptorSet set;
+                VkResult r = ::allocate(dev_, pools_[current_], layout, &set);
+                if (r == VK_SUCCESS) { ++used_; return set; }
+                if (r != VK_ERROR_OUT_OF_POOL_MEMORY &&
+                    r != VK_ERROR_FRAGMENTED_POOL)
+                    vkx::check(r, "세트 받기");    // 풀이 찬 것이 아닌 진짜 오류
+            }
+            ++current_, used_ = 0;                  // 이 풀은 찼으니 다음 풀로
+        }
+    }
+    void reset() {       // 세트를 하나씩 돌려주지 않고, 쓴 풀을 통째로 비운다
+        for (size_t i = 0; i < pools_.size() && i <= current_; ++i)
+            vkResetDescriptorPool(dev_.handle, pools_[i], 0);
+        current_ = 0, used_ = 0;
+    }
+    size_t pools_in_use() const { return current_ + 1; }
+    size_t pools_made() const { return pools_.size(); }
+
+private:
+    static constexpr uint32_t PER_POOL = 128;
+    const vkx::Device& dev_;
+    std::vector<VkDescriptorPool> pools_;
+    size_t current_ = 0;
+    uint32_t used_ = 0;
+};
+
+int main() {
+    vkx::Instance inst = vkx::make_instance();
+    vkx::Device dev = vkx::make_device(inst.handle);
+    VkDescriptorSetLayoutBinding slots[] = {{0, UBO, 1, VK_SHADER_STAGE_ALL},
+                                            {1, TEXTURE, 2, VK_SHADER_STAGE_ALL}};
+    VkDescriptorSetLayoutCreateInfo lci{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 2, .pBindings = slots};
+    VkDescriptorSetLayout layout;
+    vkCreateDescriptorSetLayout(dev.handle, &lci, nullptr, &layout);
+
+    // 1) 세트 4개, UBO 4개, 텍스처 8개짜리 풀에 세트 6개를 청해 본다
+    VkDescriptorPool small = make_pool(dev, 4, 4, 8);
+    int ok = 0;
+    VkResult last = VK_SUCCESS;
+    for (int i = 0; i < 6 && last == VK_SUCCESS; ++i) {
+        VkDescriptorSet set;
+        last = allocate(dev, small, layout, &set);
+        if (last == VK_SUCCESS) ++ok;
+    }
+    std::printf("세트 4개짜리 풀에 6개를 청함: %d개 성공, %s\n", ok,
+                last == VK_SUCCESS ? "이 드라이버는 한도를 넘겨도 내줌"
+                : last == VK_ERROR_OUT_OF_POOL_MEMORY ? "그 뒤 OUT_OF_POOL_MEMORY"
+                                                      : "그 뒤 다른 오류");
+    vkDestroyDescriptorPool(dev.handle, small, nullptr);   // 세트도 함께 사라진다
+
+    // 2) 프레임마다 필요한 세트 수가 다를 때
+    {
+        FrameSets sets(dev);
+        int frame = 0;
+        for (int need : {10, 300, 40}) {
+            sets.reset();
+            for (int i = 0; i < need; ++i) sets.allocate(layout);
+            std::printf("프레임 %d: 세트 %d개를 풀 %zu개에서 받음(만든 풀 %zu개)\n",
+                        frame++, need, sets.pools_in_use(), sets.pools_made());
+        }
+    }
+    vkDestroyDescriptorSetLayout(dev.handle, layout, nullptr);
+    vkx::destroy(dev);
+    vkx::destroy(inst);
+}
+```
+
+```text
+세트 4개짜리 풀에 6개를 청함: 6개 성공, 이 드라이버는 한도를 넘겨도 내줌
+프레임 0: 세트 10개를 풀 1개에서 받음(만든 풀 1개)
+프레임 1: 세트 300개를 풀 3개에서 받음(만든 풀 3개)
+프레임 2: 세트 40개를 풀 1개에서 받음(만든 풀 3개)
+```
+
+- **풀의 크기**: `maxSets`는 세트 수, `pPoolSizes`는 종류별 디스크립터 수이고, 둘 다 풀 전체의 합계입니다. 이 프로그램의 세트는 UBO 1개와 텍스처 2개를 쓰므로 세트 4개, UBO 4개, 텍스처 8개짜리 풀에는 네 개가 들어갑니다
+- **넘칠 때**: 명세는 한도를 넘는 할당이 실패할 수 있다고만 합니다. lavapipe는 여섯 개를 모두 내줬지만, 한도를 지키는 드라이버는 `VK_ERROR_OUT_OF_POOL_MEMORY`를 돌려주고 받을 핸들을 모두 `VK_NULL_HANDLE`로 채웁니다. 한 드라이버에서 잘 돌던 프로그램이 다른 드라이버에서 실패할 수 있으므로, 받은 수를 스스로 세고 실패도 처리해야 합니다. `FrameSets`는 둘 다 합니다
+- **풀째 비우기**: `vkResetDescriptorPool`은 풀에서 나간 세트를 한꺼번에 돌려받습니다. 프레임 1에서 풀이 셋으로 늘었고, 프레임 2는 새로 만들지 않고 첫 풀만 썼습니다. 실제 프레임 루프에서는 이런 할당기를 프레임 칸마다 하나씩 두고, 그 칸의 펜스를 기다린 뒤에 비웁니다. GPU가 아직 쓰는 세트를 없애면 안 되기 때문입니다([「프레임 루프」](#/read/cpp-vulkan/tri-loop))
+- **하나씩 돌려주기**: `vkFreeDescriptorSets`를 쓰려면 풀을 `VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT`로 만들어야 합니다(없이 부르면 검증 레이어가 VUID-vkFreeDescriptorSets-descriptorPool-00312로 알립니다). 이런 풀은 조각날 수 있어서, 합계로는 자리가 남아도 `VK_ERROR_FRAGMENTED_POOL`로 실패할 수 있습니다. 세트를 한 번도 돌려받지 않은 풀은 조각 때문에 실패하지 않는다고 명세가 보장합니다
+
+## 수명에 따라 풀 나누기
+
+| 세트의 수명 | 예 | 풀 |
+| --- | --- | --- |
+| 프로그램 내내 | 프레임 공용 세트, 바인드리스 표 | 처음에 크기를 정해 만든 풀 |
+| 장면 하나 | 재질 세트 | 장면마다 풀, 장면을 내릴 때 풀째 없앰 |
+| 한 프레임 | 그릴 때마다 만드는 세트 | 프레임 칸마다 풀, 매 프레임 비움 |
+
+풀은 바깥에서 동기화해야 하는 객체라서 두 스레드가 같은 풀에서 동시에 세트를 받을 수 없습니다. 여러 스레드가 세트를 만든다면 스레드마다 풀을 따로 둡니다([「스레드별 커맨드 풀」](#/read/cpp-vulkan/vsync-threads)).
+
+<Note>
+세트를 아예 받지 않는 길도 있습니다. 푸시 디스크립터(`vkCmdPushDescriptorSet`, 1.4에서 코어이자 필수)는 디스크립터를 커맨드 버퍼에 바로 적어 넣으므로 풀과 세트가 필요 없고, 그릴 때마다 리소스가 바뀌는 세트에 잘 맞습니다. 텍스처 전부를 세트 하나에 모아 두고 번호로 고르는 방식은 [「바인드리스」](#/read/cpp-vulkan/desc-bindless)에서 봅니다.
+</Note>
+
+## 정리
+
+- 풀의 `maxSets`와 종류별 개수는 풀 전체의 합계이며, 넘겼을 때 실패할지는 드라이버마다 달라서 스스로 세고 실패도 처리한다
+- 수명이 같은 세트를 한 풀에 모으고, 하나씩 돌려주는 대신 `vkResetDescriptorPool`이나 풀 파괴로 한꺼번에 정리한다
+- 한 프레임짜리 세트는 프레임 칸마다 둔 풀에서 받고, 그 칸의 일이 끝난 뒤에 비운다

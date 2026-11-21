@@ -1,0 +1,197 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '세트와 레이아웃: 바인딩의 종류·개수·단계, 세트 쓰기, 빈도로 세트 나누기, 파이프라인 레이아웃 호환';
+
+셰이더의 `layout(set = S, binding = B)` 자리에 실제 버퍼나 이미지를 이어 주는 것이 **디스크립터**입니다. 자리들의 모양을 적은 것이 **세트 레이아웃**, 그 모양대로 리소스를 끼운 것이 **디스크립터 세트**이고, 세트 레이아웃 여럿을 번호 순으로 묶은 것이 [「그래픽 파이프라인」](#/read/cpp-vulkan/tri-pipeline)에서 비워 두었던 파이프라인 레이아웃입니다. [「인터페이스 블록과 레이아웃」](#/read/cpp-vulkan/glsl-interface)의 도우미는 세트 하나만 다뤘는데, 여기서는 세트를 둘로 나눠 손으로 만듭니다. 아래 프로그램은 화면을 네 칸으로 나눠 단색 파이프라인과 줄무늬 파이프라인으로 번갈아 채웁니다.
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp,vkx_cmd.hpp,vkx_resource.hpp,vkx_bind.hpp,vkx_pipeline.hpp,vkx_draw.hpp
+#include <cstring>
+#include "vkx_bind.hpp"
+#include "vkx_cmd.hpp"
+#include "vkx_draw.hpp"
+#include "vkx_pipeline.hpp"
+
+// 세트 0은 프레임마다 한 번, 세트 1은 재질마다 바꿔 붙인다
+const char* FS_PLAIN = R"(#version 450
+layout(set = 0, binding = 0) uniform Frame { float gain; };
+layout(set = 1, binding = 0) uniform Material { float shade; };
+layout(location = 0) out float value;
+void main() { value = shade * gain; })";
+
+const char* FS_STRIPE = R"(#version 450
+layout(set = 0, binding = 0) uniform Frame { float gain; };        // 위와 같은 꼴
+layout(set = 1, binding = 0) uniform Stripe { float a; float b; };
+layout(set = 1, binding = 1) readonly buffer Period { float period; };
+layout(location = 0) out float value;
+void main() {
+    bool even = (int(gl_FragCoord.x) / int(period)) % 2 == 0;
+    value = (even ? a : b) * gain;
+})";
+
+int main() {
+    vkx::Instance inst = vkx::make_instance();
+    vkx::Device dev = vkx::make_device(inst.handle);
+    vkx::Commands cmds = vkx::make_commands(dev);
+    const uint32_t W = 48, H = 4;
+    vkx::Image target = vkx::make_image(
+        dev, {W, H}, VK_FORMAT_R32_SFLOAT,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    vkx::Buffer pixels =
+        vkx::make_buffer(dev, W * H * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+    const auto UBO = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    const auto SSBO = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    const auto FRAG = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    // 레이아웃: 바인딩 번호마다 종류, 개수, 그것을 볼 셰이더 단계를 적는다
+    auto make_set_layout = [&](std::vector<VkDescriptorSetLayoutBinding> slots) {
+        VkDescriptorSetLayoutCreateInfo ci{
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .bindingCount = uint32_t(slots.size()), .pBindings = slots.data()};
+        VkDescriptorSetLayout l;
+        vkCreateDescriptorSetLayout(dev.handle, &ci, nullptr, &l);
+        return l;
+    };
+    VkDescriptorSetLayout frame_l = make_set_layout({{0, UBO, 1, FRAG}});
+    VkDescriptorSetLayout plain_l = make_set_layout({{0, UBO, 1, FRAG}});
+    VkDescriptorSetLayout stripe_l =
+        make_set_layout({{0, UBO, 1, FRAG}, {1, SSBO, 1, FRAG}});
+
+    VkDescriptorPoolSize sizes[] = {{UBO, 4}, {SSBO, 1}};
+    VkDescriptorPoolCreateInfo pci{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 4,
+        .poolSizeCount = 2, .pPoolSizes = sizes};
+    VkDescriptorPool pool;
+    vkCreateDescriptorPool(dev.handle, &pci, nullptr, &pool);
+    VkDescriptorSetLayout wanted[] = {frame_l, plain_l, plain_l, stripe_l};
+    VkDescriptorSet sets[4];   // 프레임, 재질 둘, 줄무늬
+    VkDescriptorSetAllocateInfo ai{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = pool, .descriptorSetCount = 4, .pSetLayouts = wanted};
+    vkAllocateDescriptorSets(dev.handle, &ai, sets);
+
+    // 값이 든 버퍼 다섯 개를 만들고, 쓰기 다섯 건을 한 번에 넘겨 세트에 건다
+    struct Slot { VkDescriptorSet set; uint32_t binding; VkDescriptorType type;
+                  float value[2]; };
+    const Slot slots[] = {{sets[0], 0, UBO, {0.9f}},          // Frame.gain
+                          {sets[1], 0, UBO, {0.3f}},          // Material.shade
+                          {sets[2], 0, UBO, {0.7f}},
+                          {sets[3], 0, UBO, {1.0f, 0.2f}},    // Stripe.a, b
+                          {sets[3], 1, SSBO, {3.0f}}};        // Period.period
+    std::vector<vkx::Buffer> buffers;
+    VkDescriptorBufferInfo infos[5];
+    VkWriteDescriptorSet writes[5];
+    for (int i = 0; i < 5; ++i) {
+        const Slot& s = slots[i];
+        buffers.push_back(vkx::make_buffer(
+            dev, 8, s.type == UBO ? VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
+                                  : VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true));
+        std::memcpy(buffers[i].mapped, s.value, 8);
+        infos[i] = {buffers[i].handle, 0, VK_WHOLE_SIZE};
+        writes[i] = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                     .dstSet = s.set, .dstBinding = s.binding, .descriptorCount = 1,
+                     .descriptorType = s.type, .pBufferInfo = &infos[i]};
+    }
+    vkUpdateDescriptorSets(dev.handle, 5, writes, 0, nullptr);
+
+    // 파이프라인 레이아웃 둘: 세트 0의 레이아웃은 같고 세트 1만 다르다
+    VkPipelineLayout plain_pl = vkx::make_layout(dev, {frame_l, plain_l});
+    VkPipelineLayout stripe_pl = vkx::make_layout(dev, {frame_l, stripe_l});
+    auto vs = vkx::make_shader(
+        dev, vkx::compile(vkx::FULLSCREEN_VS, shaderc_vertex_shader));
+    const auto FS = shaderc_fragment_shader;
+    auto fs1 = vkx::make_shader(dev, vkx::compile(FS_PLAIN, FS));
+    auto fs2 = vkx::make_shader(dev, vkx::compile(FS_STRIPE, FS));
+    VkPipeline plain = vkx::make_pipeline(
+        dev, {.vertex = vs, .fragment = fs1, .layout = plain_pl,
+              .color = target.format});
+    VkPipeline stripe = vkx::make_pipeline(
+        dev, {.vertex = vs, .fragment = fs2, .layout = stripe_pl,
+              .color = target.format});
+
+    VkCommandBuffer cmd = vkx::begin(cmds);
+    vkx::begin_drawing(cmd, target, {{-1.0f}});
+    const auto GRAPHICS = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    int binds[2] = {0, 0};
+    auto bind = [&](VkPipelineLayout l, uint32_t number, VkDescriptorSet s) {
+        vkCmdBindDescriptorSets(cmd, GRAPHICS, l, number, 1, &s, 0, nullptr);
+        ++binds[number];
+    };
+    auto draw = [&](uint32_t column) {       // 화면을 넷으로 나눈 한 칸을 채운다
+        VkViewport part{float(column * W / 4), 0.0f, float(W / 4), float(H),
+                        0.0f, 1.0f};
+        vkCmdSetViewport(cmd, 0, 1, &part);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+    };
+    bind(plain_pl, 0, sets[0]);              // 프레임 세트는 여기서 한 번만
+    vkCmdBindPipeline(cmd, GRAPHICS, plain);
+    bind(plain_pl, 1, sets[1]);  draw(0);
+    bind(plain_pl, 1, sets[2]);  draw(1);
+    vkCmdBindPipeline(cmd, GRAPHICS, stripe);
+    bind(stripe_pl, 1, sets[3]); draw(2);    // 세트 0은 그대로 살아 있다
+    vkCmdBindPipeline(cmd, GRAPHICS, plain);
+    bind(plain_pl, 1, sets[1]);  draw(3);    // 세트 1은 다시 붙여야 한다
+    vkx::end_drawing(cmd, target, pixels);
+    vkx::submit_and_wait(dev, cmds);
+
+    auto* v = static_cast<const float*>(pixels.mapped);
+    const char* ramp = ".:-=+*#%@";
+    for (uint32_t i = 0; i < W * H; ++i) {
+        if (i % (W / 4) == 0) std::putchar('|');
+        std::putchar(v[i] < 0 ? ' ' : ramp[int(v[i] * 8.999f)]);
+        if (i % W == W - 1) std::puts("|");
+    }
+    std::printf("그리기 4번에 세트 0은 %d번, 세트 1은 %d번 붙임\n", binds[0],
+                binds[1]);
+
+    for (VkPipeline p : {plain, stripe}) vkDestroyPipeline(dev.handle, p, nullptr);
+    for (VkPipelineLayout l : {plain_pl, stripe_pl})
+        vkDestroyPipelineLayout(dev.handle, l, nullptr);
+    for (VkShaderModule m : {vs, fs1, fs2})
+        vkDestroyShaderModule(dev.handle, m, nullptr);
+    vkDestroyDescriptorPool(dev.handle, pool, nullptr);     // 세트도 함께 사라진다
+    for (VkDescriptorSetLayout l : {frame_l, plain_l, stripe_l})
+        vkDestroyDescriptorSetLayout(dev.handle, l, nullptr);
+    for (vkx::Buffer& b : buffers) vkx::destroy(dev, b);
+    vkx::destroy(dev, pixels);
+    vkx::destroy(dev, target);
+    vkx::destroy(dev, cmds);
+    vkx::destroy(dev);
+    vkx::destroy(inst);
+}
+```
+
+```text
+|------------|************|@@@:::@@@:::|------------|
+|------------|************|@@@:::@@@:::|------------|
+|------------|************|@@@:::@@@:::|------------|
+|------------|************|@@@:::@@@:::|------------|
+그리기 4번에 세트 0은 1번, 세트 1은 4번 붙임
+```
+
+- **레이아웃의 바인딩**: 바인딩 번호마다 종류, 개수(셰이더에서 배열이면 그 길이), 그 자리를 보는 셰이더 단계를 적습니다. 종류가 셰이더 선언과 다르면 파이프라인을 만들 때 검증 레이어가 잡습니다(VUID-VkGraphicsPipelineCreateInfo-layout-07990)
+- **세트에 쓰기**: `vkUpdateDescriptorSets`는 쓰기 여러 건을 한 번에 받습니다. 버퍼 디스크립터에는 버퍼, 시작 오프셋, 범위를 적고, 이미지 디스크립터에는 뷰, 레이아웃, 샘플러를 적습니다
+- **빈도로 나누기**: 프레임 내내 같은 값(세트 0)과 재질마다 바뀌는 값(세트 1)을 다른 세트에 두었으므로, 그리기 네 번에 세트 0은 한 번만 붙였습니다. 큰 프로그램은 세트 0은 프레임, 1은 재질, 2는 물체처럼 번호가 클수록 자주 바뀌게 약속합니다. 함께 붙일 수 있는 세트 수(`maxBoundDescriptorSets`)는 4개, 1.4부터 7개가 보장됩니다
+- **파이프라인을 바꿔도 남는 세트**: 두 파이프라인 레이아웃이 세트 0부터 N까지 똑같은 세트 레이아웃으로 만들어졌으면(푸시 상수 범위도 같으면) N번 세트까지 호환됩니다. 그래서 줄무늬 파이프라인으로 바꾼 뒤에도 세트 0은 다시 붙이지 않았습니다. 세트 1은 레이아웃이 다르므로 단색으로 돌아올 때 다시 붙여야 하고, 빼먹으면 검증 레이어가 VUID-vkCmdDraw-None-08600으로 알립니다(lavapipe는 줄무늬 세트의 값을 읽어 엉뚱한 밝기로 칠했습니다)
+
+## 디스크립터의 종류
+
+| 종류 | GLSL 선언 | 쓰임 |
+| --- | --- | --- |
+| `UNIFORM_BUFFER` | `uniform Block { … }` | 읽기 전용의 작은 값 |
+| `STORAGE_BUFFER` | `buffer Block { … }` | 읽고 쓰는 큰 데이터 |
+| `COMBINED_IMAGE_SAMPLER` | `uniform sampler2D` | 텍스처와 샘플러 한 쌍 |
+| `SAMPLED_IMAGE`, `SAMPLER` | `uniform texture2D`, `uniform sampler` | 텍스처와 샘플러를 따로 |
+| `STORAGE_IMAGE` | `uniform image2D` | 셰이더가 직접 읽고 쓰는 이미지 |
+| `INPUT_ATTACHMENT` | `uniform subpassInput` | 같은 렌더 패스에서 그린 첨부물 읽기 |
+
+이 밖에 버퍼 두 종류의 동적 오프셋 판([「유니폼 버퍼」](#/read/cpp-vulkan/buf-uniform)), 텍셀 버퍼, 가속 구조([「가속 구조」](#/read/cpp-vulkan/rt-accel)) 등이 있습니다. 이미지 쪽은 [「이미지, 뷰, 샘플러」](#/read/cpp-vulkan/tex-image)에서, 세트를 받아 오는 풀은 [「풀」](#/read/cpp-vulkan/desc-pool)에서 다룹니다.
+
+<Note>
+세트를 붙인 커맨드 버퍼가 기록 중이거나 실행을 기다리는 동안 그 세트를 고치면 커맨드 버퍼가 무효가 되고, 실행 중인 커맨드 버퍼가 쓰는 세트는 고칠 수 없습니다. 그래서 매 프레임 가리키는 리소스가 바뀌는 세트는 프레임 칸마다 따로 두거나, 세트는 그대로 두고 버퍼의 내용만 바꿉니다.
+</Note>
+
+## 정리
+
+- 세트 레이아웃은 바인딩마다 종류, 개수, 셰이더 단계를 적은 틀이고, 디스크립터 세트는 그 틀에 리소스를 끼운 것이다
+- 바뀌는 빈도가 다른 리소스는 다른 세트에 두고, 자주 바뀌는 것일수록 큰 번호에 놓는다
+- 파이프라인 레이아웃의 앞쪽 세트 레이아웃이 같으면 파이프라인을 바꿔도 그 세트들은 붙은 채로 남는다
