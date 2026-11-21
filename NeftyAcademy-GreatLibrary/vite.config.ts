@@ -16,6 +16,11 @@ export default defineConfig({
     // 결과물을 dist/index.html 한 파일로(JS·CSS를 안에 넣는다). 메일로 보내거나 USB로 옮겨도 그대로 열린다.
     viteSingleFile(),
   ],
+  build: {
+    // 결과물을 압축하지 않는다. JS·CSS가 한 줄로 뭉치지 않고 줄내림·들여쓰기가 살아 있어 열어 읽기 쉽다.
+    minify: false,
+    cssMinify: false,
+  },
   resolve: {
     // ParagonsBookShelf이 ../ParagonsBookShelf 에 따로 있어서 react가 두 벌 잡히지 않게 한 벌로 모은다.
     dedupe: ['react', 'react-dom'],
