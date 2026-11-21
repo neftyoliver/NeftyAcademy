@@ -1,0 +1,237 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '상태 관리: 상태를 한곳(스토어)에 모으기, 계산되는 상태, 되먹임 막기, QStateMachine으로 모드 다루기';
+
+앱이 커지면 버그의 상당수가 **상태가 어긋나서** 생깁니다. 저장하고 나서도 창 제목에 `*`가 남아 있거나, 연결이 끊겼는데 버튼은 여전히 "끊기"라고 적혀 있는 식입니다. 원인은 대개 같은 사실을 여러 위젯이 따로 들고 있다가 한쪽만 고치는 데 있습니다. 이 쪽에서는 두 가지 도구를 봅니다. 상태를 한곳에 모으는 **스토어**, 그리고 모드에 따라 동작이 달라질 때 쓰는 **상태 기계**입니다.
+
+## 상태를 한곳에
+
+문서 편집기의 상태(내용, 고쳤는지 여부, 파일 이름)를 `DocumentStore` 객체 하나에 모았습니다. 편집기, 상태줄, 창 제목은 상태를 따로 들지 않고 스토어를 비추기만 합니다.
+
+```cpp qt=Widgets,Test
+// 문서의 상태를 한곳(스토어)에 두고, 여러 화면 요소는 그것을 비춘다
+#include <QApplication>
+#include <QLabel>
+#include <QPlainTextEdit>
+#include <QTest>
+#include <QVBoxLayout>
+#include <cstdio>
+
+class DocumentStore : public QObject {
+    Q_OBJECT
+    Q_PROPERTY(QString text READ text WRITE setText NOTIFY textChanged)
+    Q_PROPERTY(bool modified READ isModified NOTIFY modifiedChanged)
+public:
+    QString text() const { return m_text; }
+    bool isModified() const { return m_modified; }
+    QString title() const {                 // 저장하지 않고 계산하는 상태
+        return m_fileName + (m_modified ? " *" : "");
+    }
+
+    void setText(const QString& t) {        // 상태를 바꾸는 길은 이 함수들뿐
+        if (t == m_text) return;            // 같으면 아무 일도 없다(되먹임 방지)
+        m_text = t;
+        emit textChanged(t);
+        setModified(true);
+    }
+    void load(const QString& name, const QString& content) {
+        m_fileName = name;
+        m_text = content;
+        emit textChanged(content);
+        setModified(false);
+        emit titleChanged();
+    }
+    void save() { setModified(false); }
+
+signals:
+    void textChanged(const QString&);
+    void modifiedChanged(bool);
+    void titleChanged();
+
+private:
+    void setModified(bool m) {
+        if (m == m_modified) return;
+        m_modified = m;
+        emit modifiedChanged(m);
+        emit titleChanged();
+    }
+    QString m_fileName = "제목 없음";
+    QString m_text;
+    bool m_modified = false;
+};
+
+int main(int argc, char* argv[]) {
+    QApplication app(argc, argv);
+    DocumentStore store;
+
+    QWidget window;
+    auto* editor = new QPlainTextEdit;
+    auto* status = new QLabel;
+    auto* layout = new QVBoxLayout(&window);
+    layout->addWidget(editor);
+    layout->addWidget(status);
+
+    // 화면 → 스토어: 사용자가 고친 내용을 스토어에 알린다
+    QObject::connect(editor, &QPlainTextEdit::textChanged, &store,
+                     [&] { store.setText(editor->toPlainText()); });
+    // 스토어 → 화면: 상태가 바뀌면 각 요소가 스스로 다시 그린다
+    QObject::connect(&store, &DocumentStore::textChanged, editor,
+                     [&](const QString& t) {
+        if (editor->toPlainText() != t) editor->setPlainText(t);
+        status->setText(QString("%1자").arg(t.size()));
+    });
+    QObject::connect(&store, &DocumentStore::titleChanged, &window,
+                     [&] { window.setWindowTitle(store.title()); });
+    window.setWindowTitle(store.title());
+
+    auto show = [&](const char* when) {
+        std::printf("%s: 제목 \"%s\", 상태줄 \"%s\", 편집기 \"%s\"\n", when,
+                    qPrintable(window.windowTitle()), qPrintable(status->text()),
+                    qPrintable(editor->toPlainText()));
+    };
+    window.show();
+    store.load("메모.txt", "안녕");
+    show("불러온 뒤");
+    editor->moveCursor(QTextCursor::End);
+    QTest::keyClicks(editor->viewport(), "!!");    // 사용자가 타자를 친다
+    show("타자 친 뒤");
+    store.save();
+    show("저장 뒤");
+    store.setText("코드가 바꾼 글");                // 다른 곳(예: 매크로)에서 바꿈
+    show("코드 변경 뒤");
+}
+
+#include "main.moc"
+```
+
+```text
+불러온 뒤: 제목 "메모.txt", 상태줄 "2자", 편집기 "안녕"
+타자 친 뒤: 제목 "메모.txt *", 상태줄 "4자", 편집기 "안녕!!"
+저장 뒤: 제목 "메모.txt", 상태줄 "4자", 편집기 "안녕!!"
+코드 변경 뒤: 제목 "메모.txt *", 상태줄 "8자", 편집기 "코드가 바꾼 글"
+```
+
+- **바꾸는 길은 하나**: 상태는 스토어의 함수(`setText`, `load`, `save`)로만 바뀝니다. 사용자가 타자를 치든 코드가 바꾸든 같은 길을 지나므로 `*` 표시를 빠뜨릴 수 없습니다
+- **계산되는 상태는 저장하지 않는다**: 창 제목은 파일 이름과 `modified`에서 그때그때 계산합니다. 따로 저장해 두면 그것도 어긋날 수 있는 상태가 하나 더 생깁니다
+- **되먹임 막기**: 편집기가 바뀌면 스토어를, 스토어가 바뀌면 편집기를 고치므로 서로를 끝없이 부를 수 있습니다. 값이 같으면 아무것도 하지 않는 검사 한 줄이 이 고리를 끊습니다
+- **화면끼리는 모른다**: 편집기와 상태줄은 서로를 모르고 스토어만 압니다. 화면 요소를 더하거나 빼도 다른 요소를 고칠 일이 없습니다
+
+스토어의 상태를 `Q_PROPERTY`와 `NOTIFY` 신호로 내놓았으므로, [「C++ 타입을 QML에 내놓기」](#/read/cpp-qt/qml-cpp)의 방법으로 QML에 넘기면 [「속성 바인딩」](#/read/cpp-qt/qml-binding)만으로 같은 일을 할 수 있습니다. 스토어는 전역 변수로 두기보다 화면을 만들 때 넘겨주어야 시험하기 쉽습니다.
+
+## 모드가 있는 동작은 상태 기계로
+
+연결 기능처럼 "지금 어떤 모드인가"에 따라 같은 버튼이 다르게 동작해야 할 때, `bool` 변수 여러 개와 `if`로 다루기 시작하면 금방 엉킵니다. 이럴 때는 상태와 **전이**를 그대로 코드로 적는 상태 기계가 맞습니다. Qt 6에서는 `QStateMachine`이 별도 모듈(Qt State Machine)로 옮겨졌으므로 CMake에서 `StateMachine` 구성 요소를 찾아 링크합니다.
+
+```cpp qt=Widgets,Test,StateMachine
+// 연결 상태를 상태 기계로: 상태마다 버튼의 글자와 사용 가능 여부가 정해진다
+#include <QApplication>
+#include <QPushButton>
+#include <QState>
+#include <QStateMachine>
+#include <QTest>
+#include <QTimer>
+#include <cstdio>
+#include <cstdlib>
+
+class Link : public QObject {               // 가짜 연결: 첫 시도만 실패한다
+    Q_OBJECT
+public:
+    int tries = 0;
+    void open() {
+        ++tries;
+        QTimer::singleShot(10, this, [this] {
+            std::printf("  %d번째 시도: %s\n", tries, tries == 1 ? "실패" : "성공");
+            if (tries == 1) emit failed(); else emit opened();
+        });
+    }
+signals:
+    void opened();
+    void failed();
+};
+
+int main(int argc, char* argv[]) {
+    QApplication app(argc, argv);
+    QPushButton button;
+    Link link;
+
+    QStateMachine machine;
+    auto* offline = new QState(&machine);
+    auto* connecting = new QState(&machine);
+    auto* online = new QState(&machine);
+    machine.setInitialState(offline);
+
+    // 상태마다 버튼이 어떤 모습이어야 하는지를 선언한다
+    offline->assignProperty(&button, "text", "연결");
+    offline->assignProperty(&button, "enabled", true);
+    connecting->assignProperty(&button, "text", "연결 중…");
+    connecting->assignProperty(&button, "enabled", false);
+    online->assignProperty(&button, "text", "끊기");
+    online->assignProperty(&button, "enabled", true);
+
+    // 어떤 일이 일어나면 어느 상태로 가는가
+    offline->addTransition(&button, &QPushButton::clicked, connecting);
+    connecting->addTransition(&link, &Link::opened, online);
+    connecting->addTransition(&link, &Link::failed, offline);
+    online->addTransition(&button, &QPushButton::clicked, offline);
+    QObject::connect(connecting, &QState::entered, &link, &Link::open);
+
+    auto report = [&](const char* name) {   // 속성을 다 바꾼 뒤에 불린다
+        std::printf("[%s] 버튼 \"%s\", %s\n", name, qPrintable(button.text()),
+                    button.isEnabled() ? "누를 수 있음" : "누를 수 없음");
+    };
+    QObject::connect(offline, &QState::propertiesAssigned,
+                     [&] { report("끊김"); });
+    QObject::connect(connecting, &QState::propertiesAssigned,
+                     [&] { report("연결 중"); });
+    QObject::connect(online, &QState::propertiesAssigned,
+                     [&] { report("연결됨"); });
+
+    auto waitUntil = [](auto condition) {   // 이벤트를 처리하며 조건을 기다린다
+        if (!QTest::qWaitFor(condition, 2000)) {
+            std::puts("시간 초과");
+            std::exit(1);
+        }
+    };
+    machine.start();
+    waitUntil([&] { return offline->active(); });
+    button.click();                                   // 첫 시도
+    waitUntil([&] { return connecting->active(); });
+    button.click();                                   // 연결 중에 또 누르면?
+    std::printf("  연결 중에 누름: %s\n", connecting->active() ? "무시됨" : "?");
+    waitUntil([&] { return link.tries == 1 && offline->active(); });
+    button.click();                                   // 다시 시도
+    waitUntil([&] { return online->active(); });
+    button.click();                                   // 끊기
+    waitUntil([&] { return offline->active(); });
+}
+
+#include "main.moc"
+```
+
+```text
+[끊김] 버튼 "연결", 누를 수 있음
+[연결 중] 버튼 "연결 중…", 누를 수 없음
+  연결 중에 누름: 무시됨
+  1번째 시도: 실패
+[끊김] 버튼 "연결", 누를 수 있음
+[연결 중] 버튼 "연결 중…", 누를 수 없음
+  2번째 시도: 성공
+[연결됨] 버튼 "끊기", 누를 수 있음
+[끊김] 버튼 "연결", 누를 수 있음
+```
+
+- `assignProperty`는 그 상태에서 버튼이 **어떤 모습이어야 하는지**를 선언합니다. 상태에 들어갈 때 Qt가 값을 넣어 주므로, 버튼을 고치는 코드가 여기저기 흩어지지 않습니다
+- 연결 중에는 버튼이 꺼져 있으니 또 눌러도 아무 일이 없습니다. "연결 중이면 무시" 같은 검사를 따로 쓰지 않아도 됩니다
+- 버튼을 읽는 보고는 `entered`가 아니라 `propertiesAssigned` 신호에 걸었습니다. `assignProperty`의 값은 상태에 들어간 뒤에 들어가므로, 값을 다 넣은 뒤에 오는 이 신호가 안전합니다
+
+상태 안에 상태를 두는 계층 상태(자식 `QState`), 마지막 하위 상태로 돌아가는 `QHistoryState`, 동시에 활성인 병렬 상태(`QState::ParallelStates`)도 있습니다. 표준 SCXML 상태도 파일을 C++ 코드로 바꿔 쓰는 Qt SCXML 모듈도 있습니다.
+
+<Note>
+스토어와 상태 기계는 함께 쓸 수 있습니다. 스토어는 "무엇이 참인가"를, 상태 기계는 "지금 무엇을 할 수 있는가"를 맡깁니다. 그리고 상태를 바꾸는 길이 스토어 함수로 하나뿐이면, 그 변경 하나하나를 객체로 기록해 되돌릴 수도 있습니다. 그것이 다음 쪽 [「명령과 실행 취소」](#/read/cpp-qt/qarch-undo)의 주제입니다.
+</Note>
+
+## 정리
+
+- 같은 사실은 한곳(스토어)에만 두고, 화면 요소는 신호를 받아 그것을 비추기만 하며, 계산되는 상태는 저장하지 않는다
+- 화면과 스토어를 양쪽으로 잇는 경우 값이 같으면 아무것도 하지 않는 검사로 되먹임 고리를 끊는다
+- 모드에 따라 동작이 달라지면 QStateMachine으로 상태와 전이를 적고, assignProperty로 상태마다 화면의 모습을 선언한다
