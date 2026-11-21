@@ -1,0 +1,106 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '여러 축 맞추기: 따로 움직이면 휘는 경로, 직선 보간과 축 한계, 전자 기어와 캠';
+
+축 하나를 움직이는 것과 여러 축을 함께 움직이는 것은 다른 문제입니다. 공작 기계의 공구, 디스펜서의 노즐, 갠트리 로봇의 손끝은 X와 Y가 따로 정확한 것만으로는 부족하고, 둘이 **함께** 정해진 경로를 그려야 합니다. 축들이 같은 시각을 기준으로 움직이는 것은 [「EtherCAT」](#/read/cpp-industrial/fb-ethercat)의 분산 클록 같은 버스의 몫이고, 같은 경로를 그리게 하는 것은 궤적을 만드는 마스터의 몫입니다.
+
+## 따로 움직이면 경로가 휜다
+
+(0,0)에서 (120,50)으로 가는 일을 두 가지로 했습니다. 하나는 [「궤적 만들기」](#/read/cpp-industrial/mot-trajectory)의 사다리꼴을 축마다 따로 만든 것, 다른 하나는 직선 경로의 길이(130mm)를 따라 궤적을 하나 만들고 그 위치를 두 축에 나눠 준 것입니다(**직선 보간**). 마지막으로 다른 축의 위치를 따라가는 전자 캠도 만들었습니다.
+
+```cpp
+// 두 축으로 (0,0)에서 (120,50)까지: 축마다 따로 vs 경로를 따라 함께, 그리고 전자 캠
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdio>
+
+// 앞 쪽의 사다리꼴 궤적(위치를 바로 계산)
+struct Trapezoid {
+    double dist, vmax, amax, ta, tc;
+    Trapezoid(double d, double vm, double am) : dist(d), vmax(vm), amax(am) {
+        ta = std::min(vmax / amax, std::sqrt(dist / amax));
+        tc = (dist - amax * ta * ta) / (amax * ta);
+    }
+    double total() const { return 2 * ta + tc; }
+    double pos(double t) const {
+        const double v = amax * ta;
+        if (t <= 0) return 0;
+        if (t < ta) return 0.5 * amax * t * t;
+        if (t < ta + tc) return 0.5 * amax * ta * ta + v * (t - ta);
+        if (t < total()) return dist - 0.5 * amax * (total() - t) * (total() - t);
+        return dist;
+    }
+};
+
+// 직선 (0,0)-(120,50)에서 떨어진 거리
+double offLine(double x, double y) {
+    return std::fabs(x * 50 - y * 120) / 130;
+}
+
+int main() {
+    const double vmax = 200, amax = 1000;        // 두 축 모두 같은 한계
+
+    const Trapezoid x(120, vmax, amax), y(50, vmax, amax);       // 1) 축마다 따로
+    double worst = 0;
+    for (double t = 0; t <= x.total(); t += 0.001)
+        worst = std::max(worst, offLine(x.pos(t), y.pos(t)));
+    std::printf("따로: X %.3fs, Y %.3fs에 도착, 직선에서 최대 %.2fmm 벗어남\n",
+                x.total(), y.total(), worst);
+
+    // 2) 경로 길이 130mm를 따라 함께. 경로의 한계는 가장 많이 움직이는 X가 정한다
+    for (double scale : {1.0, 130.0 / 120.0}) {
+        const Trapezoid path(130, vmax * scale, amax * scale);
+        worst = 0;
+        double maxVx = 0;
+        for (double t = 0.001; t <= path.total(); t += 0.001) {
+            const double s = path.pos(t);
+            worst = std::max(worst, offLine(s * 120 / 130, s * 50 / 130));
+            maxVx = std::max(maxVx, (s - path.pos(t - 0.001)) / 0.001 * 120 / 130);
+        }
+        std::printf("함께(경로 속도 %.0f): %.3fs에 도착, "
+                    "직선에서 %.2fmm, X 최고 %.0f\n",
+                    vmax * scale, path.total(), worst, maxVx);
+    }
+
+    // 3) 전자 캠: 마스터 축의 각도에 따라 슬레이브 위치를 표에서 보간한다
+    // 45도마다
+    const std::array<double, 9> cam = {0, 0, 10, 40, 70, 80, 80, 40, 0};
+    for (double deg = 0; deg < 360; deg += 30) {
+        const int i = int(deg / 45);
+        const double f = (deg - i * 45) / 45;   // 두 표 값 사이를 직선으로
+        std::printf("%s%3.0f°→%4.1f", deg == 0 ? "캠:" : deg == 180 ? "\n   " : " ",
+                    deg, cam[i] + (cam[i + 1] - cam[i]) * f);
+    }
+    std::printf("\n");
+}
+```
+
+```text
+따로: X 0.800s, Y 0.450s에 도착, 직선에서 최대 22.44mm 벗어남
+함께(경로 속도 200): 0.850s에 도착, 직선에서 0.00mm, X 최고 185
+함께(경로 속도 217): 0.800s에 도착, 직선에서 0.00mm, X 최고 200
+캠:  0°→ 0.0  30°→ 0.0  60°→ 3.3  90°→10.0 120°→30.0 150°→50.0
+   180°→70.0 210°→76.7 240°→80.0 270°→80.0 300°→53.3 330°→26.7
+```
+
+- **따로 움직이면**: 50mm만 가는 Y가 0.45초에 먼저 도착하고 X는 0.8초까지 혼자 갑니다. 손끝은 직선이 아니라 꺾인 곡선을 그려 최대 22mm나 벗어났습니다. 이동만 하면 되는 경우는 괜찮지만, 그 사이에 장애물이 있거나 경로 자체가 일(용접, 절단, 도포)이라면 쓸 수 없습니다
+- **경로를 따라 함께**: 경로 위의 거리 s 하나로 궤적을 만들고 X = s·120/130, Y = s·50/130으로 나누면 두 축이 늘 같은 비율로 움직여 정확히 직선을 그리고 함께 도착합니다
+- **한계는 축마다**: 경로 속도를 200으로 묶으면 X는 185까지밖에 쓰지 않아 0.85초가 걸렸습니다. 축마다의 한계가 200이라면, 가장 많이 움직이는 X가 한계에 닿도록 경로 한계를 130/120배로 올려 0.8초에 같은 직선을 그릴 수 있습니다. 경로 계획기는 이렇게 각 축의 한계를 경로 방향으로 환산해 가장 엄격한 것을 고릅니다
+
+## 전자 기어와 캠
+
+여러 축을 맞추는 또 다른 방법은 한 축을 **마스터**로 두고 다른 축이 그 위치를 따라가게 하는 것입니다. 기계식 기어와 캠을 소프트웨어로 대신한다고 해서 전자 기어, 전자 캠이라고 부릅니다.
+
+- **전자 기어**: 슬레이브 위치 = 마스터 위치 × 비율. 컨베이어 속도에 맞춰 도는 롤러처럼, 비율만 바꾸면 기계를 고치지 않고 제품을 바꿀 수 있습니다
+- **전자 캠**: 마스터 각도에 따른 슬레이브 위치를 표로 정하고 그 사이를 보간합니다. 위 예에서 슬레이브는 마스터가 한 바퀴 도는 동안 머물고(0~45°), 올라가고, 다시 머물다(225~270°) 돌아옵니다. 포장기에서 움직이는 제품에 맞춰 칼이나 봉합기가 따라가는 동작이 이런 캠입니다
+
+<Note>
+원호를 그리는 원호 보간, CNC의 G 코드(G01 직선, G02/G03 원호), 경로 모퉁이에서 멈추지 않고 부드럽게 도는 블렌딩, 여러 축의 저크까지 함께 제한하는 계획은 모두 이 직선 보간의 연장입니다. 로봇 팔처럼 관절 각도와 손끝 위치가 직선 관계가 아니면 경로 위의 점마다 [「기구학」](#/read/cpp-industrial/rob-kinematics)으로 관절 값을 계산합니다.
+</Note>
+
+## 정리
+
+- 축마다 따로 궤적을 만들면 도착 시각이 달라 경로가 휘므로, 경로가 중요한 동작은 경로 길이를 따라 궤적 하나를 만들어 축에 나눠 준다
+- 경로의 속도와 가속도 한계는 각 축의 한계를 경로 방향으로 환산해 가장 엄격한 것으로 정한다
+- 한 축을 따라가게 하는 전자 기어는 비율로, 전자 캠은 마스터 각도에 따른 표와 보간으로 슬레이브 위치를 정한다
