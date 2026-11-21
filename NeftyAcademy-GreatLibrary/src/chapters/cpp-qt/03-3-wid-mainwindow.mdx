@@ -1,0 +1,124 @@
+import { Figure, Note } from 'neftyacademy-paragons-bookshelf';
+import { QtMock } from '../../components/QtMock';
+
+export const summary = '메인 윈도우: 가운데 위젯, 메뉴와 도구 모음이 함께 쓰는 QAction, 단축키, 상태줄, 도킹 창';
+
+문서 편집기, IDE, 그림 도구 같은 데스크톱 앱은 거의 같은 모양입니다. 위에 메뉴와 도구 모음, 가운데 큰 작업 영역, 옆에 붙였다 뗄 수 있는 패널, 아래에 상태 표시줄입니다. `QMainWindow`는 이 틀을 미리 만들어 둔 위젯입니다. 우리는 칸마다 무엇을 넣을지만 정하면 됩니다.
+
+<Figure caption="QMainWindow의 영역들. 메뉴, 도구 모음, 왼쪽 도킹 창, 가운데 위젯, 상태 표시줄">
+  <QtMock title="편집기" width={340} spec="menu 파일,보기; button 새 문서 | space | space; list 개요,1장,2장 | text 본문…; status 새 문서를 만들었습니다" />
+</Figure>
+
+## 편집기 틀
+
+```cpp qt=Widgets,Test
+#include <QApplication>
+#include <QDockWidget>
+#include <QListWidget>
+#include <QMainWindow>
+#include <QMenuBar>
+#include <QStatusBar>
+#include <QTest>
+#include <QTextEdit>
+#include <QTimer>
+#include <QToolBar>
+#include <cstdio>
+
+int main(int argc, char** argv) {
+    QApplication app(argc, argv);
+    QMainWindow win;
+    auto* editor = new QTextEdit;
+    win.setCentralWidget(editor);                       // 가운데 큰 영역
+
+    // 동작(QAction) 하나를 메뉴와 도구 모음이 함께 쓴다
+    auto* newAct = new QAction("새 문서", &win);
+    newAct->setShortcut(QKeySequence::New);             // 플랫폼에 맞는 Ctrl+N / ⌘N
+    auto* wrapAct = new QAction("줄 바꿈", &win);
+    wrapAct->setCheckable(true);
+    wrapAct->setChecked(true);
+
+    QMenu* file = win.menuBar()->addMenu("파일");
+    file->addAction(newAct);
+    QMenu* view = win.menuBar()->addMenu("보기");
+    view->addAction(wrapAct);
+    QToolBar* tools = win.addToolBar("기본");
+    tools->addAction(newAct);
+
+    // 도킹 창: 옆에 붙였다 떼었다 할 수 있는 패널
+    auto* dock = new QDockWidget("개요", &win);
+    dock->setObjectName("outlineDock");                 // 상태 저장에 필요한 이름
+    dock->setWidget(new QListWidget);
+    win.addDockWidget(Qt::LeftDockWidgetArea, dock);
+    // 보이기/숨기기 동작을 공짜로
+    view->addAction(dock->toggleViewAction());
+
+    QObject::connect(newAct, &QAction::triggered, [&] {
+        editor->clear();
+        win.statusBar()->showMessage("새 문서를 만들었습니다", 2000);
+    });
+    QObject::connect(wrapAct, &QAction::toggled, [&](bool on) {
+        editor->setLineWrapMode(on ? QTextEdit::WidgetWidth : QTextEdit::NoWrap);
+    });
+    win.resize(640, 400);
+    win.show();
+
+    QTimer::singleShot(0, [&] {
+        editor->setPlainText("초안");
+        // 단축키는 활성 창에만
+        win.activateWindow();
+        if (!QTest::qWaitForWindowActive(&win)) std::printf("활성화 실패\n");
+        QTest::keyClick(&win, Qt::Key_N, Qt::ControlModifier);   // 단축키로 실행
+        std::printf("Ctrl+N 뒤 본문: '%s', 상태줄: '%s'\n",
+                    qPrintable(editor->toPlainText()),
+                    qPrintable(win.statusBar()->currentMessage()));
+        // 메뉴를 고른 것처럼
+        wrapAct->trigger();
+        bool wrap = editor->lineWrapMode() != QTextEdit::NoWrap;
+        std::printf("줄 바꿈 %s\n", wrap ? "켜짐" : "꺼짐");
+        QByteArray state = win.saveState();                       // 도구·도킹 배치
+        dock->toggleViewAction()->trigger();
+        std::printf("개요 창 %s", dock->isVisible() ? "보임" : "숨김");
+        win.restoreState(state);
+        std::printf(" -> 저장한 배치로 되돌리자 %s\n",
+                    dock->isVisible() ? "보임" : "숨김");
+        std::printf("메뉴: ");
+        for (auto* a : win.menuBar()->actions())
+            std::printf("[%s] ", qPrintable(a->text()));
+        std::printf("\n");
+        app.quit();
+    });
+    return app.exec();
+}
+```
+
+```text
+Ctrl+N 뒤 본문: '', 상태줄: '새 문서를 만들었습니다'
+줄 바꿈 꺼짐
+개요 창 숨김 -> 저장한 배치로 되돌리자 보임
+메뉴: [파일] [보기]
+```
+
+## 동작(QAction)이 중심이다
+
+메뉴 항목, 도구 모음 버튼, 단축키, 오른쪽 클릭 메뉴는 모두 **같은 명령을 실행하는 다른 입구**입니다. Qt는 그 명령을 `QAction` 하나로 표현하고, 여러 곳에 붙입니다.
+
+- "새 문서" 동작을 파일 메뉴와 도구 모음에 함께 붙였습니다. 동작을 끄면(`setEnabled(false)`) 두 곳이 함께 흐려지고, 이름을 바꾸면 두 곳이 함께 바뀝니다
+- `setShortcut(QKeySequence::New)`는 "새로 만들기"의 표준 단축키를 플랫폼에 맞게 정합니다. Windows와 Linux에서는 Ctrl+N, macOS에서는 ⌘N입니다. 예제에서 Ctrl+N을 누르자 본문이 비고 상태 표시줄에 알림이 나왔습니다. 단축키는 **활성 창**에서만 동작하므로, 화면 없는 환경에서는 창을 먼저 활성화해야 했습니다
+- `setCheckable(true)`인 동작은 켜고 끄는 메뉴 항목이 되고, `toggled(bool)` 시그널을 냅니다. "줄 바꿈"을 한 번 고르자 꺼졌습니다
+
+## 나머지 칸들
+
+- **가운데 위젯**: `setCentralWidget`으로 하나만 넣습니다. 여러 개가 필요하면 레이아웃을 가진 위젯이나 탭 위젯(`QTabWidget`)을 넣습니다
+- **상태 표시줄**: `showMessage(글, 2000)`은 2초 뒤 사라지는 알림입니다. 계속 보일 정보(줄·열 번호)는 `addPermanentWidget`으로 라벨을 붙입니다
+- **도킹 창**: `QDockWidget`은 사용자가 끌어서 다른 가장자리에 붙이거나 떼어 내 따로 띄울 수 있는 패널입니다. `toggleViewAction()`이 "보이기/숨기기" 동작을 만들어 주므로 보기 메뉴에 그대로 넣으면 됩니다
+- **배치 저장**: `saveState()`는 도구 모음과 도킹 창의 위치를 바이트 배열로 돌려줍니다. 앱을 끌 때 [「파일과 설정」](#/read/cpp-qt/core-files)의 `QSettings`에 저장하고 켤 때 `restoreState()`하면, 사용자가 꾸민 배치가 다음 실행에도 남습니다. 도킹 창과 도구 모음에 `setObjectName`으로 이름을 주어야 저장한 상태를 제자리에 맞출 수 있습니다
+
+<Note>
+macOS에서는 메뉴 막대가 창 위가 아니라 화면 맨 위에 붙고, "환경설정"이나 "끝내기" 같은 동작은 Qt가 이름과 역할을 보고 앱 메뉴로 옮깁니다. `QAction::setMenuRole`로 이 동작을 조정할 수 있습니다. 같은 코드가 플랫폼마다 그 플랫폼답게 보이는 것이 Qt 위젯의 장점입니다.
+</Note>
+
+## 정리
+
+- QMainWindow는 메뉴, 도구 모음, 가운데 위젯, 도킹 창, 상태 표시줄의 틀을 제공한다
+- 명령은 QAction 하나로 만들어 메뉴와 도구 모음, 단축키에 함께 붙이며, 체크 가능한 동작은 켜고 끄는 항목이 된다
+- 도킹 창의 보이기 동작은 toggleViewAction으로 얻고, saveState와 restoreState로 사용자의 배치를 저장한다

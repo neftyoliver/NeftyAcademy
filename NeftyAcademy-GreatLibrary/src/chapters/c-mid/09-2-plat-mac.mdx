@@ -1,0 +1,115 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'macOS가 주는 C 기능: POSIX 위의 Darwin, 프레임워크와 Core Foundation, 블록과 GCD, kqueue와 권한';
+
+맥은 [「POSIX와 ISO C」](#/read/basics/std-posix-c)에서 본 대로 POSIX 인증을 받은 정식 유닉스입니다. 그래서 리눅스에서 POSIX만 써서 짠 C 프로그램은 맥에서 다시 컴파일만 하면 대부분 돕니다. 이 쪽은 그 위에 맥이 더 얹어 둔 것, 곧 [「리눅스」](#/read/c-mid/plat-linux)의 리눅스 전용 층에 해당하는 맥의 층을 봅니다.
+
+<Note kind="warn">
+이 책의 검사 기계에는 맥이 없어서, 맥 SDK가 필요한 예제(프레임워크, GCD, kqueue)는 컴파일해 보지 못했습니다. 애플의 C 확장인 **블록**만 리눅스의 Clang 18과 `libblocksruntime-dev`로 돌려 봤습니다. 맥에서는 `xcode-select --install`로 명령 줄 도구를 깔면 `clang`과 SDK가 함께 들어옵니다.
+</Note>
+
+## Darwin: 맥의 바닥
+
+macOS의 OS 핵심은 Darwin이라는 이름으로 공개돼 있습니다. 커널 XNU는 Mach 마이크로커널과 BSD 유닉스를 합친 것이라([「커널의 종류」](#/read/basics/kernels)의 하이브리드), 맥에는 두 계열의 API가 함께 있습니다.
+
+| 층 | 무엇 | 예 |
+| --- | --- | --- |
+| BSD·POSIX | 리눅스와 거의 같은 유닉스 함수 | `open`, `fork`, `pthread_create`, `kqueue` |
+| Mach | 마이크로커널의 낮은 수준 API | `mach_absolute_time`, Mach 포트 |
+| C 라이브러리 | `libSystem`(C 라이브러리, 수학, 스레드를 한 묶음으로) | 링크할 때 저절로 붙는다 |
+| 프레임워크 | 애플의 기능 묶음 | Core Foundation, IOKit, CoreAudio |
+
+리눅스의 glibc 자리에 `libSystem`이 있고, `-lm`, `-lpthread`를 따로 줄 필요가 없습니다. 실행 파일 형식은 [「Mach-O」](#/read/c-mid/exe-macho)입니다.
+
+## 프레임워크와 Core Foundation
+
+맥의 기능은 **프레임워크**라는 묶음(헤더 + 동적 라이브러리 + 자원을 담은 폴더)으로 옵니다. 컴파일할 때 `-l` 대신 `-framework`로 붙입니다.
+
+```sh
+clang app.c -framework CoreFoundation -framework IOKit -o app
+```
+
+많은 프레임워크가 오브젝티브-C나 스위프트용이지만, **Core Foundation**은 순수 C API라서 C에서 바로 씁니다. 문자열(`CFStringRef`), 배열, 사전, 날짜, 설정 저장 같은 것을 다루고, USB 장치를 다루는 IOKit도 Core Foundation의 타입으로 정보를 줍니다. Core Foundation은 참조 횟수로 메모리를 관리해서 `Create`나 `Copy`가 이름에 든 함수로 받은 것은 다 쓰고 `CFRelease`로 놓아줘야 합니다.
+
+## 블록: 애플의 C 확장
+
+애플은 C에 **블록**이라는 확장을 더했습니다. 이름 없는 함수를 그 자리에서 만들고, 바깥의 변수를 붙잡아 들고 다닐 수 있습니다. Clang만 지원하고 GCC는 지원하지 않습니다.
+
+```c nocheck
+#include <stdio.h>
+
+int main(void)
+{
+    int base = 10;
+    __block int calls = 0;                  // 블록이 고칠 수 있는 변수
+
+    // ^(인자){ 몸체 }: 이름 없는 함수(블록). 바깥 변수 base를 붙잡는다
+    int (^add_base)(int) = ^(int x) {
+        calls++;
+        return x + base;
+    };
+
+    printf("%d %d\n", add_base(1), add_base(5));
+    printf("불린 횟수 %d\n", calls);
+    return 0;
+}
+```
+
+리눅스에서 `clang -fblocks blk.c -lBlocksRuntime`으로 컴파일해 돌린 결과입니다(맥에서는 `-fblocks`가 기본이고 런타임도 `libSystem`에 들어 있습니다).
+
+```text nocheck
+11 15
+불린 횟수 2
+```
+
+블록은 [함수 포인터](#/read/c-basic/ptr-function)처럼 부를 수 있으면서, 만들 때의 `base`를 기억합니다. 붙잡은 변수는 기본으로 복사본이라 고칠 수 없고, 고치려면 `__block`을 붙입니다. GCC로 같은 파일을 컴파일하면 `'__block' undeclared`로 멈춥니다. C++의 람다와 비슷한 생각을 C에 가져온 것입니다.
+
+## GCD: 일을 줄에 넣기
+
+블록이 가장 많이 쓰이는 곳은 **GCD**(Grand Central Dispatch, `libdispatch`)입니다. 스레드를 직접 만드는 대신 할 일(블록)을 **줄**(queue)에 넣으면, 시스템이 코어 수에 맞춰 스레드를 굴려 처리합니다.
+
+```c nocheck
+#include <dispatch/dispatch.h>
+#include <stdio.h>
+
+int main(void)
+{
+    __block int total = 0;
+    dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0);
+    dispatch_queue_t lock = dispatch_queue_create("sum", DISPATCH_QUEUE_SERIAL);
+
+    // 0부터 9까지 열 개의 일을 여러 스레드에 나눠 맡긴다
+    dispatch_apply(10, q, ^(size_t i) {
+        int square = (int)(i * i);
+        dispatch_sync(lock, ^{ total += square; });  // 더하기는 한 줄로 세워서
+    });
+    printf("제곱의 합: %d\n", total);
+    dispatch_release(lock);
+    return 0;
+}
+```
+
+이 코드는 돌려 보지 못했습니다. libdispatch는 오픈소스라 리눅스에도 옮겨져 있지만 우분투 24.04의 저장소에는 없었습니다. 동작대로라면 0²부터 9²까지의 합인 285를 찍습니다. 더하기를 순서 줄(`DISPATCH_QUEUE_SERIAL`)에 넣은 것은 [「스레드의 개념」](#/read/basics/threads)에서 본 경쟁 상태를 피하려는 것으로, 뮤텍스 대신 "한 줄로 세우기"를 쓴 셈입니다.
+
+## 리눅스 전용 기능의 짝
+
+| 하고 싶은 일 | 리눅스 | 맥 |
+| --- | --- | --- |
+| 많은 파일 기술자 기다리기 | `epoll` | `kqueue` (BSD에서 왔다) |
+| 파일 변경 알림 | `inotify` | `kqueue`의 `EVFILT_VNODE`, FSEvents |
+| 타이머를 기다리기 | `timerfd` | `kqueue`의 `EVFILT_TIMER`, GCD 타이머 |
+| 보안용 난수 | `getrandom` | `arc4random_buf`, `getentropy` |
+| 정밀한 시간 | `clock_gettime` | `clock_gettime`, `mach_absolute_time` |
+| 장치 다루기 | `/dev`, `/sys` | IOKit |
+
+`kqueue` 하나가 리눅스의 `epoll`, `inotify`, `timerfd`, `signalfd`를 합친 일을 합니다. 생각은 같고 모양이 다릅니다. 이 차이를 감춰 주는 라이브러리(libuv, libevent)를 쓰면 같은 코드가 두 OS에서 돕니다.
+
+<Note kind="tip">
+맥에서는 카메라, 마이크, 화면 녹화, 다른 앱의 파일 폴더에 접근하는 프로그램이 처음 실행될 때 "허용하시겠습니까?" 창이 뜹니다. C로 짠 명령 줄 프로그램도 예외가 아니라서, 권한이 없으면 함수가 오류 없이 빈 데이터를 돌려주기도 합니다. 그런 일이 생기면 "시스템 설정 → 개인정보 보호 및 보안"에서 터미널 앱에 권한이 있는지부터 확인하세요.
+</Note>
+
+## 정리
+
+- 맥은 POSIX 인증을 받은 유닉스라 POSIX 코드는 대부분 그대로 돌고, 그 바닥은 Mach와 BSD를 합친 Darwin과 `libSystem`이다
+- 맥의 기능은 `-framework`로 붙이는 프레임워크로 오고, 그중 Core Foundation과 IOKit은 C에서 바로 쓴다
+- 애플의 C 확장인 블록(Clang 전용)과 그것을 쓰는 GCD로 일을 줄에 넣어 처리하며, 리눅스의 `epoll`·`inotify`·`timerfd` 자리에는 `kqueue`가 있다

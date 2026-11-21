@@ -1,0 +1,110 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'Wi-Fi의 세대·대역·채널, WPA2의 키 만들기와 WPA3가 고친 것, 기기가 붙는 순서';
+
+Wi-Fi는 [「이더넷 프로토콜」](#/read/c-mid/net-ethernet)의 선을 전파로 바꾼 것입니다. 운영체제와 프로그램에게는 이더넷처럼 보이므로, 한번 연결되면 [「TCP」](#/read/c-mid/net-tcp)나 [「MQTT」](#/read/c-mid/iot-mqtt) 코드는 선이든 전파든 똑같이 동작합니다. 그래서 이 쪽은 Wi-Fi만의 부분, 곧 대역과 채널, 보안, 그리고 기기가 네트워크에 붙는 순서를 봅니다.
+
+## 세대와 대역
+
+| 이름 | 규격 | 대역 |
+| --- | --- | --- |
+| Wi-Fi 4 | 802.11n | 2.4 / 5 GHz |
+| Wi-Fi 5 | 802.11ac | 5 GHz |
+| Wi-Fi 6 / 6E | 802.11ax | 2.4 / 5 GHz, 6E는 6 GHz까지 |
+| Wi-Fi 7 | 802.11be | 2.4 / 5 / 6 GHz, 320 MHz 폭 채널 |
+
+- **2.4 GHz**는 멀리 가고 벽을 잘 지나지만 채널이 좁고 붐빕니다. 전자레인지와 블루투스도 같은 대역을 씁니다. 값싼 IoT 칩(ESP32의 많은 종류 등)은 이 대역만 지원하는 경우가 많아서, 공유기에서 2.4 GHz를 끄면 기기가 공유기를 못 찾습니다
+- **5·6 GHz**는 빠르고 채널이 많지만 멀리 가지 못합니다
+
+## 채널은 주파수의 이름
+
+```c flags=-lcrypto
+#include <stdio.h>
+#include <string.h>
+#include <openssl/evp.h>
+
+// WPA2-Personal: 비밀번호와 SSID로 256비트 키(PMK)를 만든다
+static void wpa_psk(const char *pass, const char *ssid, unsigned char out[32])
+{
+    PKCS5_PBKDF2_HMAC_SHA1(pass, (int)strlen(pass),
+                           (const unsigned char *)ssid, (int)strlen(ssid),
+                           4096, 32, out);   // SHA-1을 4096번 되풀이
+}
+
+static void show(const char *pass, const char *ssid)
+{
+    unsigned char k[32];
+    wpa_psk(pass, ssid, k);
+    printf("%-10s %-6s ", pass, ssid);
+    for (int i = 0; i < 32; i++)
+        printf("%02x", k[i]);
+    printf("\n");
+}
+
+// 채널 번호를 중심 주파수(MHz)로
+static int channel_mhz(int band_ghz, int ch)
+{
+    if (band_ghz == 2)
+        return ch == 14 ? 2484 : 2407 + 5 * ch;
+    if (band_ghz == 5)
+        return 5000 + 5 * ch;
+    return 5950 + 5 * ch;                    // 6GHz 대역
+}
+
+int main(void)
+{
+    show("password", "IEEE");
+    show("password", "IEEE2");
+    show("password1", "IEEE");
+
+    const int list[][2] = {{2, 1}, {2, 6}, {2, 13}, {5, 36}, {5, 149}, {6, 37}};
+    for (int i = 0; i < 6; i++)
+        printf("%3sGHz %3d번 채널 = %d MHz\n",
+               list[i][0] == 2 ? "2.4" : list[i][0] == 5 ? "5" : "6",
+               list[i][1], channel_mhz(list[i][0], list[i][1]));
+    return 0;
+}
+```
+
+```text
+password   IEEE   f42c6fc52df0ebef9ebb4b90b38a5f902e83fe1b135a70e23aed762e9710a12e
+password   IEEE2  b06433395bd30b1455f538904b239d10a51964932a81d1407baf2ba0767e22e9
+password1  IEEE   9b2cda3b10e3bd6ba49a7a021781a86ba0c21cba45f6a554978c73a9ef1a92bf
+2.4GHz   1번 채널 = 2412 MHz
+2.4GHz   6번 채널 = 2437 MHz
+2.4GHz  13번 채널 = 2472 MHz
+  5GHz  36번 채널 = 5180 MHz
+  5GHz 149번 채널 = 5745 MHz
+  6GHz  37번 채널 = 6135 MHz
+```
+
+채널부터 봅니다. 2.4 GHz 대역의 채널은 5 MHz 간격으로 번호가 붙지만, 신호 하나의 폭은 20 MHz입니다. 그래서 이웃 채널끼리 겹치고, 서로 겹치지 않게 쓰려면 1, 6, 11번(또는 나라에 따라 13번까지)처럼 띄워 고릅니다. 이웃집 공유기가 많을 때 채널을 바꾸면 빨라지는 까닭입니다. 5 GHz와 6 GHz는 번호에 5를 곱해 기준 주파수에 더하면 됩니다.
+
+## WPA2: 비밀번호에서 키로
+
+위 프로그램의 앞 세 줄이 **WPA2-Personal**의 키 만들기입니다. Wi-Fi 비밀번호는 그대로 쓰이지 않고, SSID(네트워크 이름)를 소금(salt)으로 해서 PBKDF2-HMAC-SHA1을 **4096번** 되풀이한 256비트 키(PMK)로 바뀝니다.
+
+- 첫 줄의 `f42c6fc5…a12e`는 IEEE 802.11 규격 문서에 실린 시험 값과 같고, Python의 `hashlib.pbkdf2_hmac`로 계산해도 세 줄 모두 같았습니다
+- SSID가 한 글자만 달라도(둘째 줄) 키가 전혀 달라집니다. 그래서 흔한 이름("iptime" 같은)에 대해 미리 계산해 둔 표를 무력하게 만듭니다
+- 4096번 되풀이는 비밀번호 하나를 시험하는 데 드는 시간을 늘리려는 것입니다
+
+<Note kind="warn">
+WPA2-Personal의 약점은, 누군가 기기가 접속하는 순간의 인사(4-way handshake)를 엿들으면 집에 가서 **오프라인으로** 비밀번호를 하나씩 대입해 볼 수 있다는 것입니다. 위의 계산을 GPU로 초당 엄청나게 많이 돌릴 수 있으므로, 짧거나 사전에 있는 비밀번호는 곧 뚫립니다. **WPA3-Personal**은 SAE라는 다른 인사 방식을 써서 엿들은 기록만으로는 대입 공격을 할 수 없게 고쳤습니다. 공유기와 기기가 지원하면 WPA3를 켜고, 어느 쪽이든 길고 무작위한 비밀번호를 씁니다.
+</Note>
+
+## 기기가 붙는 순서
+
+1. **찾기**(scan): 공유기(AP)가 내보내는 알림(beacon)을 듣고 SSID 목록을 만든다
+2. **연결과 인증**: 고른 AP에 붙고, WPA2/WPA3 인사로 암호화 키를 맞춘다
+3. **주소 받기**: DHCP로 IP 주소, 게이트웨이, DNS 서버를 받는다
+4. 이제부터는 보통의 TCP/IP. 시계를 NTP로 맞추고([「TLS로 암호화하기」](#/read/c-mid/iot-tls) 인증서 검사에 필요), 서버나 MQTT 브로커에 접속한다
+
+리눅스에서는 1~2를 `wpa_supplicant`(또는 그 위의 NetworkManager)가 커널의 nl80211 인터페이스로 하고, 사람은 `nmcli device wifi list`, `nmcli device wifi connect <SSID> --ask`처럼 씁니다. ESP32 같은 마이크로컨트롤러는 제조사 SDK(ESP-IDF의 `esp_wifi` 등)가 같은 순서를 함수와 사건(event) 콜백으로 줍니다. 어느 쪽이든 **끊김은 정상**이라고 보고, 끊기면 잠시 기다렸다가 다시 붙는 고리를 처음부터 짜 둡니다.
+
+이 검사용 컴퓨터에는 무선 장치가 없어서 찾기와 연결은 해 보지 못했습니다. 위의 키 계산과 채널 계산만 실행해 확인했습니다.
+
+## 정리
+
+- Wi-Fi는 4·5·6·7 세대와 2.4·5·6 GHz 대역이 있고, 값싼 IoT 칩은 2.4 GHz만 쓰는 경우가 많으며, 2.4 GHz 채널은 1·6·11처럼 띄워야 겹치지 않는다
+- WPA2-Personal은 비밀번호와 SSID로 PBKDF2를 4096번 돌려 키를 만들고, 엿들은 인사로 오프라인 대입이 가능해서 WPA3의 SAE가 이를 고쳤다
+- 기기는 찾기, 연결·인증, DHCP, 시계 맞추기 순서로 붙고, 끊기면 다시 붙는 고리를 처음부터 둔다

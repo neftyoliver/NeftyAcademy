@@ -1,0 +1,98 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '플랫폼별 빌드: 플랫폼 차이를 한 층에 가두기, 미리 정의된 매크로, 크로스 컴파일로 여러 대상 확인하기';
+
+[「창과 입력」](#/read/cpp-game-engine/plat-window)에서 플랫폼 층을 만들 때, 엔진의 나머지는 운영체제를 모르게 한다는 원칙을 세웠습니다. 출시가 다가오면 그 원칙이 시험받습니다. Windows, Linux, 콘솔, 휴대폰에서 같은 코드가 빌드되고 같게 동작해야 합니다. 이 장은 플랫폼 차이가 어디서 생기고, 그것을 어떻게 한곳에 가두고, 가지지 않은 기계의 빌드를 어떻게 확인하는지 봅니다.
+
+## 한 파일, 세 대상
+
+```cpp
+#include <cstdint>
+#include <cstdio>
+// <print>는 MinGW의 오래된 libstdc++에 없을 수도 있어 printf를 쓴다
+
+// ---- 플랫폼을 고르는 곳은 이 머리 파일 하나로 모은다 ----
+#if defined(_WIN32)
+  #define PLATFORM_NAME "Windows"
+#elif defined(__ANDROID__)
+  #define PLATFORM_NAME "Android"
+#elif defined(__APPLE__)
+  #define PLATFORM_NAME "Apple"
+#elif defined(__linux__)
+  #define PLATFORM_NAME "Linux"
+#else
+  #error "지원하지 않는 플랫폼"
+#endif
+
+#if defined(__x86_64__) || defined(_M_X64)
+  #define CPU_NAME "x86-64"
+#elif defined(__aarch64__) || defined(_M_ARM64)
+  #define CPU_NAME "ARM64"
+#else
+  #define CPU_NAME "기타"
+#endif
+
+// 엔진 코드는 이 함수만 부르고, 구현은 플랫폼별 .cpp 파일에 있다
+const char* path_separator();
+#if defined(_WIN32)
+const char* path_separator() { return "\\"; }
+#else
+const char* path_separator() { return "/"; }
+#endif
+
+int main() {
+    std::uint32_t one = 1;
+    bool little = *reinterpret_cast<unsigned char*>(&one) == 1;
+    std::printf("%s / %s, %s 엔디언, 경로 구분자 %s\n", PLATFORM_NAME, CPU_NAME,
+                little ? "리틀" : "빅", path_separator());
+    std::printf("  long %zu, 포인터 %zu, wchar_t %zu (바이트)\n",
+                sizeof(long), sizeof(void*), sizeof(wchar_t));
+}
+```
+
+```text
+Linux / x86-64, 리틀 엔디언, 경로 구분자 /
+  long 8, 포인터 8, wchar_t 4 (바이트)
+```
+
+같은 파일을 세 가지 컴파일러로 빌드했습니다.
+
+```text nocheck
+$ g++-14 -std=c++23 plat.cpp -o plat_linux && ./plat_linux
+Linux / x86-64, 리틀 엔디언, 경로 구분자 /
+  long 8, 포인터 8, wchar_t 4 (바이트)
+
+$ aarch64-linux-gnu-g++-14 -std=c++23 -static plat.cpp -o plat_arm
+$ qemu-aarch64-static ./plat_arm
+Linux / ARM64, 리틀 엔디언, 경로 구분자 /
+  long 8, 포인터 8, wchar_t 4 (바이트)
+
+$ x86_64-w64-mingw32-g++-posix -std=c++20 -static plat.cpp -o plat.exe
+$ file plat.exe
+plat.exe: PE32+ executable (console) x86-64, for MS Windows, 19 sections
+```
+
+ARM64 실행 파일은 QEMU 사용자 모드 에뮬레이터로 실제로 돌렸습니다. Windows 실행 파일은 이 작업 환경에 Windows가 없어서 돌려 보지는 못했고, 대신 같은 MinGW 컴파일러에서 `static_assert`로 `long` 4바이트, 포인터 8바이트, `wchar_t` 2바이트임을 컴파일 시간에 확인했습니다. 그러니 Windows에서 돌리면 long과 wchar_t 값과 경로 구분자가 Linux와 다르게 나올 것입니다.
+
+## 차이가 숨어 있는 곳
+
+- **정수 크기**: 64비트 Windows는 `long`이 4바이트(LLP64), Linux와 macOS는 8바이트(LP64)입니다. 파일 형식과 네트워크 패킷에는 `long` 대신 `std::int32_t`, `std::int64_t`처럼 크기가 정해진 타입만 씁니다
+- **글자**: `wchar_t`가 Windows에선 2바이트(UTF-16), 나머지에선 4바이트입니다. 엔진 안에서는 UTF-8 `std::string`으로 통일하고, Windows API를 부르는 플랫폼 층 안에서만 UTF-16으로 바꿉니다
+- **파일 시스템**: [「파일과 경로」](#/read/cpp-game-engine/plat-files)에서 본 경로 구분자뿐 아니라 대소문자 구분이 다릅니다. Windows에서 `Textures/Grass.png`로 잘 읽히던 파일이 Linux와 콘솔에서는 `textures/grass.png`라는 이름 때문에 못 찾는 일이 흔합니다. [「묶음 파일」](#/read/cpp-game-engine/res-packaging)로 에셋을 묶을 때 경로를 소문자로 정규화하면 이 문제가 사라집니다
+- **엔디언**: 지금 게임이 도는 주요 CPU(x86-64, ARM64)는 모두 리틀 엔디언이라 실제로 부딪힐 일은 줄었지만, 파일 형식에는 엔디언을 명시해 둡니다
+
+## 차이를 가두는 방법
+
+예제처럼 `#if defined(_WIN32)`를 쓰는 곳은 플랫폼 층 머리 파일 몇 개로 제한하고, 나머지 코드에는 들어오지 못하게 합니다. 구현이 길면 `#if`보다 플랫폼별 소스 파일(`file_win32.cpp`, `file_posix.cpp`)을 두고 빌드 시스템이 대상에 맞는 것만 넣게 하는 편이 읽기 쉽습니다. CMake라면 `if(WIN32)`로 소스 목록을 고릅니다.
+
+가장 중요한 것은 **모든 대상을 매번 빌드하는 것**입니다. 한 플랫폼에서만 개발하면 다른 플랫폼의 빌드는 몇 주씩 깨진 채로 방치됩니다. 지속적 통합 서버가 커밋마다 모든 대상을 빌드하고 가능한 테스트를 돌리게 하면, 깨진 순간 누가 무엇을 바꿨는지 바로 압니다.
+
+<Note>
+콘솔(PlayStation, Xbox, Nintendo Switch)용 SDK와 문서는 비밀 유지 계약 아래 등록된 개발사에게만 제공되므로, 이 책에서는 다루지 않습니다. 다만 구조는 같습니다. 콘솔 전용 코드는 별도 저장소나 접근이 제한된 폴더의 플랫폼 층 구현으로 들어가고, 엔진의 나머지는 그 존재를 모릅니다.
+</Note>
+
+## 정리
+
+- 플랫폼 차이는 정수와 글자 크기, 파일 시스템, API에 숨어 있으며, 크기가 정해진 타입과 UTF-8로 엔진 안쪽을 통일한다
+- 플랫폼 분기는 플랫폼 층 머리 파일과 플랫폼별 소스 파일에 가두고, 나머지 코드는 운영체제를 모르게 한다
+- 크로스 컴파일과 에뮬레이터로 가지지 않은 대상도 확인하고, 지속적 통합으로 모든 대상을 커밋마다 빌드한다

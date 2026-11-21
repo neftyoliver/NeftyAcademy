@@ -1,0 +1,98 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'C 언어를 정한 ISO C, 유닉스 계열 OS의 공통 기능을 정한 POSIX, 둘의 경계가 코드에 드러나는 곳';
+
+C 프로그램에서 쓰는 함수는 크게 두 표준에서 옵니다. `printf`, `malloc`처럼 C 언어 자체가 약속한 것은 **ISO C**에서, 파일 권한이나 프로세스, 스레드처럼 OS가 해 주는 일은 **POSIX**에서 옵니다. 어느 쪽 함수인지에 따라 내 프로그램이 어디서 돌아갈 수 있는지가 정해집니다. 이 쪽은 그 경계를 봅니다.
+
+## ISO C
+
+C는 1972년 무렵 벨 연구소에서 유닉스를 쓰기 위해 만들어졌습니다. 컴파일러마다 조금씩 다르게 자라자, 미국 표준 협회(ANSI)가 1989년에 표준을 정했고 이듬해 국제 표준(ISO)이 됐습니다. 그 뒤로 몇 해마다 개정됩니다.
+
+| 이름 | 표준 번호 | 더해진 것 |
+| --- | --- | --- |
+| C89/C90 | ANSI X3.159-1989, ISO/IEC 9899:1990 | 첫 표준. 함수 원형 |
+| C99 | ISO/IEC 9899:1999 | `//` 주석, `stdint.h`, `bool`, 블록 중간의 변수 선언 |
+| C11 | ISO/IEC 9899:2011 | 스레드, 원자적 연산, `_Static_assert` |
+| C17 | ISO/IEC 9899:2018 | 오류 고침만 |
+| C23 | ISO/IEC 9899:2024 | `bool`이 키워드로, `nullptr`, `constexpr`, `0b` 2진수, `typeof` |
+
+ISO C가 약속하는 것은 **어떤 OS에서든** 있는 기능입니다. 화면에 글자 찍기, 파일 열고 읽기, 메모리 받기, 문자열 다루기, 수학 함수, 시간 정도입니다. 그래서 디렉터리 목록을 읽거나, 다른 프로그램을 실행하거나, 네트워크로 연결하는 함수는 ISO C에 없습니다. OS마다 방법이 너무 달라서 언어가 정할 수 없었기 때문입니다. 버전별 문법은 [「C23」](#/read/c-basic/ver-c23)과 그 앞 쪽들에서 봅니다.
+
+## POSIX
+
+1980년대에는 유닉스가 여러 회사의 판(AT&T의 System V, 버클리의 BSD, 각 회사의 변형)으로 갈라져 있었습니다. 한 유닉스에서 만든 프로그램이 다른 유닉스에서 돌지 않았습니다. 그래서 IEEE가 **유닉스 계열 OS가 공통으로 갖춰야 할 기능**을 1988년에 표준으로 정했습니다. 이것이 POSIX(Portable Operating System Interface)이고, 이름은 리처드 스톨먼이 제안했다고 알려져 있습니다.
+
+POSIX는 두 가지를 정합니다.
+
+| 부분 | 내용 | 예 |
+| --- | --- | --- |
+| C 함수 | OS의 기능을 부르는 함수와 헤더 | `open`, `fork`, `pthread_create`, `socket`, `clock_gettime` |
+| 명령과 셸 | 셸 문법과 기본 명령어 | `sh`, `ls`, `cp`, `grep`, `chmod` |
+
+[「리눅스 명령어와 POSIX」](#/read/basics/commands)에서 리눅스 명령과 POSIX 명령을 나눠 본 것이 두 번째 부분입니다. 최신판은 2024년 6월에 나온 POSIX.1-2024(IEEE Std 1003.1-2024)이고, 2008년 뒤로 처음 크게 고친 판입니다. 이 판의 C 부분은 C17을 바탕으로 합니다.
+
+## 누가 따르나
+
+| OS | POSIX |
+| --- | --- |
+| macOS | 인증을 받았다. 정식 "유닉스"다 |
+| 리눅스 | 대부분의 배포판은 인증이 없지만, 대부분을 따른다 |
+| FreeBSD 같은 BSD | 대부분을 따른다 |
+| 안드로이드 | 리눅스 커널 위라 상당 부분을 따른다 |
+| 윈도우 | 따르지 않는다. 자체 API(Win32)가 있다 |
+
+그래서 POSIX 함수만 쓴 C 프로그램은 리눅스, 맥, 라즈베리파이에서 다시 컴파일만 하면 돌아가지만, 윈도우에서는 그대로 돌지 않습니다. 윈도우에서는 WSL(윈도우 안의 리눅스)이나 MSYS2, Cygwin 같은 POSIX 흉내 환경을 쓰거나, 윈도우용 코드를 따로 써야 합니다. 이 차이는 [「윈도우: Win32」](#/read/c-basic/win-win32)와 [「리눅스: 로우레벨로」](#/read/c-basic/win-linux)에서 직접 겪어 봅니다.
+
+## 경계가 드러나는 곳
+
+아래 프로그램은 현재 시각을 두 가지 함수로 읽습니다. `timespec_get`은 ISO C(C11부터), `clock_gettime`과 `getpid`는 POSIX입니다.
+
+```c flags=-D_POSIX_C_SOURCE=200809L
+#include <stdio.h>
+#include <time.h>
+#include <unistd.h>
+
+int main(void)
+{
+    struct timespec t;
+    timespec_get(&t, TIME_UTC);                 // ISO C (C11부터)
+    printf("ISO C   timespec_get : %lld초\n", (long long)t.tv_sec);
+
+    clock_gettime(CLOCK_MONOTONIC, &t);         // POSIX
+    printf("POSIX   clock_gettime: 켠 지 %lld초\n", (long long)t.tv_sec);
+    printf("POSIX   getpid       : %d\n", (int)getpid());
+    return 0;
+}
+```
+
+```text nocheck
+ISO C   timespec_get : 1795251654초
+POSIX   clock_gettime: 켠 지 975초
+POSIX   getpid       : 4090
+```
+
+첫 줄은 1970년 1월 1일부터 센 초, 둘째 줄은 기계를 켠 뒤로 센 초입니다. 그런데 이 파일을 `gcc -std=c23`으로 그냥 컴파일하면 오류가 납니다.
+
+```text nocheck
+p.c:11:5: error: implicit declaration of function 'clock_gettime'
+p.c:11:19: error: 'CLOCK_MONOTONIC' undeclared (first use in this function)
+```
+
+`-std=c23`은 "ISO C만 쓰겠다"는 뜻이라서 헤더가 POSIX 함수를 감춥니다. 해결은 둘 중 하나입니다.
+
+- **POSIX도 쓰겠다고 알린다.** 컴파일할 때 `-D_POSIX_C_SOURCE=200809L`을 주거나, 파일 맨 위(`#include`보다 먼저)에 `#define _POSIX_C_SOURCE 200809L`을 적는다. 위 예제가 이 방법으로 컴파일됐다
+- **GNU 방언을 쓴다.** `-std=gnu23`으로 컴파일하면 ISO C에 GNU와 POSIX의 확장까지 모두 보인다. GCC는 따로 말하지 않으면 GNU 방언으로 컴파일한다(GCC 14의 기본값은 `gnu17`)
+
+<Note kind="tip">
+이 책의 예제 검사기는 C 예제를 엄격한 ISO C로 컴파일합니다. 그래서 [「메모리와 저장 장치의 계층」](#/read/basics/arch-memory)의 시간 재기 예제는 `clock_gettime` 대신 ISO C의 `timespec_get`을 썼습니다. 어느 OS에서든 컴파일되게 하려면 ISO C 함수를 먼저 찾아보는 것이 좋습니다.
+</Note>
+
+<Note>
+`200809L`은 POSIX.1-2008을 뜻하는 숫자입니다. 이 책의 검사 기계(우분투 24.04, glibc 2.39)는 `_POSIX_VERSION`을 아직 `200809L`로 알립니다. 2024년판을 다 따르는 C 라이브러리는 아직 드뭅니다.
+</Note>
+
+## 정리
+
+- ISO C는 C 언어와 어느 OS에나 있는 기본 함수를 정하고, C89부터 C23(ISO/IEC 9899:2024)까지 개정됐다
+- POSIX는 유닉스 계열 OS의 공통 함수와 명령을 정하며, 리눅스와 맥은 따르고 윈도우는 따르지 않는다
+- `-std=c23`처럼 엄격한 ISO C 모드에서는 POSIX 함수가 감춰지므로, `_POSIX_C_SOURCE`를 정의하거나 `gnu23`을 쓴다

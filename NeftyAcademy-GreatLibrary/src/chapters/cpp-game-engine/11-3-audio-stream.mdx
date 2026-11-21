@@ -1,0 +1,134 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '소리 스트리밍: 잠금 없는 고리 버퍼로 읽는 스레드와 오디오 스레드 잇기, 버퍼 길이와 끊김의 관계';
+
+효과음은 짧아서 통째로 메모리에 올려 두지만, 배경음악이나 긴 대사는 압축을 풀면 몇 분에 수십 MB가 됩니다. 이런 소리는 재생하면서 조금씩 읽고 풀어 넣는 **스트리밍**을 씁니다. 문제는 [「믹싱」](#/read/cpp-game-engine/audio-mixing)의 노트에서 본 것처럼, 오디오 스레드는 기다릴 수 없고 디스크는 언제 늦어질지 모른다는 점입니다. 둘 사이에 버퍼를 두되, 잠금 없이 주고받아야 합니다.
+
+## 잠금 없는 고리 버퍼
+
+읽는 스레드 하나가 넣고, 오디오 스레드 하나가 꺼내는 **단일 생산자 단일 소비자** 고리 버퍼입니다. 약 105만 개(2²⁰)의 표본을 실제로 두 스레드 사이로 보내 순서를 검사합니다.
+
+```cpp tsan
+#include <atomic>
+#include <cstdint>
+#include <print>
+#include <thread>
+#include <vector>
+
+// 단일 생산자 단일 소비자 고리 버퍼: 잠금 없이 읽는 스레드 -> 오디오 스레드
+class Ring {
+    std::vector<float> buf;
+    std::size_t mask;
+    alignas(64) std::atomic<std::size_t> head{0};   // 생산자만 쓴다
+    alignas(64) std::atomic<std::size_t> tail{0};   // 소비자만 쓴다
+public:
+    explicit Ring(std::size_t pow2) : buf(pow2), mask(pow2 - 1) {}
+    std::size_t push(const float* src, std::size_t n) {
+        auto h = head.load(std::memory_order_relaxed);
+        auto t = tail.load(std::memory_order_acquire);
+        n = std::min(n, buf.size() - (h - t));        // 빈자리만큼만
+        for (std::size_t i = 0; i < n; ++i) buf[(h + i) & mask] = src[i];
+        head.store(h + n, std::memory_order_release); // 다 쓴 뒤에 알린다
+        return n;
+    }
+    std::size_t pop(float* dst, std::size_t n) {
+        auto t = tail.load(std::memory_order_relaxed);
+        auto h = head.load(std::memory_order_acquire);
+        n = std::min(n, h - t);                       // 있는 만큼만
+        for (std::size_t i = 0; i < n; ++i) dst[i] = buf[(t + i) & mask];
+        tail.store(t + n, std::memory_order_release);
+        return n;
+    }
+};
+
+int main() {
+    Ring ring(4096);
+    const std::size_t total = 1 << 20;
+    std::thread reader([&] {                    // 파일을 읽어 풀어 넣는 쪽
+        std::vector<float> chunk(1000);
+        std::size_t sent = 0;
+        while (sent < total) {
+            std::size_t n = std::min<std::size_t>(chunk.size(), total - sent);
+            for (std::size_t i = 0; i < n; ++i) chunk[i] = float(sent + i);
+            std::size_t done = 0;
+            while (done < n) done += ring.push(chunk.data() + done, n - done);
+            sent += n;
+        }
+    });
+    std::vector<float> out(256);                // 오디오 콜백 한 번 분량
+    std::size_t got = 0, bad = 0;
+    while (got < total) {
+        std::size_t n = ring.pop(out.data(), out.size());
+        for (std::size_t i = 0; i < n; ++i) bad += out[i] != float(got + i);
+        got += n;
+    }
+    reader.join();
+    std::println("받은 표본 {}개, 순서가 틀린 표본 {}개", got, bad);
+}
+```
+
+```text
+받은 표본 1048576개, 순서가 틀린 표본 0개
+```
+
+- `head`는 생산자만, `tail`은 소비자만 씁니다. 각자 자기 변수만 쓰므로 잠금이 필요 없습니다. 둘이 같은 캐시 줄에 있으면 서로의 캐시를 계속 무효로 만들어서 `alignas(64)`로 떼어 놓았습니다
+- 생산자는 표본을 다 쓴 **뒤에** `head`를 `release`로 올리고, 소비자는 `head`를 `acquire`로 읽습니다. 그래서 소비자가 새 `head`를 보면 그 앞의 표본도 반드시 보입니다. 순서를 반대로 하면 소비자가 아직 쓰이지 않은 자리를 읽을 수 있습니다
+- 위치는 계속 커지기만 하고, 버퍼 크기를 2의 거듭제곱으로 두어 `& mask`로 자리를 찾습니다. `h - t`가 곧 차 있는 양이라 "꽉 참"과 "비어 있음"을 구분하는 표시가 따로 필요 없습니다
+- 이 검사는 스레드 검사기(ThreadSanitizer)와 주소 검사기에서 모두 문제없이 돌았습니다
+
+## 버퍼는 얼마나 커야 하나
+
+오디오는 48kHz로 1ms에 48표본씩 꾸준히 먹습니다. 읽는 쪽은 4096표본(약 85ms) 덩어리를 가져오는데 보통 5~14ms가 걸리고, 가끔 다른 읽기와 겹쳐 150ms가 걸린다고 가정하고 1분을 모의 실험했습니다.
+
+```cpp
+#include <cstdint>
+#include <print>
+
+// 1ms 단위 모의 실험: 오디오는 48표본/ms를 꾸준히 먹고,
+// 읽는 쪽은 디스크에서 4096표본 덩어리를 가져오는데 가끔 오래 걸린다
+int main() {
+    const int per_ms = 48, chunk = 4096;
+    std::println("버퍼 표본   길이(ms)  끊김(ms)");
+    for (int cap : {4096, 8192, 16384, 32768}) {
+        std::uint32_t r = 12345;
+        int fill = cap, starve = 0, busy_until = 0;
+        for (int ms = 0; ms < 60000; ++ms) {          // 1분
+            if (ms >= busy_until && cap - fill >= chunk) {
+                r = r * 1664525u + 1013904223u;
+                int latency = 5 + (r >> 24) % 10;      // 보통 5~14ms
+                // 가끔 150ms(다른 읽기와 겹침)
+                if ((r >> 8) % 50 == 0) latency = 150;
+                busy_until = ms + latency;
+            }
+            if (ms == busy_until - 1 && busy_until > 0) fill += chunk;
+            if (fill >= per_ms) fill -= per_ms;
+            else { ++starve; fill = 0; }
+        }
+        std::println("{:7}     {:5.0f}    {:5}", cap, cap / 48.0, starve);
+    }
+}
+```
+
+```text
+버퍼 표본   길이(ms)  끊김(ms)
+   4096        85     7137
+   8192       171      710
+  16384       341        0
+  32768       683        0
+```
+
+- 덩어리 하나 크기의 버퍼는 다 비워야 다음 읽기를 시작할 수 있어서, 읽는 동안 늘 끊겼습니다(1분 중 7초)
+- 두 덩어리(171ms)도 150ms짜리 느린 읽기를 다 버티지 못해 0.7초 끊겼습니다
+- **가장 느린 읽기보다 넉넉히 긴** 341ms에서 끊김이 사라졌습니다. 버퍼 길이는 평균이 아니라 최악의 지연으로 정합니다
+
+버퍼가 크면 메모리를 쓰고, 탐색(곡 중간으로 건너뛰기)이나 곡 바꾸기 뒤에 새 데이터가 찰 때까지 시간이 걸립니다. 그래서 곡의 첫 부분은 미리 메모리에 올려 두고 바로 재생을 시작하면서, 그동안 뒷부분을 스트리밍으로 채우는 방법을 씁니다. 디스크 읽기와 압축 풀기는 [「비동기 로딩」](#/read/cpp-game-engine/res-async)의 입출력 스레드나 [「작업 큐와 워커 스레드」](#/read/cpp-game-engine/job-queue)에 맡기고, 오디오 스레드는 고리 버퍼에서 꺼내기만 합니다.
+
+<Note>
+게임 소리는 보통 Vorbis나 Opus 같은 손실 압축으로 저장하고, 재생할 때 풉니다. 콘솔에는 압축을 풀어 주는 전용 하드웨어가 있는 경우도 있습니다. 풀기 비용이 있으므로, 자주 나는 짧은 효과음은 미리 풀어서 메모리에 두고, 긴 소리만 스트리밍하는 식으로 나눕니다.
+</Note>
+
+## 정리
+
+- 긴 소리는 조금씩 읽고 풀어 넣는 스트리밍으로 재생하고, 오디오 스레드와는 잠금 없는 고리 버퍼로 주고받는다
+- 단일 생산자 단일 소비자 버퍼는 각자 자기 위치만 쓰고, 데이터를 쓴 뒤 release로 알리고 acquire로 읽는다
+- 버퍼 길이는 최악의 읽기 지연보다 길게 잡고, 곡의 첫 부분을 미리 올려 시작 지연을 숨긴다

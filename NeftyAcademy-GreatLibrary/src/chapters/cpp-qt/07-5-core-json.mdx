@@ -1,0 +1,100 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'JSON: QJsonDocument로 읽고 오류 위치 알기, 객체와 배열, operator[]의 함정, 큰 정수, 만들기';
+
+웹 API의 응답, 설정 파일, 저장 파일의 상당수가 JSON입니다. Qt Core에는 JSON을 읽고 만드는 클래스가 들어 있어서 따로 라이브러리를 붙일 필요가 없습니다. `QJsonDocument`가 문서 전체를, `QJsonObject`와 `QJsonArray`가 객체와 배열을, `QJsonValue`가 값 하나를 나타냅니다.
+
+## 책 목록 JSON
+
+```cpp qt
+#include <QCoreApplication>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <cstdio>
+
+int main(int argc, char** argv) {
+    QCoreApplication app(argc, argv);
+    QByteArray text = R"({
+        "name": "네프티 아카데미",
+        "books": [
+            {"id": "cpp-qt", "pages": 59, "done": false},
+            {"id": "cpp-game-engine", "pages": 61, "done": true}
+        ],
+        "bigId": 9007199254740993
+    })";
+
+    // 1) 읽기: 실패하면 어디서 틀렸는지 알려 준다
+    QJsonParseError err;
+    QJsonDocument doc = QJsonDocument::fromJson(text, &err);
+    if (err.error != QJsonParseError::NoError) return 1;
+    QJsonObject root = doc.object();
+    std::printf("이름: %s\n", qPrintable(root.value("name").toString()));
+    int total = 0;
+    for (const QJsonValue& v : root.value("books").toArray()) {
+        QJsonObject b = v.toObject();
+        total += b["pages"].toInt();
+        std::printf("  %-16s %3d쪽 %s\n", qPrintable(b["id"].toString()),
+                    b["pages"].toInt(), b["done"].toBool() ? "완료" : "진행 중");
+    }
+    // 없는 키: value()로 물으면 undefined, 비const operator[]는 null 항목을 만든다!
+    std::printf("합계 %d쪽, value(\"author\"): %s\n", total,
+                root.value("author").isUndefined() ? "undefined" : "있음");
+    root["author"].isNull();
+    std::printf("operator[] 뒤 키 개수 %lld, author는 %s\n", (long long)root.size(),
+                root.value("author").isNull() ? "null" : "다른 값");
+
+    // 2) 큰 정수: 2^53을 넘는 수는 double로 꺼내면 어긋난다
+    QJsonValue big = root.value("bigId");
+    std::printf("bigId: toInteger %lld, toDouble %.0f\n",
+                (long long)big.toInteger(), big.toDouble());
+
+    // 3) 틀린 JSON
+    QJsonDocument::fromJson(R"({"a": 1, "b": })", &err);
+    std::printf("오류: %s (위치 %d)\n", qPrintable(err.errorString()), err.offset);
+
+    // 4) 만들기
+    QJsonObject out{{"book", "cpp-qt"}, {"progress", 0.5}};
+    out["chapters"] = QJsonArray{"start", "object", "widgets"};
+    QByteArray compact = QJsonDocument(out).toJson(QJsonDocument::Compact);
+    std::printf("%s\n", compact.constData());
+}
+```
+
+```text
+이름: 네프티 아카데미
+  cpp-qt            59쪽 진행 중
+  cpp-game-engine   61쪽 완료
+합계 120쪽, value("author"): undefined
+operator[] 뒤 키 개수 4, author는 null
+bigId: toInteger 9007199254740993, toDouble 9007199254740992
+오류: object is missing after a comma (위치 15)
+{"book":"cpp-qt","chapters":["start","object","widgets"],"progress":0.5}
+```
+
+## 읽기
+
+- `QJsonDocument::fromJson(바이트, &오류)`로 읽습니다. 바깥에서 온 데이터는 언제든 틀릴 수 있으므로 오류를 꼭 확인합니다. 쉼표 뒤가 빈 JSON은 "object is missing after a comma"와 **위치 15**를 알려 주었습니다. 사용자에게 "설정 파일의 15번째 글자 근처가 잘못되었습니다"라고 알려 줄 수 있습니다
+- `doc.object()`로 최상위 객체를 꺼내고, `value("books").toArray()`로 배열을, 그 안의 각 값을 `toObject()`로 다시 객체로 꺼냅니다. `toInt()`, `toString()`, `toBool()`은 타입이 맞지 않으면 기본값을 돌려주므로, 엄격하게 검사하려면 `isDouble()`, `isString()` 같은 함수로 먼저 확인합니다
+
+## operator[]의 함정
+
+없는 키 "author"를 `value("author")`로 물으면 **undefined**가 나옵니다. 그런데 const가 아닌 객체에 `root["author"]`라고 쓰면, 읽기만 했는데도 그 자리에 **null 값 항목을 새로 만듭니다**. 키 개수가 3에서 4로 늘어난 것이 그 증거입니다. 이 객체를 다시 저장하면 `"author": null`이 파일에 생깁니다. 읽을 때는 `value()`를 쓰거나 객체를 const로 다루세요. [「컨테이너와 암시적 공유」](#/read/cpp-qt/core-containers)의 `QHash`의 `operator[]`와 같은 성질입니다.
+
+## 큰 정수
+
+JSON 표준은 숫자의 정밀도를 정하지 않지만, 자바스크립트와 많은 라이브러리는 숫자를 `double`로 다루어 2⁵³(9007199254740992)을 넘는 정수가 어긋납니다. Qt 6은 정수를 정수 그대로 보관하므로 `toInteger()`로 꺼내면 9007199254740993이 정확히 나왔지만, `toDouble()`로 꺼내자 ...992가 되었습니다. 이 값이 QML(자바스크립트)이나 다른 시스템으로 넘어가면 같은 일이 생깁니다. 64비트 ID나 금액처럼 정확해야 하는 큰 수는 JSON에 **문자열**로 담는 것이 안전합니다.
+
+## 만들기
+
+`QJsonObject`는 초기화 목록으로 만들고, `out["chapters"] = QJsonArray{...}`처럼 값을 넣습니다. `toJson(QJsonDocument::Compact)`는 공백 없이, 기본값(`Indented`)은 사람이 읽기 좋게 들여 씁니다. 객체의 키는 **정렬된 순서**로 나오므로("book", "chapters", "progress"), 넣은 순서를 지켜야 하는 형식에는 맞지 않습니다.
+
+<Note>
+`QJsonDocument::toVariant()`와 `fromVariant()`는 JSON을 [「QVariant」](#/read/cpp-qt/core-variant)의 `QVariantMap`·`QVariantList`와 서로 바꿉니다. QML에 넘기거나 설정과 섞을 때 편합니다. 같은 구조를 더 작고 빠르게 저장하려면 이진 형식인 CBOR(`QCborValue`)도 Qt Core에 있습니다.
+</Note>
+
+## 정리
+
+- QJsonDocument::fromJson으로 읽고 오류의 종류와 위치를 확인하며, 객체와 배열은 value와 toObject·toArray로 다닌다
+- 비const QJsonObject의 operator[]는 없는 키를 null로 만들므로 읽을 때는 value를 쓴다
+- 2⁵³을 넘는 정수는 double로 꺼내면 어긋나므로 toInteger를 쓰거나 문자열로 담고, 만든 객체는 toJson으로 쓴다

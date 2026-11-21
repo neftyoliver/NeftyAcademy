@@ -1,0 +1,81 @@
+import { Figure, Note } from 'neftyacademy-paragons-bookshelf';
+import { QtMock } from '../../components/QtMock';
+
+export const summary = '첫 창: QApplication, 최상위 위젯, 레이아웃에 라벨과 버튼 넣기, 클릭 연결, 이벤트 루프';
+
+설치와 빌드가 준비되었으니 창을 띄워 봅니다. 라벨 하나와 버튼 하나, 누르면 라벨의 글이 바뀌는 창입니다. 짧지만 Qt 위젯 앱의 뼈대가 모두 들어 있습니다. 앱 객체, 위젯의 부모와 자식, 레이아웃, 시그널과 슬롯, 이벤트 루프입니다.
+
+<Figure caption="첫 번째는 처음 띄웠을 때, 두 번째는 버튼을 두 번 누른 뒤의 배치 그림입니다">
+  <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', justifyContent: 'center' }}>
+    <QtMock title="첫 창" width={220} spec="label 아직 안 눌렀어요; button 눌러 보기" />
+    <QtMock title="첫 창" width={220} spec="label 2번 눌렀어요; button 눌러 보기" />
+  </div>
+</Figure>
+
+## 코드
+
+```cpp qt=Widgets
+#include <QApplication>
+#include <QLabel>
+#include <QPushButton>
+#include <QTimer>
+#include <QVBoxLayout>
+#include <QWidget>
+#include <cstdio>
+
+int main(int argc, char** argv) {
+    QApplication app(argc, argv);              // 창 앱에는 꼭 하나
+
+    QWidget window;                            // 부모 없는 위젯 = 최상위 창
+    window.setWindowTitle("첫 창");
+    auto* label = new QLabel("아직 안 눌렀어요");  // 부모는 레이아웃이 정해 준다
+    auto* button = new QPushButton("눌러 보기");
+    auto* layout = new QVBoxLayout(&window);
+    layout->addWidget(label);
+    layout->addWidget(button);
+
+    int clicks = 0;
+    QObject::connect(button, &QPushButton::clicked, [&] {
+        label->setText(QString("%1번 눌렀어요").arg(++clicks));
+    });
+    window.show();
+
+    // 사람 대신 이벤트 루프가 돈 뒤에 버튼을 두 번 누르고 끝낸다
+    QTimer::singleShot(0, [&] {
+        button->click();
+        button->click();
+        std::printf("제목 '%s', 라벨 '%s'\n", qPrintable(window.windowTitle()),
+                    qPrintable(label->text()));
+        std::printf("라벨의 부모가 창인가: %s\n",
+                    label->parent() == &window ? "예" : "아니오");
+        app.quit();
+    });
+    return app.exec();                         // 이벤트 루프: 창이 닫힐 때까지 돈다
+}
+```
+
+```text
+제목 '첫 창', 라벨 '2번 눌렀어요'
+라벨의 부모가 창인가: 예
+```
+
+예제는 사람이 버튼을 누르는 대신, 이벤트 루프가 돌기 시작한 직후 `button->click()`을 두 번 불러 누른 것처럼 만들고 끝냅니다. 직접 해 볼 때는 `QTimer::singleShot` 부분을 지우면 창이 뜨고 닫을 때까지 기다립니다.
+
+## 한 줄씩
+
+- **QApplication**: 창을 쓰는 앱에는 정확히 하나 있어야 합니다. 명령줄 인자를 읽고, 플랫폼 플러그인(Windows, macOS, Wayland, X11)을 불러오고, 이벤트 루프를 소유합니다. 창이 없는 프로그램은 더 가벼운 `QCoreApplication`을 씁니다
+- **최상위 위젯**: 부모가 없는 위젯은 자기 창이 됩니다. `window`는 `main`의 지역 변수라서 `main`이 끝날 때 소멸합니다
+- **new로 만든 자식들**: 라벨과 버튼을 `new`로 만들고 `delete`하지 않았습니다. 레이아웃에 넣는 순간 레이아웃이 붙은 위젯(`window`)이 **부모**가 되고, 부모는 소멸할 때 자식을 모두 지웁니다. 출력의 둘째 줄이 그것을 확인합니다. 이 소유 규칙은 [「부모와 자식, 수명」](#/read/cpp-qt/obj-ownership)에서 자세히 봅니다
+- **레이아웃**: `QVBoxLayout`은 위젯을 위에서 아래로 쌓고, 창 크기가 바뀌면 다시 배치합니다. 좌표를 손으로 정하지 않습니다
+- **connect**: 버튼의 `clicked` 시그널에 람다를 연결했습니다. 버튼은 누가 듣는지 모르고, 람다는 버튼을 몰라도 됩니다. [「시그널과 슬롯」](#/read/cpp-qt/obj-signals)의 주제입니다
+- **app.exec()**: 이벤트 루프를 돌립니다. 마우스, 키보드, 다시 그리기, 타이머 같은 이벤트를 운영체제에서 받아 해당 위젯에 나눠 주기를 마지막 창이 닫힐 때까지(또는 `quit()`까지) 되풀이합니다. 모든 반응은 이 루프 안에서 일어납니다
+
+<Note>
+`show()`를 부르기 전에는 창이 보이지 않습니다. 자식 위젯은 부모가 보일 때 함께 보이므로 따로 `show()`하지 않습니다. 또 `QApplication`보다 먼저 위젯을 만들면 프로그램이 바로 멈춥니다. 위젯은 플랫폼 플러그인이 준비된 뒤에만 만들 수 있기 때문입니다.
+</Note>
+
+## 정리
+
+- 창 앱은 QApplication 하나를 만들고, 부모 없는 위젯을 최상위 창으로 show한 뒤 exec로 이벤트 루프를 돌린다
+- 자식 위젯은 new로 만들어 레이아웃이나 부모에 넘기면 부모가 소멸할 때 함께 지워진다
+- 사용자 반응은 시그널을 슬롯이나 람다에 connect해서 처리하고, 모든 일은 이벤트 루프 안에서 일어난다

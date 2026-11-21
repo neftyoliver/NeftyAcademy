@@ -1,0 +1,111 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '객체 나무 들여다보기: dumpObjectTree와 dumpObjectInfo, findChild로 찾기, GammaRay와 QML 디버거';
+
+Qt 앱이 이상하게 동작할 때 "이 버튼의 부모는 누구지?", "이 시그널에 누가 연결되어 있지?", "이 위젯은 왜 안 보이지?"를 알아내야 할 때가 많습니다. 모든 QObject는 [「부모와 자식, 수명」](#/read/cpp-qt/obj-ownership)의 나무 안에 있고, 그 나무와 연결 정보를 실행 중에 들여다볼 수 있습니다.
+
+## 설정 창 들여다보기
+
+```cpp qt=Widgets
+#include <QApplication>
+#include <QCheckBox>
+#include <QGroupBox>
+#include <QLineEdit>
+#include <QPushButton>
+#include <QVBoxLayout>
+#include <cstdio>
+
+void toStdout(QtMsgType, const QMessageLogContext&, const QString& m) {
+    std::printf("%s\n", qPrintable(m));
+}
+
+int main(int argc, char** argv) {
+    qInstallMessageHandler(toStdout);
+    QApplication app(argc, argv);
+    QWidget win;
+    win.setObjectName("settingsWindow");
+    auto* layout = new QVBoxLayout(&win);
+    auto* box = new QGroupBox("계정");
+    box->setObjectName("accountBox");
+    auto* inner = new QVBoxLayout(box);
+    auto* user = new QLineEdit;
+    user->setObjectName("userEdit");
+    inner->addWidget(user);
+    auto* remember = new QCheckBox("기억하기");
+    remember->setObjectName("rememberCheck");
+    inner->addWidget(remember);
+    layout->addWidget(box);
+    auto* ok = new QPushButton("확인");
+    ok->setObjectName("okButton");
+    layout->addWidget(ok);
+    QObject::connect(remember, &QCheckBox::toggled, ok, &QPushButton::setDefault);
+
+    std::printf("-- 객체 나무(dumpObjectTree)\n");
+    win.dumpObjectTree();
+
+    std::printf("-- 이름과 타입으로 찾기\n");
+    auto* found = win.findChild<QLineEdit*>("userEdit");
+    std::printf("userEdit 찾음: %s\n", found == user ? "예" : "아니오");
+    std::printf("모든 버튼류(QAbstractButton): %lld개\n",
+                (long long)win.findChildren<QAbstractButton*>().size());
+    auto direct = win.findChildren<QWidget*>(Qt::FindDirectChildrenOnly);
+    std::printf("바로 아래 자식만: %lld개\n", (long long)direct.size());
+
+    std::printf("-- 연결 정보(dumpObjectInfo)\n");
+    remember->dumpObjectInfo();
+}
+```
+
+```text
+-- 객체 나무(dumpObjectTree)
+QWidget::settingsWindow I
+    QVBoxLayout::
+    QGroupBox::accountBox I
+        QVBoxLayout::
+        QLineEdit::userEdit I
+            QWidgetLineControl::
+        QCheckBox::rememberCheck I
+    QPushButton::okButton I
+-- 이름과 타입으로 찾기
+userEdit 찾음: 예
+모든 버튼류(QAbstractButton): 2개
+바로 아래 자식만: 2개
+-- 연결 정보(dumpObjectInfo)
+OBJECT QCheckBox::rememberCheck
+  SIGNALS OUT
+        signal: destroyed(QObject*)
+          <functor or function pointer>
+        signal: toggled(bool)
+          <functor or function pointer>
+  SIGNALS IN
+        <None>
+```
+
+## 나무 찍기
+
+- `dumpObjectTree()`는 자식들을 들여 쓰며 "클래스::objectName" 꼴로 찍습니다. 위젯 뒤의 `I`는 아직 보이지 않는(invisible) 상태라는 뜻입니다. 예제는 창을 `show()`하지 않았습니다
+- 레이아웃도 QObject라서 나무에 나옵니다. `QLineEdit` 안의 `QWidgetLineControl`처럼 Qt가 내부적으로 만든 자식도 보입니다. 우리가 이름을 주지 않은 객체는 `::` 뒤가 비어 있으므로, 디버깅할 객체에는 `setObjectName`으로 이름을 붙여 두면 좋습니다
+- `dumpObjectInfo()`는 그 객체에서 나가는 연결과 들어오는 연결을 보여 줍니다. 체크 상자의 `toggled`가 어딘가에 연결되어 있는 것이 보입니다. `setDefault`는 슬롯이 아닌 보통 멤버 함수라서 "functor or function pointer"로 표시되었습니다. 옛 문자열 문법으로 연결한 슬롯이라면 받는 객체와 슬롯 이름이 찍힙니다
+
+## 찾기
+
+- `findChild<T>("이름")`은 자식과 그 아래를 모두 뒤져 타입과 이름이 맞는 첫 객체를 돌려줍니다. 시험 코드에서 화면의 특정 위젯을 찾을 때 특히 유용합니다([「Qt Test」](#/read/cpp-qt/qtest-unit))
+- `findChildren<T>()`는 맞는 것을 모두 돌려줍니다. `QAbstractButton`으로 찾자 체크 상자와 확인 버튼 둘이 나왔습니다. `Qt::FindDirectChildrenOnly`를 주면 바로 아래 자식만 봅니다. 위젯 자식은 그룹 상자와 확인 버튼 둘입니다
+- QML 객체도 같은 방식으로 `findChild<QObject*>("objectName")`으로 찾을 수 있습니다. 이 책의 QML 예제들이 C++에서 QML 항목을 찾을 때 이 방법을 썼습니다
+
+## 도구들
+
+코드에 찍는 함수 대신, 실행 중인 앱에 붙어 나무를 눈으로 보는 도구도 있습니다.
+
+- **GammaRay**(KDAB의 오픈 소스 도구)는 실행 중인 Qt 앱에 붙어 객체 나무, 속성, 시그널 연결, 위젯과 Qt Quick 장면, 모델 내용을 그래픽으로 보여 주고 값을 바꿔 볼 수도 있습니다
+- **Qt Creator의 QML 디버거와 프로파일러**는 QML 바인딩이 몇 번 다시 계산되는지, 어떤 자바스크립트가 프레임을 잡아먹는지 보여 줍니다. 이를 위해 앱을 QML 디버깅이 켜진 상태로 빌드합니다
+
+<Note>
+디버깅용 함수의 출력 모양은 Qt 판에 따라 바뀔 수 있습니다. 시험 코드가 `dumpObjectTree`의 출력에 기대면 안 되고, 시험은 `findChild`와 속성 값을 직접 확인해야 합니다. 출시판에서 이런 출력이 사용자에게 보이지 않게 하려면 [「로깅 범주」](#/read/cpp-qt/qtest-logging)의 메시지 처리기로 걸러 냅니다.
+</Note>
+
+## 정리
+
+- dumpObjectTree로 객체 나무를, dumpObjectInfo로 들어오고 나가는 시그널 연결을 찍어 볼 수 있다
+- objectName을 붙여 두고 findChild와 findChildren으로 타입과 이름으로 객체를 찾으며, QML 객체에도 같은 방법을 쓴다
+- GammaRay와 Qt Creator의 QML 디버거·프로파일러로 실행 중인 앱을 들여다볼 수 있다

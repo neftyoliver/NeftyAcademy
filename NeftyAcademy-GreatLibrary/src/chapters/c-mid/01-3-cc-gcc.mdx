@@ -1,0 +1,140 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '리눅스의 기본 컴파일러 GCC: C 표준 옵션, 중간 파일, GNU 확장, 정적 분석기, 교차 컴파일러';
+
+리눅스 배포판의 프로그램은 대부분 GCC(GNU Compiler Collection)로 빌드됩니다. 리눅스 커널도 오랫동안 GCC로만 빌드됐습니다. [「LLVM (Clang)」](#/read/c-mid/cc-llvm)과 [「MSVC」](#/read/c-mid/cc-msvc)에 이어, 이 쪽은 GCC를 쓸 때 알아 둘 것을 Clang과 견주며 정리합니다. 예제는 우분투 24.04의 기본 `gcc`(13.3)와 따로 깐 `gcc-14`(14.2)로 돌렸습니다.
+
+## 버전과 C 표준 옵션
+
+우분투 24.04에서 `sudo apt install gcc`로 깔리는 것은 GCC 13입니다. 이 버전에는 C23이 아직 `c2x`라는 임시 이름으로만 들어 있습니다.
+
+```text nocheck
+$ gcc -std=c23 -c hello.c
+gcc: error: unrecognized command-line option '-std=c23'; did you mean '-std=c2x'?
+```
+
+| GCC 버전 | 나온 해 | C23 옵션 | 옵션을 안 줄 때의 기본 |
+| --- | --- | --- | --- |
+| 13 | 2023 | `-std=c2x` | `gnu17` |
+| 14 | 2024 | `-std=c23` | `gnu17` |
+| 15 | 2025 | `-std=c23` | `gnu23` |
+
+이 책의 C 예제는 C23 기준이라, 우분투 24.04에서 GCC를 쓴다면 `sudo apt install gcc-14`로 14를 깔고 `gcc-14`로 부르는 것이 편합니다. 기본값이 `gnu…`인 것은 표준 C에 GNU 확장을 더한 방언이라는 뜻입니다. 엄격한 ISO C와의 차이는 [「POSIX와 ISO C」](#/read/basics/std-posix-c)에서 봤습니다.
+
+## 중간 파일 남기기
+
+GCC도 [Clang의 드라이버](#/read/c-mid/cc-llvm)처럼 여러 도구를 차례로 부릅니다. `-v`를 붙이면 부르는 도구가 보입니다.
+
+| 단계 | 부르는 도구 |
+| --- | --- |
+| 전처리와 컴파일 | `cc1` (GCC의 진짜 컴파일러) |
+| 어셈블 | `as` (GNU 어셈블러) |
+| 링크 | `collect2` → `ld` (GNU 링커) |
+
+Clang의 IR 같은 공통 중간 언어를 바깥에 보여 주지는 않고(안에는 GIMPLE이라는 것이 있습니다), 대신 어셈블러를 따로 부른다는 점이 다릅니다. `-save-temps`를 주면 단계마다의 파일을 지우지 않고 남깁니다.
+
+```sh
+gcc -save-temps -o sqg sq.c
+```
+
+`sqg-sq.i`(전처리 결과, 21,376바이트), `sqg-sq.s`(어셈블리), `sqg-sq.o`(목적 파일)가 남습니다. 컴파일 오류의 원인이 매크로에 숨어 있을 때 `.i` 파일을 열어 보면 바로 보입니다.
+
+## GNU 확장
+
+GCC는 표준 C에 없는 기능을 여럿 더해 왔고, 리눅스 커널 같은 큰 프로젝트가 이것을 많이 씁니다. Clang도 대부분을 똑같이 받아들입니다.
+
+```c flags=-std=gnu23,-Wno-pedantic
+#include <stdio.h>
+
+#define MAX(a, b) ({ __typeof__(a) _a = (a); __typeof__(b) _b = (b); \
+                     _a > _b ? _a : _b; })
+
+int main(void)
+{
+    int i = 3;
+    printf("%d\n", MAX(i++, 2));
+    printf("i = %d\n", i);
+    return 0;
+}
+```
+
+```text
+3
+i = 4
+```
+
+`({ … })`는 블록을 식처럼 쓰는 **문장 식**이고, `__typeof__`는 식의 타입을 얻습니다(C23에서는 표준 `typeof`가 됐습니다). 보통의 `#define MAX(a, b) ((a) > (b) ? (a) : (b))`는 `i++`를 두 번 실행할 수 있지만, 이 매크로는 인자를 한 번만 계산해 둡니다. 그래서 `i`가 정확히 한 번 늘어 4입니다.
+
+표준 C만 쓰고 싶다면 `-Wpedantic`을 켜면 됩니다. 위 파일을 `gcc -std=c17 -Wpedantic`으로 컴파일하면 `ISO C forbids braced-groups within expressions`라고 알려 줍니다. `__attribute__((…))`로 함수와 변수에 표시를 붙이는 것도 자주 쓰는 GNU 확장입니다. 이것은 C23에서 `[[…]]` 꼴의 표준 속성으로 일부가 옮겨졌습니다.
+
+## 정적 분석기
+
+GCC 10부터 `-fanalyzer`라는 정적 분석기가 들어 있습니다. 코드를 실행하지 않고 경로를 따라가며 메모리 실수를 찾습니다.
+
+```c nocheck
+char *dup_name(const char *name)
+{
+    char *p = malloc(strlen(name));      // 끝의 '\0' 자리를 잊었다
+    strcpy(p, name);
+    return p;
+}
+
+void twice(void)
+{
+    char *q = malloc(8);
+    free(q);
+    free(q);                             // 두 번 해제
+}
+```
+
+`gcc-14 -fanalyzer`로 컴파일하면 경고가 둘 나옵니다.
+
+```text nocheck
+7:5: warning: use of possibly-NULL 'p' where non-null expected [CWE-690]
+15:5: warning: double-'free' of 'q' [CWE-415] [-Wanalyzer-double-free]
+```
+
+두 번 해제는 정확히 잡았습니다. 첫 경고는 `malloc`이 실패해 NULL을 돌려줄 때를 확인하지 않았다는 것이고, 정작 의도한 버그(1바이트 모자라게 받기)는 잡지 못했습니다. 정적 분석기는 많은 것을 찾아 주지만 모든 버그를 찾지는 못합니다. 실행 중에 잡는 [새니타이저](#/read/c-mid/cc-llvm)를 함께 쓰는 까닭입니다. 위의 1바이트 넘침은 `-fsanitize=address`로 실행하면 잡힙니다.
+
+## 최적화 보고
+
+`-fopt-info`는 컴파일러가 무슨 최적화를 했는지 알려 줍니다. 배열 두 개를 더하는 반복문으로 해 봅니다.
+
+```c nocheck
+void add(float *restrict a, const float *restrict b, int n)
+{
+    for (int i = 0; i < n; i++)
+        a[i] += b[i];
+}
+```
+
+```text nocheck
+$ gcc -O2 -fopt-info-vec -c loop.c       (아무것도 나오지 않는다)
+$ gcc -O3 -fopt-info-vec -c loop.c
+loop.c:3:23: optimized: loop vectorized using 16 byte vectors
+loop.c:3:23: optimized: loop vectorized using 8 byte vectors
+```
+
+`-O3`에서는 `float` 네 개를 한 번에 더하는 16바이트 SIMD 명령으로 바꿨습니다(남은 몇 개는 8바이트로). GCC 13의 `-O2`는 반복 횟수를 모르는 이런 반복문을 벡터화하지 않았습니다. 최적화 단계마다 하는 일이 다르다는 것을 이렇게 직접 확인할 수 있습니다. Clang에서는 `-Rpass=loop-vectorize`가 비슷한 일을 합니다.
+
+## 목표마다 따로인 교차 컴파일러
+
+Clang은 [`--target` 하나로 다른 CPU용 코드를 만들지만](#/read/c-mid/cc-llvm), GCC는 **목표 CPU마다 따로 빌드된 컴파일러**를 씁니다. 이름 앞에 목표가 붙습니다.
+
+| 목표 | 우분투 패키지 | 명령 |
+| --- | --- | --- |
+| 64비트 라즈베리파이 | `gcc-aarch64-linux-gnu` | `aarch64-linux-gnu-gcc` |
+| 32비트 라즈베리파이 | `gcc-arm-linux-gnueabihf` | `arm-linux-gnueabihf-gcc` |
+| 윈도우 | `gcc-mingw-w64` | `x86_64-w64-mingw32-gcc` |
+
+패키지가 그 CPU용 C 라이브러리와 헤더까지 함께 깔아 주므로 링크까지 바로 됩니다. 이 책이 라즈베리파이용 코드를 검사할 때 쓰는 것도 `aarch64-linux-gnu-gcc-14`입니다. 자세한 것은 [「교차 컴파일: PC에서 라즈베리파이용으로」](#/read/c-mid/build-cross)에서 합니다.
+
+<Note kind="tip">
+같은 코드를 GCC와 Clang 두 가지로 컴파일해 보는 습관은 값이 큽니다. 두 컴파일러는 경고를 내는 곳이 조금씩 다르고, 한쪽에서만 컴파일되는 코드는 대개 표준을 벗어난 곳이 있다는 신호입니다. 이 책의 예제도 두 컴파일러로 검사합니다.
+</Note>
+
+## 정리
+
+- 우분투 24.04의 기본 GCC 13은 C23을 `-std=c2x`로만 받으므로, C23을 쓰려면 `gcc-14`를 깔아 쓰는 것이 편하다
+- GCC는 `cc1`, `as`, `ld`를 차례로 부르며 `-save-temps`로 중간 파일을 남기고, 문장 식 같은 GNU 확장은 `-Wpedantic`으로 찾을 수 있다
+- `-fanalyzer`는 실행 없이 메모리 실수를 찾고 `-fopt-info`는 한 최적화를 보여 주며, 교차 컴파일은 목표마다 따로 깐 컴파일러로 한다

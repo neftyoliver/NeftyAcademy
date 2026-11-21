@@ -1,0 +1,105 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '예측과 보정: 내 입력을 서버 응답 전에 먼저 적용하고, 서버 상태로 되감아 남은 입력을 다시 적용하기';
+
+[「상태 복제」](#/read/cpp-game-engine/net-replication)대로 서버가 진짜 상태를 갖는다면, 키를 누른 뒤 그 입력이 서버에 가고 결과가 돌아와야 캐릭터가 움직입니다. 왕복 100ms면 누를 때마다 0.1초씩 늦게 움직이는 캐릭터가 됩니다. 사람은 이 지연을 아주 잘 느낍니다. **클라이언트 예측**은 내 입력을 서버의 답을 기다리지 않고 내 화면에 먼저 적용하고, **서버 보정**은 나중에 도착한 서버의 답으로 예측이 틀린 부분을 고칩니다.
+
+## 세 가지 방식
+
+편도 3틱(60Hz에서 50ms) 지연에서, 10틱 동안 오른쪽으로 누릅니다. 서버에서는 다른 플레이어가 x=4에서 막아섰지만 클라이언트는 아직 그 사실을 모릅니다.
+
+```cpp
+#include <algorithm>
+#include <deque>
+#include <print>
+#include <vector>
+
+struct Input { int seq; int dir; };           // -1, 0, +1
+struct State { float x = 0; int last_seq = 0; };
+
+// 서버와 클라이언트가 똑같이 쓰는 이동 규칙(결정론적이어야 한다)
+float step(float x, int dir, float wall) {
+    return std::min(x + dir * 0.5f, wall);     // 벽 너머로는 못 간다
+}
+
+int main() {
+    const int LAG = 3;                         // 편도 3틱 지연
+    std::print("틱        ");
+    for (int t = 1; t <= 18; ++t) std::print(" {:3}", t);
+    std::println("");
+    for (int mode = 0; mode < 3; ++mode) {
+        const char* names[] = {"예측 없음 ", "예측만    ", "예측+보정 "};
+        State server;
+        float client_x = 0;
+        std::vector<Input> pending;            // 서버가 아직 확인 안 한 입력
+        std::deque<std::pair<int, Input>> to_server;     // (도착 틱, 입력)
+        std::deque<std::pair<int, State>> to_client;     // (도착 틱, 상태)
+        // 서버에서는 다른 플레이어가 x=4에서 막아섰지만 클라이언트는 아직 모른다
+        float client_wall = 100, server_wall = 4;
+        std::print("{}", names[mode]);           // 화면 폭 10칸에 맞춘 이름
+        for (int t = 1; t <= 18; ++t) {
+            Input in{t, t <= 10 ? 1 : 0};      // 10틱 동안 오른쪽으로 누른다
+            to_server.push_back({t + LAG, in});
+            if (mode > 0) {                    // 누르자마자 내 화면에서 움직인다
+                client_x = step(client_x, in.dir, client_wall);
+                pending.push_back(in);
+            }
+            // 서버: 도착한 입력을 처리하고 상태를 돌려보낸다
+            while (!to_server.empty() && to_server.front().first == t) {
+                auto i = to_server.front().second; to_server.pop_front();
+                server.x = step(server.x, i.dir, server_wall);
+                server.last_seq = i.seq;
+                to_client.push_back({t + LAG, server});
+            }
+            // 클라이언트: 서버 상태가 도착하면
+            while (!to_client.empty() && to_client.front().first == t) {
+                auto s = to_client.front().second; to_client.pop_front();
+                if (mode == 0) client_x = s.x;                 // 그대로 보여 준다
+                if (mode == 2) {                               // 되감고 다시 하기
+                    std::erase_if(pending,
+                                  [&](auto& p) { return p.seq <= s.last_seq; });
+                    client_x = s.x;
+                    for (auto& p : pending)
+                        client_x = step(client_x, p.dir, client_wall);
+                }
+            }
+            std::print(" {:3.1f}", client_x);
+        }
+        std::println("");
+    }
+
+}
+```
+
+```text
+틱           1   2   3   4   5   6   7   8   9  10  11  12  13  14  15  16  17  18
+예측 없음  0.0 0.0 0.0 0.0 0.0 0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0 4.0 4.0 4.0 4.0
+예측만     0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0 4.5 5.0 5.0 5.0 5.0 5.0 5.0 5.0 5.0 5.0
+예측+보정  0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0 4.5 5.0 5.0 5.0 5.0 5.0 4.5 4.0 4.0 4.0
+```
+
+- **예측 없음**: 1틱에 누른 결과가 왕복 6틱 뒤인 7틱에야 보였습니다. 위치는 결국 정확하지만(x=4), 내내 6틱 늦게 따라옵니다
+- **예측만**: 누르는 순간 움직여서 반응은 즉각적입니다. 하지만 서버가 x=4에서 막혔다는 사실을 끝내 반영하지 못해, 서버와 다른 x=5에 영원히 서 있습니다
+- **예측+보정**: 반응은 즉각적이고, 서버의 답이 도착한 15틱부터 x=4로 돌아왔습니다
+
+## 되감고 다시 적용하기
+
+서버 상태가 도착했을 때 그냥 그 위치로 덮어쓰면 안 됩니다. 그 상태는 6틱 전 입력까지만 반영한 **과거의 상태**라서, 덮어쓰면 캐릭터가 뒤로 끌려갔다가 다시 앞으로 튀어 나갑니다. 그래서 클라이언트는 보낸 입력마다 번호를 붙여 서버가 확인하지 않은 입력(`pending`)을 보관합니다. 서버 상태에는 "몇 번 입력까지 처리했는지"(`last_seq`)가 실려 오므로,
+
+1. 그 번호까지의 입력은 목록에서 지우고
+2. 서버 상태로 **되감은** 뒤
+3. 남은 입력들을 순서대로 **다시 적용**합니다
+
+예측이 맞았다면 다시 적용한 결과가 지금 위치와 같아서 아무 일도 일어나지 않습니다. 대부분의 프레임이 그렇습니다. 예측이 틀렸을 때만 위치가 바뀝니다. 15틱에 9번 입력까지의 서버 상태(x=4)가 도착했고, 10번 입력을 다시 적용해 4.5가 되었다가, 16틱에 10번까지의 상태가 오자 4.0으로 맞춰졌습니다.
+
+이 방식이 돌려면 이동 규칙 `step`이 서버와 클라이언트에서 **똑같이** 계산되어야 합니다. 같은 입력에서 다른 결과가 나오면 매 틱 보정이 일어나 캐릭터가 떨립니다. [「물리 엔진 붙이기」](#/read/cpp-game-engine/phys-integrate)의 고정 걸음과 결정론이 여기서 중요해집니다.
+
+<Note>
+보정이 크면 한 프레임에 위치가 순간이동하므로, 실제로는 표시 위치만 몇 프레임에 걸쳐 부드럽게 따라가게 합니다. 예측은 내 캐릭터에만 합니다. 다른 플레이어는 입력을 알 수 없으므로, 받은 상태 둘 사이를 보간해 약간 과거의 모습을 매끄럽게 보여 줍니다. 그래서 총을 쏠 때 "내가 본 그 과거 시점"으로 서버가 판정을 되감아 주는 지연 보상 기법을 함께 씁니다.
+</Note>
+
+## 정리
+
+- 클라이언트 예측은 내 입력을 바로 내 화면에 적용해 왕복 지연을 숨긴다
+- 서버 상태가 오면 확인된 입력을 지우고, 그 상태로 되감은 뒤 남은 입력을 다시 적용해 틀린 예측만 고친다
+- 서버와 클라이언트의 이동 규칙은 결정론적으로 같아야 하며, 다른 플레이어는 예측 대신 보간으로 보여 준다

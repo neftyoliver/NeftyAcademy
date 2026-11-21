@@ -1,0 +1,127 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '에셋 파이프라인: 원본에서 실행용 데이터까지의 단계, 에셋 번호, 해시로 바뀐 것만 굽기';
+
+게임의 용량 대부분은 코드가 아니라 **에셋**입니다. 텍스처, 모델, 애니메이션, 소리, 레벨이 수만 개씩 됩니다. 아티스트가 다루는 파일(포토샵 PSD, Blender, WAV)은 편집하기 좋은 모양이지, 게임이 빨리 읽기 좋은 모양이 아닙니다. 그 사이를 잇는 것이 **에셋 파이프라인**이고, 6장은 이것을 만들어 갑니다.
+
+## 단계
+
+| 단계 | 하는 일 | 예 |
+| --- | --- | --- |
+| 원본 | 사람이 편집하는 파일 | `hero.psd`, `hero.blend`, `step.wav` |
+| 가져오기 | 엔진이 이해하는 중간 모양으로 | 이미지 → RGBA 배열, 메시 → 정점·삼각형 |
+| 굽기 | 플랫폼과 설정에 맞춘 실행용 모양으로 | GPU 압축 텍스처, 정렬된 정점 버퍼 |
+| 묶기 | 많은 파일을 몇 개의 큰 파일로 | [「묶음 파일」](#/read/cpp-game-engine/res-packaging) |
+| 불러오기 | 실행 중에 읽어 쓰기 | [「비동기 로딩」](#/read/cpp-game-engine/res-async) |
+
+핵심은 **무거운 일을 미리 해 두는 것**입니다. PNG를 풀고, 밉맵을 만들고, GPU용으로 압축하는 일을 게임을 켤 때마다 하면 로딩이 몇 분씩 걸립니다. 개발 컴퓨터에서 한 번 구워 두면, 게임은 그 결과를 메모리에 올리기만 하면 됩니다. 가져오기와 굽기는 [「가져오기와 굽기」](#/read/cpp-game-engine/res-import)에서 자세히 봅니다.
+
+## 이름과 번호
+
+에셋을 경로(`textures/hero.png`)로만 부르면, 파일을 옮기거나 이름을 바꿀 때마다 그 에셋을 쓰는 모든 머티리얼과 레벨이 깨집니다. 그래서 많은 엔진은 에셋마다 **바뀌지 않는 번호**(128비트 GUID 등)를 주고, 원본 옆의 작은 메타 파일(`hero.png.meta`)에 그 번호와 가져오기 설정을 적어 둡니다. 에셋끼리는 번호로 서로를 가리키고, 경로는 사람이 보기 위한 이름이 됩니다.
+
+## 바뀐 것만 다시 굽기
+
+에셋이 수만 개면 전부 다시 굽는 데 몇 시간이 걸립니다. 그래서 파이프라인은 **무엇이 바뀌었는지** 정확히 알아야 합니다. 파일의 수정 시각은 믿을 수 없으므로(복사, 버전 관리에서 받기), 굽기에 들어가는 모든 것을 해시해서 **열쇠**로 씁니다.
+
+```cpp
+#include <cstdint>
+#include <map>
+#include <print>
+#include <string>
+#include <vector>
+
+// FNV-1a 64비트: 짧고 결정적인 해시
+std::uint64_t fnv(const std::string& s, std::uint64_t h = 1469598103934665603ull)
+{
+    for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; }
+    return h;
+}
+
+struct Asset {
+    std::string source;                   // 원본 파일의 내용(여기서는 글자로)
+    std::string settings;                 // 가져오기 설정(압축 방식 등)
+    std::vector<std::string> deps;        // 이 에셋이 쓰는 다른 에셋
+};
+
+struct Pipeline {
+    std::map<std::string, Asset> assets;
+    std::map<std::string, std::uint64_t> cache;    // 이름 -> 지난번 굽기의 열쇠
+    int built = 0;
+
+    // 굽기의 열쇠 = 원본 + 설정 + 굽는 도구의 판 + 의존 에셋들의 열쇠
+    std::uint64_t key(const std::string& name, const std::string& tool_ver)
+    {
+        const Asset& a = assets.at(name);
+        std::uint64_t h = fnv(a.source + '|' + a.settings + '|' + tool_ver);
+        for (const auto& d : a.deps) h = fnv(std::to_string(key(d, tool_ver)), h);
+        return h;
+    }
+    void build_all(const std::string& tool_ver)
+    {
+        built = 0;
+        std::print("  구움:");
+        for (const auto& [name, a] : assets) {
+            auto k = key(name, tool_ver);
+            if (cache[name] == k) continue;           // 열쇠가 같으면 건너뛴다
+            cache[name] = k;
+            ++built;
+            std::print(" {}", name);
+        }
+        std::println("  ({}/{}개)", built, assets.size());
+    }
+};
+
+int main()
+{
+    Pipeline p;
+    p.assets["hero.png"] = {"pixels-v1", "bc7", {}};
+    p.assets["hero.mat"] = {"shader=lit", "", {"hero.png"}};
+    p.assets["hero.mesh"] = {"verts-v1", "", {}};
+    p.assets["hero.prefab"] = {"", "", {"hero.mesh", "hero.mat"}};
+    p.assets["tree.png"] = {"leaves", "bc7", {}};
+
+    std::println("처음 빌드:");
+    p.build_all("cooker-1.0");
+    std::println("아무것도 안 바꾸고 다시:");
+    p.build_all("cooker-1.0");
+    std::println("hero.png를 고친 뒤:");
+    p.assets["hero.png"].source = "pixels-v2";
+    p.build_all("cooker-1.0");
+    std::println("텍스처 압축 설정만 바꾼 tree.png:");
+    p.assets["tree.png"].settings = "bc1";
+    p.build_all("cooker-1.0");
+    std::println("굽는 도구를 고친 뒤:");
+    p.build_all("cooker-1.1");
+}
+```
+
+```text
+처음 빌드:
+  구움: hero.mat hero.mesh hero.png hero.prefab tree.png  (5/5개)
+아무것도 안 바꾸고 다시:
+  구움:  (0/5개)
+hero.png를 고친 뒤:
+  구움: hero.mat hero.png hero.prefab  (3/5개)
+텍스처 압축 설정만 바꾼 tree.png:
+  구움: tree.png  (1/5개)
+굽는 도구를 고친 뒤:
+  구움: hero.mat hero.mesh hero.png hero.prefab tree.png  (5/5개)
+```
+
+- 열쇠는 **원본 내용 + 가져오기 설정 + 굽는 도구의 판 + 의존 에셋들의 열쇠**를 해시한 것입니다. 하나라도 바뀌면 열쇠가 바뀌어 다시 굽고, 모두 같으면 지난 결과를 그대로 씁니다
+- `hero.png`를 고치자 그것을 쓰는 `hero.mat`과, 다시 그것을 쓰는 `hero.prefab`까지 **의존을 따라** 다시 구웠습니다. 상관없는 `hero.mesh`와 `tree.png`는 건너뛰었습니다
+- 원본은 그대로이고 **설정만** 바뀌어도(BC7 → BC1 압축) 다시 굽습니다. 설정을 열쇠에서 빠뜨리는 것이 흔한 버그입니다
+- **굽는 도구가 바뀌면** 결과도 달라질 수 있으니 모두 다시 굽습니다. 도구의 판을 열쇠에 넣지 않으면, 굽기 코드의 버그를 고쳐도 옛 결과가 계속 쓰입니다
+
+이 열쇠로 결과를 공유 서버에 저장해 두면, 팀의 다른 사람이 같은 열쇠의 결과를 받아 쓸 수도 있습니다(공유 캐시). 아티스트 한 명이 구운 텍스처를 프로그래머 열 명이 다시 굽지 않아도 됩니다.
+
+<Note>
+예제의 FNV-1a는 짧고 빠르지만, 우연히 열쇠가 겹칠 가능성을 무시할 수 없을 만큼 에셋이 많아지면 xxHash, BLAKE3 같은 더 긴 해시를 씁니다. 또 열쇠를 계산하려면 원본을 다 읽어야 하므로, 실제 파이프라인은 "크기와 수정 시각이 같으면 지난번 해시를 다시 쓴다" 같은 빠른 길을 함께 둡니다. 「C++ 고급」의 [「CMake 깊이」](#/read/cpp-advanced/tool-cmake)와 ccache가 코드에 대해 하는 일을 에셋에 대해 하는 셈입니다.
+</Note>
+
+## 정리
+
+- 에셋 파이프라인은 원본을 가져오고, 플랫폼에 맞게 굽고, 묶어서, 게임이 실행 중에 바로 올릴 수 있게 무거운 일을 미리 한다
+- 에셋은 바뀌지 않는 번호로 서로를 가리키고, 번호와 가져오기 설정은 원본 옆의 메타 파일에 적는다
+- 원본·설정·도구의 판·의존 에셋의 열쇠를 해시한 열쇠로 바뀐 것만 다시 굽고, 그 열쇠로 결과를 팀과 공유한다

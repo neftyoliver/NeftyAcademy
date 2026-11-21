@@ -1,0 +1,111 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'moc가 하는 일: Q_OBJECT 클래스의 메타 객체 생성, 시그널 본체, 이름으로 부르기와 속성';
+
+C++에는 실행 중에 "이 객체의 클래스 이름은? 어떤 메서드가 있지? 이름이 `warmer`인 메서드를 불러 줘" 같은 질문을 할 방법이 거의 없습니다. Qt는 이 빈틈을 **moc**(Meta-Object Compiler)로 채웁니다. moc는 `Q_OBJECT`가 붙은 클래스를 읽고, 그 클래스의 이름, 시그널, 슬롯, 속성 목록을 담은 **메타 객체**를 C++ 코드로 생성합니다. 시그널과 슬롯, QML 연결, 속성 애니메이션, 스크립트 연결이 모두 이 정보 위에서 돕니다.
+
+## 메타 객체에 묻기
+
+```cpp qt
+#include <QCoreApplication>
+#include <QMetaMethod>
+#include <QMetaObject>
+#include <QMetaProperty>
+#include <QObject>
+#include <cstdio>
+
+class Thermostat : public QObject {
+    Q_OBJECT
+    Q_PROPERTY(double target READ target WRITE setTarget NOTIFY targetChanged)
+public:
+    double target() const { return t; }
+    void setTarget(double v) {
+        if (v != t) { t = v; emit targetChanged(t); }
+    }
+    Q_INVOKABLE void reset() { setTarget(20.0); }
+signals:
+    void targetChanged(double value);
+public slots:
+    void warmer() { setTarget(t + 0.5); }
+private:
+    double t = 18.0;
+};
+
+int main(int argc, char** argv) {
+    QCoreApplication app(argc, argv);
+    Thermostat th;
+    const QMetaObject* mo = th.metaObject();      // moc가 만든 타입 정보
+    std::printf("클래스 %s, 부모 %s\n",
+                mo->className(), mo->superClass()->className());
+    for (int i = mo->methodOffset(); i < mo->methodCount(); ++i) {
+        QMetaMethod m = mo->method(i);
+        const char* kind = "호출 가능";
+        if (m.methodType() == QMetaMethod::Signal) kind = "시그널";
+        if (m.methodType() == QMetaMethod::Slot) kind = "슬롯";
+        std::printf("  [%s] %s\n", kind, m.methodSignature().constData());
+    }
+    for (int i = mo->propertyOffset(); i < mo->propertyCount(); ++i)
+        std::printf("  [속성] %s (%s)\n",
+                    mo->property(i).name(), mo->property(i).typeName());
+
+    // 이름(문자열)만으로 부르기: 스크립트, QML, 원격 호출이 쓰는 길
+    QMetaObject::invokeMethod(&th, "warmer");
+    std::printf("warmer 뒤 target = %.1f\n", th.property("target").toDouble());
+    QMetaObject::invokeMethod(&th, "reset");
+    th.setProperty("target", 22.5);
+    std::printf("reset, setProperty 뒤 target = %.1f\n", th.target());
+}
+#include "main.moc"
+```
+
+```text
+클래스 Thermostat, 부모 QObject
+  [시그널] targetChanged(double)
+  [슬롯] warmer()
+  [호출 가능] reset()
+  [속성] target (double)
+warmer 뒤 target = 18.5
+reset, setProperty 뒤 target = 22.5
+```
+
+- `signals:`, `public slots:`, `Q_INVOKABLE`, `Q_PROPERTY`는 C++ 컴파일러에게는 거의 아무 뜻이 없는 매크로입니다. moc가 이 표시를 보고 목록을 만듭니다
+- `metaObject()`가 돌려준 메타 객체에서 메서드와 속성을 차례로 꺼냈습니다. `methodOffset()`부터 센 것은 부모인 `QObject`의 메서드(`destroyed`, `deleteLater` 등)를 빼기 위해서입니다
+- `invokeMethod(&th, "warmer")`는 **문자열**로 메서드를 불렀고, `property("target")`과 `setProperty("target", 22.5)`도 이름으로 속성을 읽고 썼습니다. QML이 C++ 객체를 다루는 방법이 바로 이것입니다
+
+## 생성된 코드 들여다보기
+
+빌드 폴더의 `main.moc`(이 예제에서 202줄)를 열어 보면 무엇이 생성되었는지 보입니다. 다음은 그중 두 부분입니다(긴 줄은 읽기 쉽게 나눴습니다).
+
+```cpp nocheck
+// SIGNAL 0
+void Thermostat::targetChanged(double _t1)
+{
+    void *_a[] = { nullptr, const_cast<void*>(
+        reinterpret_cast<const void*>(std::addressof(_t1))) };
+    QMetaObject::activate(this, &staticMetaObject, 0, _a);
+}
+
+void Thermostat::qt_static_metacall(QObject *_o, QMetaObject::Call _c,
+                                    int _id, void **_a)
+{
+    if (_c == QMetaObject::InvokeMetaMethod) {
+        auto *_t = static_cast<Thermostat *>(_o);
+        switch (_id) {
+        case 0: _t->targetChanged(
+            (*reinterpret_cast< std::add_pointer_t<double>>(_a[1]))); break;
+        case 1: _t->warmer(); break;
+        case 2: _t->reset(); break;
+```
+
+- **시그널의 본체**: 우리는 `targetChanged`를 선언만 했습니다. 본체는 moc가 썼고, 하는 일은 인자들의 주소를 배열에 담아 `QMetaObject::activate`에 "0번 시그널이 발생했다"고 알리는 것뿐입니다. 연결된 슬롯들을 찾아 부르는 일은 Qt 안에서 합니다
+- **번호로 부르기**: `qt_static_metacall`은 메서드 번호를 받아 실제 멤버 함수를 부르는 `switch`입니다. 이름 → 번호는 메타 객체의 문자열 표로, 번호 → 함수는 이 `switch`로 갑니다. 리플렉션이 없는 C++에서 "이름으로 부르기"를 흉내 내는 방법입니다
+
+<Note>
+moc는 C++ 파서가 아니라 표시를 찾는 도구라서 몇 가지 제약이 있습니다. `Q_OBJECT` 클래스는 템플릿일 수 없고, 시그널은 반환형이 `void`여야 하며, 매크로로 시그널 선언을 만들어 내면 moc가 보지 못합니다. moc를 빼먹으면 "undefined reference to vtable" 또는 "undefined reference to `staticMetaObject`" 같은 링크 오류가 나는데, 대부분 AUTOMOC이 그 파일을 처리하지 못한 경우입니다.
+</Note>
+
+## 정리
+
+- moc는 Q_OBJECT 클래스의 시그널, 슬롯, 호출 가능 메서드, 속성 목록으로 메타 객체 코드를 생성한다
+- 메타 객체 덕분에 실행 중에 클래스 이름과 메서드를 묻고, 문자열 이름으로 메서드를 부르고 속성을 읽고 쓸 수 있다
+- 시그널의 본체도 moc가 만들며, 하는 일은 인자를 모아 QMetaObject::activate에 알리는 것이다

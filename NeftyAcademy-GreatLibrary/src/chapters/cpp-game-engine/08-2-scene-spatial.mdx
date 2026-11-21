@@ -1,0 +1,158 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '공간 분할: 고른 격자와 사분 나무로 근처 물체를 빨리 찾기, 고르지 않은 분포, 움직이는 물체';
+
+게임은 "이 폭발 반경 안에 누가 있나", "카메라 시야 안의 물체는", "이 광선에 처음 맞는 것은" 같은 **공간 질문**을 끊임없이 던집니다. 물체가 1만 개면, 질문마다 1만 개를 모두 확인할 수는 없습니다. **공간 분할**은 물체들을 위치에 따라 미리 나눠 담아, 질문과 상관없는 대부분을 한 번에 건너뛰게 하는 구조입니다.
+
+## 고른 격자와 사분 나무
+
+평면에 물체 1만 개를 뿌리고, 그중 2천 개는 작은 마을 하나에 몰아 두었습니다. 그리고 빈 들판과 붐비는 마을에서 반지름 30 안의 물체를 찾아봅니다.
+
+```cpp
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <memory>
+#include <print>
+#include <vector>
+
+struct P { float x, y; };
+
+std::uint32_t g_seed = 12345;
+float rnd(float lo, float hi)
+{
+    g_seed ^= g_seed << 13; g_seed ^= g_seed >> 17; g_seed ^= g_seed << 5;
+    return lo + (hi - lo) * float(g_seed >> 8) / float(1 << 24);
+}
+
+// 고른 격자: 세상을 같은 크기의 칸으로 나누고 칸마다 목록
+struct Grid {
+    float cell;
+    int n;
+    std::vector<std::vector<int>> cells;
+    Grid(float world, float c)
+        : cell(c), n(int(std::ceil(world / c))), cells(n * n) {}
+    int idx(float v) const { return std::clamp(int(v / cell), 0, n - 1); }
+    void insert(const P& p, int id) {
+        cells[idx(p.y) * n + idx(p.x)].push_back(id);
+    }
+};
+
+// 사분 나무: 칸에 너무 많이 들어오면 넷으로 나눈다
+struct Quad {
+    float x0, y0, size;
+    Quad(float x, float y, float s) : x0(x), y0(y), size(s) {}
+    std::vector<int> items;
+    std::unique_ptr<Quad> kids[4];
+    void insert(const std::vector<P>& pts, int id, int depth = 0)
+    {
+        if (!kids[0]) {
+            items.push_back(id);
+            if (items.size() <= 8 || depth >= 8) return;
+            float h = size / 2;                       // 넘치면 넷으로 나누고 옮긴다
+            for (int k = 0; k < 4; ++k)
+                kids[k] = std::make_unique<Quad>(x0 + (k & 1) * h,
+                                                 y0 + (k >> 1) * h, h);
+            auto old = std::move(items);
+            items.clear();
+            for (int o : old) insert(pts, o, depth);
+            return;
+        }
+        float h = size / 2;
+        int k = (pts[id].x >= x0 + h) + 2 * (pts[id].y >= y0 + h);
+        kids[k]->insert(pts, id, depth + 1);
+    }
+    void query(const std::vector<P>& pts, P c, float r, std::vector<int>& out,
+               long& checks) const
+    {
+        // 원이 이 칸과 겹치지 않으면 통째로 건너뛴다
+        float nx = std::clamp(c.x, x0, x0 + size);
+        float ny = std::clamp(c.y, y0, y0 + size);
+        if ((nx - c.x) * (nx - c.x) + (ny - c.y) * (ny - c.y) > r * r) return;
+        for (int id : items) {
+            ++checks;
+            float dx = pts[id].x - c.x, dy = pts[id].y - c.y;
+            if (dx * dx + dy * dy <= r * r) out.push_back(id);
+        }
+        if (kids[0])
+            for (auto& k : kids) k->query(pts, c, r, out, checks);
+    }
+};
+
+int main()
+{
+    constexpr int N = 10000;
+    constexpr float WORLD = 1000;
+    std::vector<P> pts(N);
+    for (auto& p : pts) p = {rnd(0, WORLD), rnd(0, WORLD)};
+    // 마을 하나에 몰려 있는 물체들(고르지 않은 분포)
+    for (int i = 0; i < 2000; ++i) pts[i] = {rnd(100, 120), rnd(100, 120)};
+
+    Grid grid(WORLD, 50);
+    for (int i = 0; i < N; ++i) grid.insert(pts[i], i);
+    Quad quad(0, 0, WORLD);
+    for (int i = 0; i < N; ++i) quad.insert(pts, i);
+
+    for (P c : {P{500, 500}, P{110, 110}}) {          // 빈 들판과 붐비는 마을에서
+        const float r = 30;
+        long naive = N, gchecks = 0, qchecks = 0;
+        int found = 0;
+        for (const auto& p : pts) {                    // 하나하나 모두
+            float dx = p.x - c.x, dy = p.y - c.y;
+            found += dx * dx + dy * dy <= r * r;
+        }
+
+        std::vector<int> gout;
+        for (int cy = grid.idx(c.y - r); cy <= grid.idx(c.y + r); ++cy)
+            for (int cx = grid.idx(c.x - r); cx <= grid.idx(c.x + r); ++cx)
+                for (int id : grid.cells[cy * grid.n + cx]) {
+                    ++gchecks;
+                    float dx = pts[id].x - c.x, dy = pts[id].y - c.y;
+                    if (dx * dx + dy * dy <= r * r) gout.push_back(id);
+                }
+        std::vector<int> qout;
+        quad.query(pts, c, r, qout, qchecks);
+
+        std::println("({:.0f},{:.0f}) 반지름 {:.0f}: 찾은 것 {} / {} / {}", c.x,
+                     c.y, r, found, gout.size(), qout.size());
+        std::println("  거리 계산: 모두 {}, 격자 {}, 사분 나무 {}",
+                     naive, gchecks, qchecks);
+    }
+}
+```
+
+```text
+(500,500) 반지름 30: 찾은 것 27 / 27 / 27
+  거리 계산: 모두 10000, 격자 78, 사분 나무 37
+(110,110) 반지름 30: 찾은 것 2013 / 2013 / 2013
+  거리 계산: 모두 10000, 격자 2075, 사분 나무 2025
+```
+
+- 세 방법 모두 **같은 답**을 냈습니다. 공간 분할은 답을 바꾸지 않고 확인할 후보만 줄입니다
+- **고른 격자**는 세상을 50×50 칸으로 나누고, 원을 감싸는 칸들만 확인했습니다. 빈 들판에서 1만 번이 78번이 되었습니다. 만들기와 고치기가 아주 쉽고(위치로 칸 번호를 바로 계산), 물체가 고르게 퍼져 있을 때 가장 좋습니다
+- **사분 나무**는 칸에 물체가 8개를 넘으면 그 칸을 넷으로 나눕니다. 붐비는 곳은 잘게, 빈 곳은 크게 나뉘어서, 빈 들판에서 37번으로 격자보다 적었습니다. 3차원에서는 여덟으로 나누는 **팔분 나무**가 됩니다
+- 붐비는 마을에서는 어느 쪽이든 2천 번 넘게 계산했는데, 실제로 2013개가 반지름 안에 있으니 당연합니다. 공간 분할의 비용은 **답의 크기**를 넘어 줄일 수 없습니다. 이럴 때는 질문 자체를 바꾸는 것(가장 가까운 몇 개만, 대표 하나만)을 생각합니다
+
+## 고르는 기준
+
+| 구조 | 잘 맞는 곳 |
+| --- | --- |
+| 고른 격자 / 해시 격자 | 크기가 비슷한 물체가 고르게 퍼지고 많이 움직이는 곳(입자, 군중) |
+| 사분·팔분 나무 | 분포가 고르지 않은 넓은 세상 |
+| 경계 볼륨 나무(BVH) | 크기가 제각각인 물체, 광선 검사, 물리 엔진의 넓은 단계 |
+
+**해시 격자**는 칸 배열 대신 칸 좌표를 해시해 맵에 담아서, 끝없이 넓은 세상에도 쓸 수 있습니다. **BVH**는 공간이 아니라 물체를 나눕니다. 가까운 물체끼리 묶어 그 묶음을 감싸는 상자를 만들고, 상자들을 다시 묶어 나무를 만듭니다. 광선 추적과 [「충돌 감지의 두 단계」](#/read/cpp-game-engine/phys-collision)의 넓은 단계가 주로 이것을 씁니다.
+
+## 움직이는 물체
+
+공간 분할은 물체가 움직이면 고쳐야 합니다. 격자는 칸 번호가 바뀐 물체만 옮기면 되어 싸고, 사분 나무는 칸 사이를 오가는 물체 때문에 나누고 합치기가 일어납니다. 그래서 정적인 것(지형, 건물)과 움직이는 것(캐릭터, 총알)을 **다른 구조**에 두는 경우가 많습니다. 정적인 것은 굽는 단계에서 정성껏 만든 나무를 쓰고, 움직이는 것은 프레임마다 다시 만들어도 될 만큼 단순한 격자를 씁니다. BVH도 물체가 조금 움직였을 때는 다시 만들지 않고 상자 크기만 늘려 고치는 방법을 씁니다.
+
+<Note>
+예제의 사분 나무는 노드마다 `unique_ptr`로 자식을 할당해서 메모리가 흩어집니다. 실제 엔진에서는 노드를 한 배열에 두고 자식을 번호로 가리키거나, 위치를 모턴 부호(좌표의 비트를 엇갈려 섞은 수)로 바꿔 정렬해 나무를 암묵적으로 표현합니다. [「객체 모델 견주기」](#/read/cpp-game-engine/ecs-models)에서 본 "데이터를 나란히" 원칙이 여기에도 그대로 쓰입니다.
+</Note>
+
+## 정리
+
+- 공간 분할은 물체를 위치에 따라 미리 나눠 담아, 공간 질문에서 상관없는 대부분을 한 번에 건너뛰고 답은 바꾸지 않는다
+- 고른 격자는 단순하고 고른 분포에 좋으며, 사분·팔분 나무는 고르지 않은 분포에, BVH는 크기가 제각각인 물체와 광선 검사에 맞는다
+- 비용은 답의 크기 밑으로는 줄지 않으며, 정적인 것과 움직이는 것은 다른 구조에 두어 고치는 비용을 줄인다

@@ -1,0 +1,117 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'PC에서 라즈베리파이용 프로그램 만들기: 교차 컴파일러, CMake 툴체인 파일, QEMU, glibc 버전이라는 함정';
+
+라즈베리파이에서 직접 컴파일해도 되지만, 프로젝트가 커지면 PC보다 몇 배 느립니다. 램이 작은 보드에서는 컴파일러가 메모리를 다 써 버리기도 합니다. 그래서 **빠른 PC에서 다른 CPU용 실행 파일을 만드는** 교차 컴파일을 씁니다. 이 쪽은 [「Makefile」](#/read/c-mid/build-make)과 [「CMake와 Ninja」](#/read/c-mid/build-cmake)의 예제를 64비트 라즈베리파이(ARM64)용으로 빌드해 봅니다.
+
+<Note kind="warn">
+이 쪽의 결과물은 우분투 24.04(x86-64)에서 만들고 QEMU로 흉내 내어 돌려 본 것입니다. 실제 라즈베리파이 보드에서 돌려 보지는 못했습니다. 보드에서 다를 수 있는 곳은 본문에 적었습니다.
+</Note>
+
+## 세 가지 이름
+
+| 이름 | 뜻 | 이 쪽에서 |
+| --- | --- | --- |
+| 빌드 기계(host) | 컴파일을 하는 기계 | x86-64 PC |
+| 목표 기계(target) | 결과물이 돌 기계 | ARM64 라즈베리파이 |
+| 시스루트(sysroot) | 목표 기계의 헤더와 라이브러리를 모아 둔 폴더 | `/usr/aarch64-linux-gnu` |
+
+교차 컴파일에 필요한 것은 **목표 CPU용 컴파일러**와 **목표 기계의 C 라이브러리·헤더**입니다. 앞의 것만 있으면 목적 파일(`.o`)까지는 만들어도 링크에서 멈춥니다.
+
+## 교차 컴파일러 깔기
+
+우분투에서는 패키지 하나로 둘 다 들어옵니다.
+
+```sh
+sudo apt install gcc-aarch64-linux-gnu
+aarch64-linux-gnu-gcc --version
+```
+
+이 패키지가 ARM64용 GCC와 함께 ARM64용 glibc와 헤더를 `/usr/aarch64-linux-gnu` 아래에 깔아 줍니다. [「GCC」](#/read/c-mid/cc-gcc)에서 본 대로 GCC는 목표마다 컴파일러가 따로라 이름 앞에 목표가 붙습니다. C23을 쓰려면 `gcc-14-aarch64-linux-gnu`로 14판을 깔고 `aarch64-linux-gnu-gcc-14`로 부르면 됩니다.
+
+파일 둘짜리 프로젝트를 바로 컴파일해 봅니다.
+
+```sh
+aarch64-linux-gnu-gcc-14 main.c util.c -o app
+file app
+```
+
+```text nocheck
+app: ELF 64-bit LSB pie executable, ARM aarch64, version 1 (SYSV),
+dynamically linked, interpreter /lib/ld-linux-aarch64.so.1, for GNU/Linux
+```
+
+## PC에서 돌려 보기: QEMU
+
+이 파일을 PC에서 그냥 실행하면 [「스마트폰과 ARM」](#/read/basics/modern-arm-mobile)에서 본 `Exec format error`가 납니다. 보드에 옮기기 전에 확인하고 싶다면 QEMU로 ARM64 CPU를 흉내 내어 돌립니다.
+
+```sh
+sudo apt install qemu-user-static
+qemu-aarch64-static -L /usr/aarch64-linux-gnu ./app
+```
+
+```text nocheck
+0 42 100
+```
+
+`-L`은 "이 프로그램이 찾는 `/lib/ld-linux-aarch64.so.1` 같은 파일을 이 폴더에서 찾으라"는 뜻입니다. QEMU가 ARM64 명령을 하나하나 x86-64 명령으로 바꿔 실행하므로 느리지만, 동작을 확인하기에는 충분합니다. 이 책이 라즈베리파이용 예제를 검사하는 방법도 이것입니다. 다만 GPIO, 카메라 같은 보드의 장치는 흉내 내지 않으므로, 장치를 다루는 코드는 보드에서 확인해야 합니다.
+
+## CMake 툴체인 파일
+
+CMake로 교차 빌드하려면 **툴체인 파일**에 목표 기계를 적어 줍니다. `aarch64.cmake`라는 이름으로 저장합니다.
+
+```cmake
+set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_PROCESSOR aarch64)
+
+set(CMAKE_C_COMPILER aarch64-linux-gnu-gcc-14)
+
+set(CMAKE_FIND_ROOT_PATH /usr/aarch64-linux-gnu)
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+```
+
+- `CMAKE_SYSTEM_NAME`을 적으면 CMake가 교차 빌드라는 것을 알고, 만든 프로그램을 빌드 기계에서 실행해 보는 검사를 건너뜁니다
+- `FIND_ROOT_PATH` 줄들은 "라이브러리와 헤더는 목표 기계 쪽에서만 찾고, 빌드 도구(프로그램)는 PC 쪽에서 찾으라"는 뜻입니다. 이것이 없으면 PC용 라이브러리를 잘못 붙일 수 있습니다
+
+`CMakeLists.txt`는 한 글자도 고치지 않고, 설정할 때 툴체인 파일만 알려 줍니다.
+
+```sh
+cmake -S . -B build-arm -G Ninja --toolchain aarch64.cmake
+cmake --build build-arm
+```
+
+`build-arm/app`은 ARM64 실행 파일이고, QEMU로 돌리면 `0 42 100`이 나옵니다. PC용 `build`와 보드용 `build-arm`을 나란히 둘 수 있는 것이 CMake의 폴더 나누기의 장점입니다.
+
+<Note kind="tip">
+Clang은 컴파일러 하나로 됩니다. 우분투에서는 `gcc-aarch64-linux-gnu`가 깔아 둔 라이브러리를 Clang이 알아서 찾아서, `clang --target=aarch64-linux-gnu main.c util.c -o app`만으로 링크까지 됐습니다(`-fuse-ld=lld`도 됨). 반면 `--sysroot=/usr/aarch64-linux-gnu`를 함께 주면 그 안의 링커 스크립트가 적어 둔 절대 경로를 시스루트 아래에서 다시 찾느라 `cannot find …libc.so.6` 오류가 났습니다. 시스루트를 보드에서 복사해 왔을 때만 `--sysroot`를 쓰면 됩니다.
+</Note>
+
+## glibc 버전이라는 함정
+
+교차 컴파일한 프로그램은 빌드 기계에 깔린 **목표용 glibc의 버전**을 기준으로 링크됩니다. 우분투 24.04의 교차 패키지는 glibc 2.39입니다. 실행 파일이 요구하는 glibc 버전은 `objdump -T`로 볼 수 있습니다.
+
+```text nocheck
+$ aarch64-linux-gnu-objdump -T app | grep -o "GLIBC_[0-9.]*" | sort -u
+GLIBC_2.17
+GLIBC_2.34
+```
+
+이 프로그램은 glibc 2.34 이상이면 돕니다. 그런데 glibc 2.38에 새로 들어온 `strlcpy`를 쓰면 요구 버전이 `GLIBC_2.38`로 올라갑니다. 라즈베리파이 OS 북웜은 glibc 2.36이라, 이런 실행 파일은 보드에서 `version 'GLIBC_2.38' not found`로 실행되지 않습니다(glibc 2.41인 트릭시에서는 돕니다). 보드에서 직접 확인하지는 못했고, glibc가 버전을 확인하는 규칙대로라면 그렇습니다.
+
+피하는 길은 셋입니다.
+
+| 방법 | 내용 |
+| --- | --- |
+| 보드보다 새것을 쓰지 않는다 | 보드의 OS와 같은 버전의 배포판(예: 같은 데비안)에서 교차 컴파일한다 |
+| 보드의 시스루트로 빌드한다 | 보드의 `/usr/include`, `/lib`, `/usr/lib`를 복사해 와서 `--sysroot`로 준다 |
+| 정적 링크한다 | `-static`으로 glibc를 실행 파일에 합친다. 70KB가 700KB가 됐다 |
+
+빌드한 파일은 `scp app pi@라즈베리파이주소:~/`처럼 네트워크로 보내 보드에서 실행합니다. 이 과정을 자동으로 하는 법은 소형 기기 서가의 「교차 컴파일과 배포」에서 다룹니다.
+
+## 정리
+
+- 교차 컴파일에는 목표 CPU용 컴파일러와 목표 기계의 C 라이브러리·헤더(시스루트)가 필요하고, 우분투에서는 `gcc-aarch64-linux-gnu` 패키지가 둘을 함께 깐다
+- CMake는 툴체인 파일만 바꿔 같은 `CMakeLists.txt`로 보드용을 빌드하고, QEMU로 PC에서 미리 돌려 볼 수 있다
+- 빌드 기계의 glibc가 보드보다 새로우면 보드에서 실행되지 않을 수 있으므로, 같은 버전에서 빌드하거나 보드의 시스루트나 정적 링크를 쓴다

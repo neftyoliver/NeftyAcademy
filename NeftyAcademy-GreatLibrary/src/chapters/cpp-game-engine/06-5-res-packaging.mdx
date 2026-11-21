@@ -1,0 +1,125 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '묶음 파일: 해시로 정렬한 목차, 항목마다 압축, 맞춤과 메모리 사상, 겹쳐 붙이는 패치';
+
+[「가져오기와 굽기」](#/read/cpp-game-engine/res-import)를 거친 에셋은 수만 개의 작은 파일입니다. 이것을 그대로 두고 게임에서 하나씩 열면 느립니다. 파일을 열 때마다 운영체제가 경로를 찾고 권한을 확인하는 비용이 들고, 콘솔과 휴대폰에서는 작은 파일 수만 개를 설치하고 내려받는 것 자체가 문제입니다. 그래서 출시용 에셋은 몇 개의 **묶음 파일**(pak, archive)로 합칩니다.
+
+## 목차와 데이터
+
+묶음 파일은 맨 앞(또는 맨 끝)의 **목차**와, 그 뒤에 이어 붙인 **데이터**로 되어 있습니다.
+
+```cpp flags=-lz
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <optional>
+#include <print>
+#include <string>
+#include <vector>
+#include <zlib.h>
+
+std::uint64_t fnv(const std::string& s)
+{
+    std::uint64_t h = 1469598103934665603ull;
+    for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; }
+    return h;
+}
+
+struct TocEntry {                   // 목차 한 줄: 이름 대신 이름의 해시
+    std::uint64_t name_hash;
+    std::uint32_t offset, packed, size;
+};
+
+struct Pak {
+    std::vector<TocEntry> toc;      // 해시 순으로 정렬해 둔다
+    std::vector<unsigned char> blob;
+
+    static Pak build(const std::vector<std::pair<std::string, std::string>>& files)
+    {
+        Pak p;
+        for (const auto& [name, data] : files) {
+            while (p.blob.size() % 16) p.blob.push_back(0);   // 16바이트 맞춤
+            uLongf len = compressBound(data.size());
+            std::vector<unsigned char> out(len);
+            compress2(out.data(), &len,
+                      reinterpret_cast<const Bytef*>(data.data()), data.size(), 9);
+            auto off = static_cast<std::uint32_t>(p.blob.size());
+            p.blob.insert(p.blob.end(), out.begin(), out.begin() + len);
+            p.toc.push_back({fnv(name), off, static_cast<std::uint32_t>(len),
+                             static_cast<std::uint32_t>(data.size())});
+        }
+        std::ranges::sort(p.toc, {}, &TocEntry::name_hash);
+        auto dup = std::ranges::adjacent_find(p.toc, {}, &TocEntry::name_hash);
+        if (dup != p.toc.end())
+            std::println("굽는 중 오류: 이름 해시가 겹친다");   // 묶을 때 잡는다
+        return p;
+    }
+
+    std::optional<std::string> read(const std::string& name) const
+    {
+        auto h = fnv(name);
+        auto it = std::ranges::lower_bound(toc, h, {}, &TocEntry::name_hash);
+        if (it == toc.end() || it->name_hash != h) return std::nullopt;
+        std::string out(it->size, '\0');
+        uLongf len = it->size;
+        if (uncompress(reinterpret_cast<Bytef*>(out.data()), &len,
+                       blob.data() + it->offset, it->packed) != Z_OK)
+            return std::nullopt;
+        return out;
+    }
+};
+
+int main()
+{
+    std::string level(4000, '.');
+    for (int i = 0; i < 4000; i += 37) level[i] = '#';
+    std::vector<std::pair<std::string, std::string>> files = {
+        {"levels/forest.lvl", level},
+        {"text/ko.txt", "시작=게임 시작\n끝=끝내기\n설정=설정\n"},
+        {"shaders/basic.spv", std::string(512, '\x03')},
+    };
+    Pak pak = Pak::build(files);
+
+    std::println("묶음 크기 {}바이트, 목차 {}줄 x {}바이트", pak.blob.size(),
+                 pak.toc.size(), sizeof(TocEntry));
+    for (const auto& [name, data] : files) {
+        auto got = pak.read(name);
+        std::println("  {:<18} 원래 {:4}바이트 -> 다시 읽음 {}", name,
+                     data.size(), got && *got == data ? "같음" : "다름");
+    }
+    std::println("  없는 이름: {}", pak.read("nope.bin") ? "있음" : "없음");
+}
+```
+
+```text
+묶음 크기 126바이트, 목차 3줄 x 24바이트
+  levels/forest.lvl  원래 4000바이트 -> 다시 읽음 같음
+  text/ko.txt        원래   49바이트 -> 다시 읽음 같음
+  shaders/basic.spv  원래  512바이트 -> 다시 읽음 같음
+  없는 이름: 없음
+```
+
+- **이름 대신 해시**: 목차에는 경로 글자 대신 경로의 64비트 해시를 넣었습니다. 목차 한 줄이 24바이트로 고정되고, 비교가 정수 비교 한 번입니다. 해시가 우연히 겹치면 큰일이므로, **묶을 때** 겹치는지 검사해 굽기를 실패시킵니다. 실행 중에는 검사하지 않습니다
+- **정렬과 이진 탐색**: 목차를 해시 순으로 정렬해 두고 `lower_bound`로 찾습니다. 수만 줄이어도 비교 십몇 번이면 끝납니다. 열린 주소법 해시 표([「엔진용 컨테이너」](#/read/cpp-game-engine/mem-containers))로 목차를 담는 방법도 씁니다
+- **항목마다 압축**: 파일을 하나씩 따로 압축해서, 필요한 것만 꺼내 풀 수 있게 했습니다. 묶음 전체를 한 번에 압축하면 더 작아지지만, 파일 하나를 읽으려고 앞부분을 다 풀어야 합니다. 4000바이트짜리 레벨처럼 되풀이가 많은 데이터는 아주 작아졌습니다. 예제는 zlib을 썼지만, 게임은 풀기가 훨씬 빠른 LZ4나 Zstandard, 또는 상용 압축기를 주로 씁니다. 압축 크기는 압축 라이브러리의 구현에 따라 조금씩 달라서, 이 검사용 컴퓨터(zlib-ng가 실림, [「자주 쓰이는 C 생태계 라이브러리」](#/read/c-mid/common-libraries))와 다른 컴퓨터의 묶음 크기가 다를 수 있습니다
+- **맞춤**: 항목마다 시작 위치를 16바이트 배수로 맞췄습니다. 실제로는 디스크의 블록 크기(4KB 등)에 맞춰, 운영체제의 캐시를 건너뛰는 직접 입출력이나 GPU로 바로 보내는 경로를 쓸 수 있게 합니다
+
+## 메모리 사상과 해석 없는 읽기
+
+묶음 파일을 `mmap`(윈도는 `MapViewOfFile`)으로 메모리에 비추면, 파일 내용이 가상 주소에 바로 나타나고 실제로 만지는 쪽만 운영체제가 디스크에서 읽어 옵니다. 압축하지 않은 항목은 "읽어서 복사"할 필요 없이 그 주소를 그대로 쓸 수 있습니다. [「가져오기와 굽기」](#/read/cpp-game-engine/res-import)의 머리 붙인 형식을 쓰면, 비춘 주소의 데이터를 해석 없이 바로 쓸 수 있습니다.
+
+## 패치와 모드
+
+출시한 뒤 텍스처 몇 개를 고쳤다고 수십 GB 묶음 전체를 다시 받게 할 수는 없습니다. 고친 파일만 담은 **작은 묶음**을 만들어 내려보내고, [「파일과 경로」](#/read/cpp-game-engine/plat-files)의 가상 파일 시스템에 원래 묶음 **위에 겹쳐** 붙입니다. 같은 이름을 찾으면 위의 패치 묶음이 먼저 찾아집니다. 모드도 같은 방법으로 얹습니다.
+
+어떤 파일을 어느 묶음에 넣을지도 설계의 일부입니다. 같은 레벨에서 함께 쓰이는 에셋을 한 묶음에, 디스크에서 붙어 있게 넣으면 그 레벨을 불러올 때 디스크를 쭉 읽기만 하면 됩니다. 여러 레벨이 함께 쓰는 에셋은 공통 묶음에 둡니다.
+
+<Note>
+묶음 파일은 사용자가 에셋을 꺼내 보기 어렵게 하는 효과도 있지만, 이것을 보안 장치로 믿으면 안 됩니다. 실행 파일 안에 풀 열쇠가 들어 있는 한, 마음먹은 사람은 꺼낼 수 있습니다. 중요한 것은 **고쳐진 데이터를 알아채는 것**이라, 온라인 게임은 서버가 판정을 하고 클라이언트의 묶음에는 서명이나 해시 검사를 둡니다.
+</Note>
+
+## 정리
+
+- 출시용 에셋은 목차와 데이터로 된 묶음 파일로 합쳐, 파일 열기 비용과 설치·내려받기 문제를 줄인다
+- 목차는 이름 해시로 정렬해 이진 탐색하고, 해시 겹침은 묶을 때 검사하며, 항목마다 따로 압축해 필요한 것만 푼다
+- 항목을 블록 크기에 맞춰 두고 메모리 사상으로 해석 없이 쓰며, 패치와 모드는 작은 묶음을 가상 파일 시스템에 겹쳐 붙인다

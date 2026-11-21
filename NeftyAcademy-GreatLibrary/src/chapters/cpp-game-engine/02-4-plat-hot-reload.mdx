@@ -1,0 +1,156 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '동적 라이브러리와 핫 리로드: 실행 중에 게임 코드 갈아 끼우기, 상태를 둘 곳, 함정';
+
+게임 코드를 한 줄 고칠 때마다 엔진을 끄고, 빌드하고, 다시 켜서 그 장면까지 걸어가는 데 1분이 걸린다면 하루에 몇 번 시험해 볼 수 있을까요? **핫 리로드**는 게임이 돌아가는 동안 게임 코드만 새로 빌드해 갈아 끼우는 기술입니다. [「엔진 코드와 게임 코드의 경계」](#/read/cpp-game-engine/arch-boundary)에서 그은 C 경계가 있으면 생각보다 간단합니다.
+
+## 구조
+
+- 게임 코드는 **동적 라이브러리**(리눅스 `.so`, 윈도 `.dll`, macOS `.dylib`)로 빌드한다
+- 엔진(실행 파일)은 그 라이브러리를 실행 중에 열고(`dlopen` / `LoadLibrary`), 이름으로 입구 함수를 찾아(`dlsym` / `GetProcAddress`) 함수 표를 받는다
+- 게임의 **상태는 엔진이 가진 메모리**에 둔다. 라이브러리를 내리고 새로 올려도 상태는 그대로 남는다
+
+## 직접 해 보기
+
+경계 머리 파일, 게임, 엔진(호스트) 세 파일입니다.
+
+```cpp nocheck
+// 엔진과 게임이 함께 보는 경계(C로)
+#pragma once
+#include <cstdint>
+
+extern "C" {
+struct GameMemory {              // 상태는 엔진이 가진 메모리에 둔다
+    std::uint32_t layout_version;
+    float player_x;
+    int frame;
+};
+
+struct GameApi {
+    std::uint32_t version;
+    void (*update)(GameMemory* mem, float dt);
+};
+
+using GetGameApiFn = GameApi (*)();
+}
+```
+
+```cpp nocheck
+#include <cstdio>
+#include "game_api.h"
+
+#ifndef SPEED
+#define SPEED 1.0f
+#endif
+
+static void update(GameMemory* m, float dt)
+{
+    m->player_x += SPEED * dt * 60;      // 판마다 SPEED가 다르다
+    ++m->frame;
+    std::printf("  [게임 v%d] 프레임 %d, x = %.1f\n", VERSION, m->frame,
+                m->player_x);
+}
+
+extern "C" GameApi get_game_api() { return {1, update}; }
+```
+
+```cpp nocheck
+#include <dlfcn.h>
+#include <filesystem>
+#include <print>
+#include <string>
+#include "game_api.h"
+
+namespace fs = std::filesystem;
+
+struct Loaded {
+    void* handle = nullptr;
+    GameApi api{};
+};
+
+// 같은 경로를 다시 dlopen하면 이미 올라온 것을 돌려주므로, 매번 새 이름으로 복사
+Loaded load(const fs::path& lib, int generation)
+{
+    fs::path copy = fs::temp_directory_path() /
+                    ("game_live_" + std::to_string(generation) + ".so");
+    fs::copy_file(lib, copy, fs::copy_options::overwrite_existing);
+    Loaded l;
+    l.handle = dlopen(copy.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (!l.handle) {
+        std::println("dlopen 실패: {}", dlerror());
+        return l;
+    }
+    auto get = reinterpret_cast<GetGameApiFn>(dlsym(l.handle, "get_game_api"));
+    if (get)
+        l.api = get();
+    fs::remove(copy);                    // 올라온 뒤에는 지워도 된다(리눅스)
+    return l;
+}
+
+int main(int argc, char** argv)
+{
+    GameMemory mem{1, 0.0f, 0};          // 다시 불러와도 이 상태는 그대로
+    for (int g = 1; g < argc; ++g) {
+        Loaded l = load(argv[g], g);
+        if (!l.api.update)
+            return 1;
+        std::println("{} 불러옴", fs::path(argv[g]).filename().string());
+        for (int f = 0; f < 3; ++f)
+            l.api.update(&mem, 1.0f / 60);
+        dlclose(l.handle);               // 다음 판으로 갈아 끼우기 전에 내린다
+    }
+}
+```
+
+게임을 속도만 다른 두 판으로 빌드하고, 호스트가 차례로 갈아 끼우게 했습니다.
+
+```text nocheck
+$ g++-14 -std=c++23 -O2 -fPIC -shared -DVERSION=1 -DSPEED=1.0f \
+      game.cpp -o libgame_v1.so
+$ g++-14 -std=c++23 -O2 -fPIC -shared -DVERSION=2 -DSPEED=5.0f \
+      game.cpp -o libgame_v2.so
+$ g++-14 -std=c++23 -Wall -Wextra -Wpedantic host.cpp -o host
+$ ./host ./libgame_v1.so ./libgame_v2.so
+libgame_v1.so 불러옴
+  [게임 v1] 프레임 1, x = 1.0
+  [게임 v1] 프레임 2, x = 2.0
+  [게임 v1] 프레임 3, x = 3.0
+libgame_v2.so 불러옴
+  [게임 v2] 프레임 4, x = 8.0
+  [게임 v2] 프레임 5, x = 13.0
+  [게임 v2] 프레임 6, x = 18.0
+```
+
+판 2로 갈아 끼운 뒤에도 프레임 번호(4, 5, 6)와 위치(3.0에서 이어서)가 그대로 이어졌고, 움직이는 속도만 새 코드대로 다섯 배가 되었습니다. 상태가 라이브러리 안의 전역 변수가 아니라 호스트의 `GameMemory`에 있었기 때문입니다.
+
+## 실제 엔진에서는
+
+실제로는 판을 명령줄로 주지 않고, 매 프레임 라이브러리 파일의 수정 시각을 보다가 바뀌면 다시 올립니다.
+
+```cpp nocheck
+auto stamp = fs::last_write_time(lib_path, ec);
+if (!ec && stamp != loaded_stamp && build_finished(lib_path)) {
+    dlclose(current.handle);
+    current = load(lib_path, ++generation);
+    loaded_stamp = stamp;
+}
+```
+
+`build_finished`가 필요한 까닭은 컴파일러가 파일을 **쓰는 도중**에 열면 반쪽 파일을 읽기 때문입니다. 빌드 시스템이 다 쓴 뒤에 작은 표시 파일을 만들게 하거나, 크기가 잠시 변하지 않는지 확인합니다.
+
+## 함정
+
+- **같은 이름은 다시 안 올라온다**: `dlopen`은 이미 열린 경로를 다시 열면 새로 읽지 않고 같은 것을 돌려줍니다. 그래서 위 호스트는 매번 **새 이름으로 복사**한 뒤 엽니다. 윈도에서는 열린 DLL 파일이 잠겨서 링커가 덮어쓰지 못하므로, 역시 복사본을 여는 것이 표준 방법입니다(디버그 정보 PDB 파일도 같은 문제가 있습니다)
+- **상태의 모양이 바뀌면**: 새 판에서 `GameMemory`에 칸을 더하면 옛 메모리를 새 모양으로 읽게 됩니다. 그래서 `layout_version` 같은 표시를 두고, 다르면 다시 불러오기 대신 새로 시작합니다
+- **라이브러리 안을 가리키는 포인터**: 옛 라이브러리의 함수 포인터, 가상 함수 표, 문자열 상수의 주소를 상태 안에 저장해 두면, 라이브러리를 내린 순간 모두 엉뚱한 곳을 가리킵니다. 함수는 매번 새로 받은 `GameApi`로 부르고, 상태에는 데이터만 둡니다
+- **전역과 정적 객체**: 라이브러리 안의 전역 변수는 다시 올릴 때 초기값으로 돌아가고, 정적 객체의 소멸자가 `dlclose` 때 불립니다. 게임 쪽 전역 상태는 아예 두지 않는 것이 규칙입니다
+
+<Note>
+게임 코드 전부가 아니라 일부만 바꾸는 방법도 있습니다. 데이터(레벨, 수치)는 [「참조 세기와 핫 리로드」](#/read/cpp-game-engine/res-lifetime)에서 보는 자원 다시 불러오기로, 게임 규칙의 일부는 [「스크립트 언어 붙이기」](#/read/cpp-game-engine/scr-lua)의 스크립트로 바꾸는 엔진이 많습니다. 실행 중인 C++ 함수의 기계어를 직접 고쳐 쓰는 상용 도구들도 있습니다.
+</Note>
+
+## 정리
+
+- 게임 코드를 동적 라이브러리로 빌드하고, 엔진이 실행 중에 열어 입구 함수로 함수 표를 받으면 코드를 갈아 끼울 수 있다
+- 상태는 엔진이 가진 메모리에 두어 다시 불러와도 이어지게 하고, 상태 안에는 라이브러리를 가리키는 포인터를 두지 않는다
+- 같은 경로는 다시 안 올라오고 윈도는 파일이 잠기므로 복사본을 열며, 빌드가 끝났는지와 상태의 모양이 같은지 확인한다

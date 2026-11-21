@@ -1,0 +1,105 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '다른 프로그램을 띄우는 길과 그 틈: system의 명령 주입, 셸 없는 posix_spawn, PATH의 가짜';
+
+C 프로그램이 다른 프로그램을 실행해야 할 때가 있습니다. 파일을 압축하려고 `zip`을, 사진을 바꾸려고 `ffmpeg`를 부르는 식입니다. 그런데 **어떻게** 부르느냐에 따라, 사용자가 넣은 글자 몇 개로 전혀 다른 프로그램이 실행될 수 있습니다. [「의도하지 않은 코드 실행」](#/read/c-mid/hack-code-exec)이 메모리를 넘쳐서 흐름을 빼앗았다면, 이 쪽은 메모리를 건드리지 않고도 흐름을 빼앗는 방법들입니다.
+
+## 두 가지 띄우기
+
+| 방법 | 하는 일 |
+| --- | --- |
+| `system("명령 글")` | 셸(`/bin/sh`)을 띄워 글 전체를 셸에게 해석시킨다. ISO C 함수 |
+| `posix_spawnp(…, "프로그램", 인자 배열, …)` | 셸 없이 프로그램을 바로 띄우고 인자를 따로 넘긴다. POSIX 함수 |
+
+차이는 **셸이 끼느냐**입니다. 셸은 `;`, `|`, `&&`, `$( )`, `>`처럼 특별한 뜻을 가진 글자를 해석합니다. [「리눅스 명령어와 POSIX」](#/read/basics/commands)에서 명령을 이어 붙이던 바로 그 글자들입니다.
+
+## 명령 주입
+
+파일의 크기를 세는 함수를 두 가지로 짰습니다. 사용자가 파일 이름 자리에 `note.txt; echo INJECTED`를 넣었다고 해 봅니다.
+
+```c flags=-D_POSIX_C_SOURCE=200809L norun
+#include <spawn.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/wait.h>
+
+extern char **environ;
+
+// 나쁜 예: 사용자가 준 글을 셸 명령에 그대로 붙인다
+static void count_bad(const char *file)
+{
+    char cmd[256];
+    snprintf(cmd, sizeof cmd, "wc -c %s", file);
+    fflush(stdout);
+    system(cmd);
+}
+
+// 좋은 예: 셸 없이 프로그램과 인자를 따로 넘긴다
+static void count_good(const char *file)
+{
+    char *argv[] = {"wc", "-c", (char *)file, NULL};
+    pid_t pid;
+    fflush(stdout);
+    if (posix_spawnp(&pid, "wc", NULL, NULL, argv, environ) == 0)
+        waitpid(pid, NULL, 0);
+}
+
+int main(void)
+{
+    const char *input = "note.txt; echo INJECTED";
+    puts("== system");
+    count_bad(input);
+    puts("== posix_spawnp");
+    count_good(input);
+    return 0;
+}
+```
+
+`note.txt`(6바이트)가 있는 폴더에서 돌린 결과입니다.
+
+```text nocheck
+== system
+6 note.txt
+INJECTED
+== posix_spawnp
+wc: 'note.txt; echo INJECTED': No such file or directory
+```
+
+- `system` 쪽은 셸이 `wc -c note.txt; echo INJECTED`를 받아 `;`에서 명령을 둘로 나눴습니다. 그래서 `wc`를 실행한 뒤 사용자가 끼워 넣은 `echo INJECTED`까지 실행했습니다. 여기가 `echo`가 아니라 파일을 지우거나 비밀번호를 빼 가는 명령이었다면 그대로 실행됐을 것입니다. 이것을 **명령 주입**이라고 합니다
+- `posix_spawnp` 쪽은 셸이 없으므로 `note.txt; echo INJECTED` 전체가 파일 **이름 하나**로 `wc`에게 넘어갔고, 그런 파일이 없다는 오류로 끝났습니다
+
+<Note kind="warn">
+"위험한 글자를 걸러 내면 되지 않을까?" 하고 `;`만 막으면, 공격자는 `|`, `&&`, 줄바꿈, `$( )`를 씁니다. 셸이 특별하게 보는 글자는 생각보다 많고, 셸마다 조금씩 다릅니다. 걸러 내기보다 **셸을 끼우지 않는 것**이 확실한 방법입니다. 웹에서 사용자 입력을 SQL 문에 붙여 생기는 SQL 주입도 같은 구조의 실수입니다.
+</Note>
+
+## PATH로 가짜 끼워 넣기
+
+`posix_spawnp`의 `p`는 "프로그램을 `PATH`에서 찾는다"는 뜻입니다. `PATH`는 명령을 찾을 폴더 목록이고, 앞에 있는 폴더부터 찾습니다. 그렇다면 누군가 `PATH` 맨 앞에 자기 폴더를 넣고 그 안에 `wc`라는 가짜 프로그램을 두면 어떻게 될까요?
+
+```text nocheck
+$ mkdir fake
+$ printf '#!/bin/sh\necho "가짜 wc가 실행됐다"\n' > fake/wc && chmod +x fake/wc
+$ PATH="$PWD/fake:$PATH" ./launch
+…
+== posix_spawnp
+가짜 wc가 실행됐다
+```
+
+같은 프로그램이 진짜 `wc` 대신 가짜를 실행했습니다. 보통 사용자의 프로그램이라면 자기 `PATH`를 자기가 바꾸는 것이라 큰일이 아니지만, **관리자 권한으로 도는 프로그램**이 남이 바꿀 수 있는 `PATH`를 그대로 믿으면 권한을 빼앗기는 길이 됩니다. 윈도우에서는 프로그램 폴더에 같은 이름의 가짜 DLL을 넣어 먼저 불러오게 하는 "DLL 끼워 넣기"가 같은 종류의 공격입니다([「동적 라이브러리」](#/read/c-mid/lib-dynamic)의 찾는 순서를 떠올려 보세요).
+
+## 안전하게 띄우는 습관
+
+| 습관 | 까닭 |
+| --- | --- |
+| 사용자 입력이 섞이면 `system`과 `popen`을 쓰지 않는다 | 셸이 끼면 글자 하나가 명령이 된다 |
+| `posix_spawn`, `execv`처럼 인자를 배열로 넘기는 함수를 쓴다 | 입력은 언제나 인자 하나로 남는다 |
+| 중요한 프로그램은 전체 경로(`/usr/bin/wc`)로 부른다 | `PATH`를 믿지 않는다 |
+| 권한이 높은 프로그램은 환경 변수를 정리하고 시작한다 | `PATH`, `LD_LIBRARY_PATH` 같은 것이 남이 넣은 값일 수 있다 |
+
+`posix_spawn`은 POSIX 함수라 리눅스와 맥에서 쓰고, 윈도우에서는 `CreateProcessW`를 씁니다. 다만 `CreateProcessW`는 인자를 배열이 아니라 **글 한 줄**로 받아서, 띄어쓰기와 따옴표를 처리하는 규칙을 조심해야 합니다. 각 OS가 주는 기능은 [「윈도우」](#/read/c-mid/plat-windows)와 [「리눅스」](#/read/c-mid/plat-linux)에서 봅니다.
+
+## 정리
+
+- `system`은 셸에게 글 전체를 해석시키므로, 사용자 입력을 붙이면 `;` 같은 글자로 다른 명령이 끼어드는 명령 주입이 생긴다
+- `posix_spawnp`처럼 셸 없이 인자를 배열로 넘기면 입력은 언제나 인자 하나로 남는다
+- 프로그램을 `PATH`에서 찾으면 앞쪽 폴더의 가짜가 실행될 수 있으므로, 권한이 높은 프로그램은 전체 경로와 정리한 환경으로 띄운다

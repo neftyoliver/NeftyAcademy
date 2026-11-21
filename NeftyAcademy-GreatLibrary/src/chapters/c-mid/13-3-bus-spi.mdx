@@ -1,0 +1,159 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'SPI 버스: 선 네 개, 칩 선택, 보내며 동시에 받는 밀기 레지스터, 네 가지 모드, 리눅스 spidev';
+
+**SPI**(Serial Peripheral Interface)는 빠르고 단순한 직렬 버스입니다. 디스플레이, 플래시 메모리, SD 카드(SPI 모드), ADC(아날로그→디지털 변환기), 무선 모듈이 흔히 SPI로 붙습니다. [「I2C」](#/read/c-mid/bus-i2c)보다 선이 많은 대신 주소도, ACK도 없고 훨씬 빠릅니다(수 MHz~수십 MHz).
+
+## 선 네 개
+
+| 선 | 하는 일 |
+| --- | --- |
+| SCLK | 컨트롤러가 내는 시계 |
+| MOSI | 컨트롤러 → 장치 데이터 |
+| MISO | 장치 → 컨트롤러 데이터 |
+| CS(칩 선택) | 장치마다 하나. 0으로 내린 장치만 대화에 낀다 |
+
+주소 대신 **CS 선**으로 장치를 고릅니다. 장치가 셋이면 CS도 셋입니다. MOSI·MISO라는 이름 대신 요즘은 SDO·SDI, COPI·CIPO 같은 이름도 씁니다. 같은 선입니다.
+
+## 보내는 순간 받는다
+
+SPI의 핵심은 양쪽에 있는 8비트 **밀기 레지스터**(shift register)입니다. 시계가 한 번 칠 때마다 컨트롤러의 맨 위 비트가 MOSI로 장치에 들어가고, 동시에 장치의 맨 위 비트가 MISO로 컨트롤러에 들어옵니다. 여덟 번 치면 두 레지스터의 내용이 **맞바뀝니다**. 그래서 SPI에는 "읽기"만 따로 있지 않습니다. 받으려면 무엇이든 보내야 합니다.
+
+```c
+#include <stdint.h>
+#include <stdio.h>
+
+// 가짜 장치: 첫 바이트 맨 위 비트가 1이면 읽기 명령
+static const uint8_t dev_regs[16] = {[0x0F] = 0x33, [0x05] = 0x7E};
+static uint8_t dev_shift;          // 장치의 밀기 레지스터
+static int dev_count;
+static uint8_t dev_cmd;
+
+// CS가 내려가면 장치가 깨어난다
+static void cs_low(void) { dev_count = 0; dev_shift = 0xFF; }
+
+// 한 바이트 교환: 박자마다 MOSI로 나가고 MISO로 들어온다
+static uint8_t transfer(uint8_t out)
+{
+    uint8_t in = 0;
+    for (int i = 7; i >= 0; i--) {             // 높은 비트부터
+        int mosi = (out >> i) & 1;
+        int miso = (dev_shift >> 7) & 1;
+        dev_shift = (uint8_t)(dev_shift << 1 | mosi);
+        in = (uint8_t)(in << 1 | miso);
+    }
+    // 바이트가 끝나면 장치가 다음에 보낼 것을 준비
+    if (dev_count++ == 0) {
+        dev_cmd = dev_shift;
+        dev_shift = (dev_cmd & 0x80) ? dev_regs[dev_cmd & 0x0F] : 0;
+    } else {
+        dev_shift = 0;
+    }
+    return in;
+}
+
+static uint8_t read_reg(uint8_t reg)
+{
+    cs_low();
+    uint8_t first = transfer(0x80 | reg);   // 명령을 보내며 쓰레기 받기
+    uint8_t value = transfer(0x00);         // 아무거나 보내며 값 받기
+    printf("보냄 %02X 00, 받음 %02X %02X\n", 0x80 | reg, first, value);
+    return value;   // CS를 올리면 대화 끝
+}
+
+int main(void)
+{
+    printf("0x0F번(이름표) = 0x%02X\n", read_reg(0x0F));
+    printf("0x05번 = 0x%02X\n", read_reg(0x05));
+    return 0;
+}
+```
+
+```text
+보냄 8F 00, 받음 FF 33
+0x0F번(이름표) = 0x33
+보냄 85 00, 받음 FF 7E
+0x05번 = 0x7E
+```
+
+- 첫 바이트를 보내는 동안 장치는 아직 무엇을 원하는지 모르므로, 그때 받은 `FF`는 의미 없는 값입니다
+- 두 번째 바이트로는 아무거나(`00`) 보내고, 그 대가로 장치가 준비해 둔 레지스터 값을 받습니다. 명령 바이트의 맨 위 비트를 1로 해서 "읽기"를 표시하는 것은 SPI의 규칙이 아니라 **장치마다 정한 약속**입니다. ST의 가속도계 여러 종류가 이런 모양이고, 0x0F번에 고정된 "이름표"(WHO_AM_I) 값을 둬서 배선 확인에 씁니다
+- CS를 올리면 장치는 대화가 끝났다고 보고 처음 상태로 돌아갑니다. 그래서 여러 바이트로 된 명령은 CS를 내린 채로 한 번에 보내야 합니다
+
+## 네 가지 모드
+
+시계가 쉴 때 높은지 낮은지(CPOL), 데이터를 시계의 첫 가장자리에서 읽는지 두 번째에서 읽는지(CPHA)에 따라 모드 0~3이 있습니다.
+
+| 모드 | CPOL | CPHA | 데이터를 읽는 때 |
+| --- | --- | --- | --- |
+| 0 | 0 | 0 | 시계가 올라갈 때 |
+| 1 | 0 | 1 | 시계가 내려갈 때 |
+| 2 | 1 | 0 | 시계가 내려갈 때 |
+| 3 | 1 | 1 | 시계가 올라갈 때 |
+
+모드 0이 가장 흔하고, 장치 데이터시트에 어느 모드인지 적혀 있습니다. 모드가 틀리면 비트가 반 박자씩 어긋나서, 값이 한 비트 밀린 것처럼 보이거나 엉망이 됩니다. 비트를 높은 쪽부터 보내는지도 장치를 따라야 하지만, 거의 다 높은 비트부터입니다.
+
+## 리눅스에서: spidev
+
+리눅스는 SPI 장치를 `/dev/spidevB.C`(버스 B, CS C)로 보여 줍니다. 모드와 속도를 정하고, `SPI_IOC_MESSAGE` ioctl에 보낼 버퍼와 받을 버퍼를 함께 넘기면 한 번의 CS 구간 안에서 교환이 일어납니다.
+
+```c norun
+#include <fcntl.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+#include <linux/spi/spidev.h>
+
+int main(void)
+{
+    int fd = open("/dev/spidev0.0", O_RDWR);   // 버스 0, CS 0
+    if (fd < 0) {
+        perror("/dev/spidev0.0");
+        return 1;
+    }
+    uint8_t mode = SPI_MODE_0;
+    uint32_t speed = 1000000;                   // 1MHz
+    ioctl(fd, SPI_IOC_WR_MODE, &mode);
+    ioctl(fd, SPI_IOC_WR_MAX_SPEED_HZ, &speed);
+
+    uint8_t tx[2] = {0x80 | 0x0F, 0x00};
+    uint8_t rx[2] = {0};
+    struct spi_ioc_transfer t = {
+        .tx_buf = (uint64_t)(uintptr_t)tx,
+        .rx_buf = (uint64_t)(uintptr_t)rx,
+        .len = 2,
+        .speed_hz = speed,
+        .bits_per_word = 8,
+    };
+    if (ioctl(fd, SPI_IOC_MESSAGE(1), &t) < 0) {  // 보내며 동시에 받기
+        perror("SPI_IOC_MESSAGE");
+        return 1;
+    }
+    printf("이름표 0x%02X\n", rx[1]);
+    close(fd);
+    return 0;
+}
+```
+
+이 검사용 컴퓨터에는 SPI 장치가 없어서 실행하면 `/dev/spidev0.0: No such file or directory`만 나옵니다. gcc 14와 clang 18로 경고 없이 컴파일되는 것까지 확인했습니다. 보내는 버퍼와 받는 버퍼의 길이가 같은 것에 주목하세요. 보낸 만큼 받습니다. 구조체의 버퍼 칸이 포인터가 아니라 `uint64_t`인 까닭은 32비트 프로그램과 64비트 커널 사이에서도 구조체 크기가 같게 하려는 것입니다. 실제 코드에서는 모드·속도 ioctl의 반환값도 확인합니다.
+
+<Note>
+라즈베리파이에서는 `raspi-config`로 SPI를 켜면 `/dev/spidev0.0`과 `/dev/spidev0.1`이 생깁니다(CS 두 개). 선이 짧고 속도를 장치가 허락하는 만큼만 올리면 문제가 적지만, 브레드보드의 긴 점퍼선에서 수십 MHz를 쓰면 신호가 무너집니다. 처음에는 1MHz 정도로 시작해 이름표 값이 맞게 읽히는지부터 봅니다.
+</Note>
+
+## 셋을 견주면
+
+| | UART | I2C | SPI |
+| --- | --- | --- | --- |
+| 선 | 2 + GND | 2 + GND | 3 + 장치당 CS 하나 + GND |
+| 장치 고르기 | 일대일 | 7비트 주소 | CS 선 |
+| 받았다는 확인 | 없음 | ACK/NACK | 없음 |
+
+UART는 서로 다른 기기 사이, I2C는 느리지만 많은 센서, SPI는 빠른 데이터(화면, 저장 장치)에 주로 씁니다.
+
+## 정리
+
+- SPI는 SCLK, MOSI, MISO와 장치마다의 CS 선을 쓰고, 주소 대신 CS를 내려 장치를 고른다
+- 밀기 레지스터가 맞바뀌므로 보내는 순간 받고, 값을 받으려면 아무 바이트라도 보내야 한다
+- 장치의 모드(CPOL·CPHA)와 명령 약속을 데이터시트에서 확인하고, 리눅스에서는 `/dev/spidevB.C`와 `SPI_IOC_MESSAGE`로 교환한다

@@ -1,0 +1,129 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'Qt Test: 시험 클래스와 QCOMPARE, 데이터 주도 시험, QSignalSpy로 시그널 확인, 실패 보고 읽기';
+
+Qt에는 단위 시험 도구 **Qt Test**가 들어 있습니다. 다른 시험 프레임워크(GoogleTest, Catch2)도 Qt와 함께 쓸 수 있지만, Qt Test는 시그널 기록, 이벤트 흉내([「기본 위젯」](#/read/cpp-qt/wid-basic)의 `QTest::keyClicks`), 이벤트 루프 기다리기 같은 Qt다운 기능을 바로 제공합니다. 시험 하나는 시험 클래스의 `private slots:` 함수 하나입니다.
+
+## 로마 숫자와 계수기 시험
+
+```cpp qt=Test
+#include <QFile>
+#include <QRegularExpression>
+#include <QSignalSpy>
+#include <QTemporaryDir>
+#include <QTest>
+#include <cstdio>
+
+// 시험할 코드: 로마 숫자 바꾸기와 시그널을 내는 계수기
+QString toRoman(int n) {
+    const std::pair<int, const char*> table[] = {
+        {1000, "M"}, {900, "CM"}, {500, "D"}, {400, "CD"}, {100, "C"}, {90, "XC"},
+        {50, "L"}, {40, "XL"}, {10, "X"}, {9, "IX"}, {5, "V"}, {4, "IV"}, {1, "I"}};
+    QString out;
+    for (auto [v, s] : table) while (n >= v) { out += s; n -= v; }
+    return out;
+}
+class Counter : public QObject {
+    Q_OBJECT
+public:
+    void add(int n) { if (n > 0) emit changed(total += n); }
+signals:
+    void changed(int total);
+private:
+    int total = 0;
+};
+
+// 시험 클래스: private slots 하나하나가 시험 하나
+class TestBasics : public QObject {
+    Q_OBJECT
+private slots:
+    void roman_data() {                        // 데이터 표: 행마다 시험이 한 번씩
+        QTest::addColumn<int>("number");
+        QTest::addColumn<QString>("expected");
+        QTest::newRow("한 자리") << 4 << "IV";
+        QTest::newRow("두 자리") << 49 << "XLIX";
+        QTest::newRow("올해") << 2026 << "MMXXVI";
+        QTest::newRow("일부러 틀림") << 9 << "VIIII";
+    }
+    void roman() {
+        QFETCH(int, number);
+        QFETCH(QString, expected);
+        QCOMPARE(toRoman(number), expected);   // 다르면 두 값을 모두 보여 준다
+    }
+    void signals_() {
+        Counter c;
+        QSignalSpy spy(&c, &Counter::changed); // 시그널을 기록하는 첩자
+        c.add(2);
+        c.add(0);                              // 0은 무시되어야 한다
+        c.add(3);
+        QCOMPARE(spy.count(), 2);
+        QCOMPARE(spy.at(1).at(0).toInt(), 5);
+    }
+    void skipped() { QSKIP("이 플랫폼에서는 건너뜀"); }
+};
+
+int main(int argc, char** argv) {
+    QCoreApplication app(argc, argv);
+    TestBasics t;
+    QTemporaryDir dir;
+    QString log = dir.filePath("log.txt");
+    int failed = QTest::qExec(&t, {"test", "-o", log + ",txt"});
+    // 보통은 그냥 실행해 터미널에서 본다. 여기서는 걸린 시간(ms)만 지우고 보여 준다
+    QFile f(log);
+    f.open(QIODevice::ReadOnly);
+    QString text = QString::fromUtf8(f.readAll());
+    text.remove(QRegularExpression(R"(, \d+ms)"));
+    text.remove(QRegularExpression(R"(Config: .*\n)"));
+    text.replace(QRegularExpression(R"(Loc: \[.*/)"), "Loc: [");   // 폴더 경로 빼기
+    std::printf("%s실패한 시험 수(반환값): %d\n", qPrintable(text), failed);
+    return 0;
+}
+#include "main.moc"
+```
+
+```text
+********* Start testing of TestBasics *********
+PASS   : TestBasics::initTestCase()
+PASS   : TestBasics::roman(한 자리)
+PASS   : TestBasics::roman(두 자리)
+PASS   : TestBasics::roman(올해)
+FAIL!  : TestBasics::roman(일부러 틀림) Compared values are not the same
+   Actual   (toRoman(number)): "IX"
+   Expected (expected)       : "VIIII"
+   Loc: [main.cpp(42)]
+PASS   : TestBasics::signals_()
+SKIP   : TestBasics::skipped() 이 플랫폼에서는 건너뜀
+   Loc: [main.cpp(53)]
+PASS   : TestBasics::cleanupTestCase()
+Totals: 6 passed, 1 failed, 1 skipped, 0 blacklisted
+********* Finished testing of TestBasics *********
+실패한 시험 수(반환값): 1
+```
+
+보통은 `QTEST_MAIN(TestBasics)` 한 줄로 `main`을 만들고 실행 파일을 그냥 돌립니다. 예제는 출력을 매번 같게 하려고 결과를 파일로 받아, 실행할 때마다 달라지는 걸린 시간과 소스 파일의 폴더 경로만 지우고 보여 주었습니다.
+
+## 시험 쓰기
+
+- **QCOMPARE(실제, 기대)**: 다르면 두 값과 식, 파일과 줄 번호를 보여 주고 그 시험을 멈춥니다. "일부러 틀림" 행에서 `toRoman(9)`가 "IX"였고 기대가 "VIIII"였다는 것이 그대로 찍혔습니다. `QString`, `QList`, `QVariant` 같은 Qt 타입은 값을 읽기 좋게 출력합니다
+- **QVERIFY(조건)**: 참인지만 봅니다. 실패 원인을 알 수 없으므로, 값을 비교할 수 있으면 `QCOMPARE`를 씁니다
+- **데이터 주도 시험**: `roman_data()`에 열과 행을 정의하면 `roman()`이 행마다 한 번씩 돌고, `QFETCH`로 그 행의 값을 꺼냅니다. 행 이름("올해")이 결과에 붙어 어느 경우가 실패했는지 바로 압니다. 경계값을 표로 늘어놓기 좋습니다
+- **QSKIP**: 이 환경에서 할 수 없는 시험(장치, 네트워크, 특정 플랫폼)을 실패가 아닌 건너뜀으로 표시합니다
+- `initTestCase`·`cleanupTestCase`(전체 전후), `init`·`cleanup`(시험마다 전후) 슬롯을 만들면 준비와 정리를 넣을 수 있습니다. 출력의 첫 줄과 마지막 줄이 그것입니다
+
+## 시그널 시험
+
+`QSignalSpy`는 객체의 시그널을 듣고 발생할 때마다 인자를 기록합니다. 2, 0, 3을 더했을 때 0은 무시되어야 하므로 시그널은 두 번, 두 번째의 인자는 합계 5여야 합니다. 비동기 동작(네트워크 응답, 타이머)은 `spy.wait(5000)`이나 `QTRY_COMPARE(spy.count(), 1)`로 이벤트 루프를 돌리며 기다립니다.
+
+## 빌드에 넣기
+
+CMake에서는 시험마다 실행 파일을 만들고 `add_test(NAME basics COMMAND test_basics)`로 등록하면 `ctest`가 모두 돌립니다. 시험 실행 파일은 실패한 시험 수를 종료 코드로 돌려주므로(예제의 반환값 1), 지속적 통합 서버가 그대로 성공·실패를 판단합니다. `-o 결과.xml,junitxml`로 JUnit 형식 보고서를 만들 수도 있습니다.
+
+<Note>
+위젯 시험은 화면이 없는 서버에서도 `QT_QPA_PLATFORM=offscreen`으로 돌릴 수 있습니다. 이 책의 위젯 예제들이 그렇게 실행되었습니다. QML 화면은 Qt Quick Test 모듈의 `TestCase` 요소로 QML 안에서 시험을 쓰는 방법이 있습니다. 시험할 클래스가 GUI에 묶여 있으면 시험이 어려워지므로, 로직을 위젯에서 떼어 내 `QObject`나 평범한 클래스로 두는 구조가 시험을 쉽게 만듭니다.
+</Note>
+
+## 정리
+
+- Qt Test에서는 시험 클래스의 private slots가 시험 하나씩이고, QCOMPARE가 실패한 값과 위치를 보여 준다
+- _data 함수로 표를 만들어 데이터 주도 시험을 하고, QSKIP으로 할 수 없는 시험을 건너뛴다
+- QSignalSpy로 시그널의 횟수와 인자를 확인하며, 시험 실행 파일은 실패 수를 종료 코드로 돌려줘 ctest와 CI에 붙는다

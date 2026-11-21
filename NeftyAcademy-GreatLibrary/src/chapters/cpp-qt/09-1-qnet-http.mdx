@@ -1,0 +1,126 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'HTTP 요청: QNetworkAccessManager로 GET과 POST, 시그널로 응답 받기, 오류와 리다이렉트, 응답 정리';
+
+웹 API를 부르거나, 업데이트를 확인하거나, 파일을 내려받는 일은 `QNetworkAccessManager`(줄여서 NAM)로 합니다. 핵심은 **막히지 않는다**는 점입니다. `get()`은 요청을 보내자마자 `QNetworkReply`를 돌려주고, 응답이 오면 그 객체가 시그널을 냅니다. 이벤트 루프가 계속 돌기 때문에 창이 얼지 않고, 스레드도 필요 없습니다.
+
+## 네 가지 요청
+
+외부 인터넷 대신, 같은 프로그램 안에 127.0.0.1에서 도는 작은 HTTP 서버를 띄우고 요청을 차례로 보냈습니다.
+
+```cpp qt=Network
+#include <QCoreApplication>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QMetaEnum>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QTcpServer>
+#include <QTcpSocket>
+#include <cstdio>
+#include <functional>
+
+// 예제용 아주 작은 HTTP 서버(같은 프로그램 안, 127.0.0.1)
+void serve(QTcpServer& srv) {
+    QObject::connect(&srv, &QTcpServer::newConnection, [&srv] {
+        QTcpSocket* s = srv.nextPendingConnection();
+        QObject::connect(s, &QTcpSocket::readyRead, s, [s] {
+            QByteArray req = s->readAll();
+            QByteArray line = req.left(req.indexOf("\r\n"));
+            QByteArray status = "200 OK", type = "application/json", body;
+            if (line.startsWith("GET /hello"))
+                body = R"({"message":"안녕","n":3})";
+            else if (line.startsWith("POST /echo"))
+                // 받은 본문 그대로
+                body = req.mid(req.indexOf("\r\n\r\n") + 4);
+            else if (line.startsWith("GET /old"))
+                status = "301 Moved Permanently", body = "";
+            else
+                status = "404 Not Found", type = "text/plain", body = "없음";
+            QByteArray head = "HTTP/1.1 " + status + "\r\nContent-Type: " + type;
+            head += "\r\nContent-Length: " + QByteArray::number(body.size());
+            if (status.startsWith("301")) head += "\r\nLocation: /hello";
+            head += "\r\nConnection: close\r\n\r\n";
+            s->write(head + body);
+            s->disconnectFromHost();
+        });
+    });
+}
+
+int main(int argc, char** argv) {
+    QCoreApplication app(argc, argv);
+    QTcpServer srv;
+    srv.listen(QHostAddress::LocalHost, 0);       // 빈 포트 아무거나
+    serve(srv);
+    QString base = QString("http://127.0.0.1:%1").arg(srv.serverPort());
+
+    QNetworkAccessManager net;                    // 앱에 하나 두고 계속 쓴다
+    QList<std::function<QNetworkReply*()>> jobs;   // 차례대로 보낼 요청들
+    QStringList names{"GET", "POST", "301", "404"};
+    jobs << [&] { return net.get(QNetworkRequest(QUrl(base + "/hello"))); };
+    jobs << [&] {
+        QNetworkRequest post(QUrl(base + "/echo"));
+        post.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+        QJsonObject msg{{"message", "되돌려 줘"}};
+        return net.post(post, QJsonDocument(msg).toJson());
+    };
+    jobs << [&] { return net.get(QNetworkRequest(QUrl(base + "/old"))); };
+    jobs << [&] { return net.get(QNetworkRequest(QUrl(base + "/nothing"))); };
+
+    std::function<void(int)> next = [&](int i) {
+        if (i == jobs.size()) { app.quit(); return; }
+        // 보내고 바로 돌아온다(막히지 않음)
+        QNetworkReply* r = jobs[i]();
+        QObject::connect(r, &QNetworkReply::finished, &app, [&, r, i] {
+            int code =
+                r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            QByteArray body = r->readAll();
+            if (r->error() != QNetworkReply::NoError) {
+                auto e = QMetaEnum::fromType<QNetworkReply::NetworkError>();
+                std::printf("[%s] 실패: HTTP %d, %s\n", qPrintable(names[i]), code,
+                            e.valueToKey(r->error()));
+            } else {
+                QJsonObject o = QJsonDocument::fromJson(body).object();
+                std::printf("[%s] HTTP %d, 주소 %s, %s\n", qPrintable(names[i]),
+                            code, qPrintable(r->url().path()),
+                            qPrintable(o.value("message").toString()));
+            }
+            r->deleteLater();                     // 응답 객체는 직접 지운다
+            next(i + 1);
+        });
+    };
+    next(0);
+    return app.exec();
+}
+```
+
+```text
+[GET] HTTP 200, 주소 /hello, 안녕
+[POST] HTTP 200, 주소 /echo, 되돌려 줘
+[301] HTTP 200, 주소 /hello, 안녕
+[404] 실패: HTTP 404, ContentNotFoundError
+```
+
+요청을 한꺼번에 보내면 응답이 도착하는 순서가 매번 달라지므로, 예제는 앞 응답이 끝난 뒤 다음 요청을 보냈습니다. 실제 앱에서는 여러 요청을 동시에 보내도 됩니다. NAM이 같은 서버에 대한 연결을 묶어 관리합니다.
+
+## 요청과 응답
+
+- **NAM은 앱에 하나**: 요청마다 새로 만들지 말고 하나를 두고 계속 씁니다. 연결 재사용, 쿠키, 캐시, 프록시 설정을 NAM이 들고 있습니다
+- **QNetworkRequest**에 URL과 머리글을 담습니다. POST는 `setHeader(ContentTypeHeader, "application/json")`처럼 본문 형식을 밝히고, 본문은 바이트 배열로 넘깁니다. [「JSON」](#/read/cpp-qt/core-json)의 `toJson()` 결과를 그대로 넣었습니다
+- **finished** 시그널이 오면 `readAll()`로 본문을, `attribute(HttpStatusCodeAttribute)`로 상태 코드를 읽습니다. 큰 파일은 `readyRead` 시그널마다 조금씩 읽어 파일에 쓰고, `downloadProgress`로 진행률을 보여 줍니다
+
+## 오류와 리다이렉트
+
+- 404 같은 HTTP 오류도 `error()`가 `NoError`가 아니게 되어 알 수 있습니다. 연결 거부(`ConnectionRefusedError`), 이름 풀기 실패(`HostNotFoundError`), 시간 초과(`OperationCanceledError`) 같은 네트워크 오류도 같은 곳으로 옵니다. 오류일 때도 본문(서버의 오류 설명)을 읽을 수 있습니다
+- Qt 6의 NAM은 기본으로 **리다이렉트를 따라갑니다**. 단, HTTPS에서 HTTP로 내려가는 덜 안전한 이동은 따라가지 않습니다(`NoLessSafeRedirectPolicy`). `/old`에 보낸 요청의 최종 주소가 `/hello`로 나온 이유입니다
+- 응답이 끝없이 오지 않는 서버에 대비해 `request.setTransferTimeout(밀리초)`로 시간 제한을 둡니다
+
+<Note>
+`QNetworkReply`는 NAM이 만들어 주지만 **지우는 것은 우리 몫**입니다. `finished`를 처리한 뒤 `deleteLater()`를 부르지 않으면 요청마다 객체가 쌓입니다. 슬롯 안에서 바로 `delete`하지 않고 `deleteLater`를 쓰는 이유는 [「부모와 자식, 수명」](#/read/cpp-qt/obj-ownership)에서 본 대로, 시그널을 보낸 객체를 그 시그널 처리 중에 지우면 위험하기 때문입니다. HTTPS를 쓰려면 Qt가 TLS 백엔드(보통 OpenSSL)를 찾을 수 있어야 하며, 배포할 때 함께 챙겨야 합니다.
+</Note>
+
+## 정리
+
+- QNetworkAccessManager는 요청을 보내고 바로 QNetworkReply를 돌려주며, 응답은 finished 시그널로 받으므로 창이 얼지 않는다
+- 상태 코드와 error()로 HTTP 오류와 네트워크 오류를 함께 처리하고, Qt 6은 안전한 리다이렉트를 따라간다
+- NAM은 앱에 하나만 두고, 처리한 응답 객체는 deleteLater로 지운다

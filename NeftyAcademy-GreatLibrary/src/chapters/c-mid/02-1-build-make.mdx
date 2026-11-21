@@ -1,0 +1,147 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '파일이 여럿인 C 프로젝트를 make로 빌드하기: 규칙과 변수, 바뀐 것만 다시 컴파일하는 원리, 헤더 의존성';
+
+파일이 하나면 `gcc main.c -o app`으로 충분합니다. 파일이 열 개가 되면 매번 긴 명령을 치기도 귀찮고, 하나만 고쳤는데 열 개를 다 다시 컴파일하는 것도 아깝습니다. **make**는 "무엇을 만들려면 무엇이 필요하고, 어떤 명령으로 만드는가"를 적어 두면, 바뀐 것만 골라 다시 만들어 주는 도구입니다. 1976년에 나온 도구지만 지금도 C 프로젝트의 기본입니다.
+
+## 예제 프로젝트
+
+파일 셋으로 된 작은 프로젝트입니다. 헤더와 소스를 나누는 까닭은 「컴퓨터 프로그래밍 초급」의 [「헤더를 포함한 C 파일」](#/read/c-basic/headers)과 [「전방 선언」](#/read/c-basic/forward-declaration)에서 봤습니다.
+
+`util.h`
+
+```c nocheck
+#ifndef UTIL_H
+#define UTIL_H
+
+int clamp(int v, int lo, int hi);
+
+#endif
+```
+
+`util.c`
+
+```c nocheck
+#include "util.h"
+
+int clamp(int v, int lo, int hi)
+{
+    return v < lo ? lo : v > hi ? hi : v;
+}
+```
+
+`main.c`
+
+```c nocheck
+#include <stdio.h>
+#include "util.h"
+
+int main(void)
+{
+    printf("%d %d %d\n", clamp(-5, 0, 100), clamp(42, 0, 100), clamp(250, 0, 100));
+    return 0;
+}
+```
+
+## Makefile
+
+같은 폴더에 `Makefile`이라는 이름으로 아래를 적습니다.
+
+```make
+CC      = gcc-14
+CFLAGS  = -std=c23 -Wall -Wextra -O2 -MMD -MP
+OBJS    = main.o util.o
+
+app: $(OBJS)
+	$(CC) $(OBJS) -o $@
+
+%.o: %.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+-include $(OBJS:.o=.d)
+
+.PHONY: clean
+clean:
+	rm -f app $(OBJS) $(OBJS:.o=.d)
+```
+
+<Note kind="warn">
+명령 줄(`$(CC) …`, `rm …`) 앞의 들여쓰기는 반드시 **탭 문자** 하나여야 합니다. 빈칸 네 개로 들여 쓰면 `missing separator`라는 오류가 납니다. 편집기가 탭을 빈칸으로 바꾸게 설정돼 있다면 Makefile에서는 꺼야 합니다.
+</Note>
+
+## 규칙 읽는 법
+
+Makefile의 뼈대는 **규칙**입니다.
+
+```make
+목표: 재료들
+	목표를 만드는 명령
+```
+
+`app: $(OBJS)`는 "`app`을 만들려면 `main.o`와 `util.o`가 있어야 하고, 둘을 링크하는 명령으로 만든다"는 뜻입니다. make는 목표와 재료 파일의 **고친 시각**을 견줍니다. 재료가 목표보다 새로우면 명령을 다시 실행하고, 아니면 건너뜁니다. 이것이 바뀐 것만 다시 만드는 원리의 전부입니다.
+
+| 표기 | 뜻 |
+| --- | --- |
+| `CC = gcc-14` | 변수 정의. `$(CC)`로 꺼내 쓴다 |
+| `%.o: %.c` | 패턴 규칙. 아무 `.c`로 같은 이름의 `.o`를 만든다 |
+| `$@` | 지금 규칙의 목표(`app`, `main.o`) |
+| `$<` | 첫 번째 재료(`main.c`) |
+| `$^` | 재료 전부 |
+| `$(OBJS:.o=.d)` | `OBJS`의 `.o`를 `.d`로 바꾼 목록 |
+| `.PHONY: clean` | `clean`은 파일이 아니라 일의 이름이라는 표시 |
+
+`make`라고만 치면 맨 처음 나온 규칙(`app`)을 만듭니다. `make clean`은 `clean` 규칙을 실행해 만든 것들을 지웁니다.
+
+## 돌려 보기
+
+```text nocheck
+$ make
+gcc-14 -std=c23 -Wall -Wextra -O2 -MMD -MP -c main.c -o main.o
+gcc-14 -std=c23 -Wall -Wextra -O2 -MMD -MP -c util.c -o util.o
+gcc-14 main.o util.o -o app
+$ ./app
+0 42 100
+$ make
+make: 'app' is up to date.
+$ touch util.c
+$ make
+gcc-14 -std=c23 -Wall -Wextra -O2 -MMD -MP -c util.c -o util.o
+gcc-14 main.o util.o -o app
+```
+
+처음에는 셋 다 실행합니다. 아무것도 바꾸지 않고 다시 부르면 할 일이 없다고 합니다. `util.c`의 시각만 새로 하면(`touch`) `util.o`와 `app`만 다시 만들고, `main.o`는 그대로 씁니다. 파일이 수백 개인 프로젝트에서는 이 차이가 몇 분과 몇 초의 차이가 됩니다.
+
+## 헤더 의존성
+
+함정이 하나 있습니다. `main.o`는 `main.c`뿐 아니라 `util.h`에도 기대고 있습니다. 그런데 규칙에는 `main.o: main.c`만 적혀 있으니, `util.h`를 고쳐도 make는 `main.o`를 다시 만들 까닭을 모릅니다.
+
+`-MMD -MP`와 `-include` 줄을 뺀 Makefile로 실험해 봤습니다. `util.h`와 `util.c`에서 첫 인자를 `int`에서 `long`으로 바꾸고 `make`를 하면 이렇게 됩니다.
+
+```text nocheck
+gcc-14 -std=c23 -Wall -Wextra -O2 -c util.c -o util.o
+gcc-14 main.o util.o -o app
+```
+
+`main.o`는 다시 컴파일되지 않았습니다. 옛 선언(`int`)으로 컴파일된 `main.o`와 새 정의(`long`)로 컴파일된 `util.o`가 오류도 경고도 없이 링크됐습니다. 이번에는 우연히 같은 레지스터를 써서 돌아가지만, 구조체가 바뀌었다면 엉뚱한 값을 읽는 버그가 됩니다. 이런 일 때문에 "`make clean` 하고 다시 빌드하니 고쳐졌다"는 말이 나옵니다.
+
+해결책이 위 Makefile의 `-MMD -MP`입니다. 컴파일러가 `.o`를 만들면서 그 파일이 읽은 헤더 목록을 `.d` 파일로 함께 적어 줍니다.
+
+```text nocheck
+$ cat main.d
+main.o: main.c util.h
+util.h:
+```
+
+`-include $(OBJS:.o=.d)`가 이 규칙들을 Makefile에 끌어들이므로, 이제 `util.h`를 고치면 `main.o`와 `util.o`가 모두 다시 컴파일됩니다. 맨 앞의 `-`는 처음 빌드할 때처럼 `.d` 파일이 아직 없어도 오류를 내지 말라는 뜻이고, `-MP`가 만든 `util.h:` 줄은 헤더를 지웠을 때 make가 멈추지 않게 해 줍니다.
+
+<Note kind="tip">
+`make -j4`처럼 `-j`를 주면 서로 기대지 않는 목표들을 동시에 만듭니다. 코어가 여럿인 기계에서는 빌드가 그만큼 빨라집니다([「코어와 스레드」](#/read/basics/terms-core-thread)). 규칙에 재료를 빠뜨리면 순서가 꼬여 가끔씩만 실패하는 빌드가 되니, 의존성을 정확히 적는 것이 먼저입니다.
+</Note>
+
+이 Makefile은 리눅스와 맥에서 그대로 쓸 수 있지만, 윈도우의 MSVC와는 옵션 모양부터 달라서 맞지 않습니다. 여러 OS와 컴파일러를 함께 지원하려면 다음 쪽의 [「CMake와 Ninja」](#/read/c-mid/build-cmake)를 씁니다.
+
+## 정리
+
+- make는 "목표: 재료"와 명령으로 된 규칙을 읽고, 재료가 목표보다 새로울 때만 명령을 다시 실행한다
+- `$@`, `$<` 같은 자동 변수와 `%.o: %.c` 패턴 규칙으로 파일마다 규칙을 적지 않아도 된다
+- 헤더 의존성은 규칙에 저절로 들어가지 않으므로 `-MMD -MP`로 `.d` 파일을 만들어 `-include`해야 헤더를 고쳤을 때 제대로 다시 빌드된다

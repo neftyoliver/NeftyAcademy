@@ -1,0 +1,126 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'OS와 컴파일러가 메모리를 지키는 장치: ASLR과 PIE, 실행 금지(NX), 읽기 전용 페이지, 비밀 지우기';
+
+[「의도하지 않은 코드 실행」](#/read/c-mid/hack-code-exec)의 표에서 쓰기와 실행 나누기(NX)와 주소 흩어 놓기(ASLR)는 다음으로 미뤘습니다. 이 쪽은 그 둘을 포함해, OS와 컴파일러가 프로그램의 메모리를 지키는 장치를 하나씩 확인합니다. 어떤 것은 저절로 켜져 있고, 어떤 것은 프로그래머가 직접 써야 합니다.
+
+## 주소 흩어 놓기: ASLR
+
+공격자가 프로그램의 흐름을 빼앗으려면 "어디로 뛸지", 곧 노리는 코드의 **주소**를 알아야 합니다. 그래서 OS는 프로그램을 실행할 때마다 코드, 힙, 스택, 라이브러리를 무작위 주소에 올립니다. 이것이 ASLR(Address Space Layout Randomization)입니다.
+
+```c flags=-Wno-pedantic
+#include <stdio.h>
+#include <stdlib.h>
+
+int global = 1;
+
+int main(void)
+{
+    int local = 2;
+    int *heap = malloc(sizeof *heap);
+    printf("코드 %p  전역 %p\n", (void *)main, (void *)&global);
+    printf("힙   %p  스택 %p  printf %p\n", (void *)heap, (void *)&local,
+           (void *)printf);
+    free(heap);
+    return 0;
+}
+```
+
+같은 프로그램을 두 번 돌렸습니다. 함수의 주소를 `void *`로 바꿔 찍는 것은 ISO C가 보장하지 않는 일이라 `-Wpedantic` 경고가 나지만, 리눅스에서는 문제없이 동작합니다.
+
+```text nocheck
+코드 0x55ca17b35199  전역 0x55ca17b38010
+힙   0x55ca259752a0  스택 0x7ffd7749c32c  printf 0x7f1d39a60100
+
+코드 0x55eec9261199  전역 0x55eec9264010
+힙   0x55eeca5ce2a0  스택 0x7ffe6d8f675c  printf 0x7faf62c60100
+```
+
+다섯 주소가 모두 바뀌었습니다. 다만 끝자리 세 개(`…199`, `…010`, `…100`)는 그대로입니다. 4KiB 페이지 단위로 통째로 옮기기 때문에 페이지 안의 위치는 변하지 않습니다. [「프로세스와 메모리 관리」](#/read/basics/os-process-memory)의 `fork` 예제에서 실행할 때마다 주소가 달랐던 것도 이 때문입니다. 리눅스에서는 `/proc/sys/kernel/randomize_va_space`가 `2`이면 전부 흩어 놓는다는 뜻입니다.
+
+## PIE: 코드도 흩어 놓으려면
+
+코드까지 아무 주소에나 올리려면 실행 파일이 **어느 주소에서도 돌아가게** 컴파일돼 있어야 합니다. 이것이 PIE(Position-Independent Executable)이고, 지금의 우분투 GCC는 기본으로 PIE를 만듭니다. `-no-pie`로 옛 방식의 실행 파일을 만들어 견줘 봅니다.
+
+```text nocheck
+코드 0x401186  전역 0x404028
+힙   0x253c72a0  스택 0x7ffc6557f63c  printf 0x7f8f0c060100
+
+코드 0x401186  전역 0x404028
+힙   0xc4552a0  스택 0x7ffe1ee2029c  printf 0x7ff926e60100
+```
+
+힙, 스택, `printf`는 여전히 바뀌지만 **코드와 전역 변수는 매번 같은 주소**입니다. 공격자에게 고정된 발판을 주는 셈입니다. `readelf -h`의 `Type`이 PIE는 `DYN`, 옛 방식은 `EXEC`로 나옵니다([「ELF」](#/read/c-mid/exe-elf)).
+
+## 실행 금지: NX
+
+[「ELF」](#/read/c-mid/exe-elf)에서 세그먼트마다 읽기·쓰기·실행 권한이 따로 붙는 것을 봤습니다. 스택도 마찬가지입니다.
+
+```text nocheck
+$ readelf -lW where | grep GNU_STACK
+  GNU_STACK … RW
+$ gcc-14 -z execstack where.c -o where-x && readelf -lW where-x | grep GNU_STACK
+  GNU_STACK … RWE
+```
+
+기본 빌드에서 스택은 `RW`, 곧 읽고 쓸 수는 있어도 **실행할 수는 없습니다.** CPU의 NX(No-eXecute) 비트가 이것을 강제해서, 공격자가 입력으로 스택에 기계어를 써 넣어도 그곳으로 뛰는 순간 프로그램이 멈춥니다. 일부러 `-z execstack`을 주어야 `RWE`가 됩니다. 이 밖에 `readelf -d`의 `BIND_NOW`, `FLAGS_1: NOW PIE`는 동적 라이브러리 함수의 주소표를 시작할 때 다 채우고 읽기 전용으로 잠근다는 표시(RELRO)입니다.
+
+## 내 데이터를 읽기 전용으로
+
+이런 보호를 내 프로그램 안에서도 쓸 수 있습니다. POSIX의 `mprotect`는 메모리 페이지의 권한을 바꿉니다. 설정을 다 읽은 뒤 그 페이지를 읽기 전용으로 바꿔 두면, 나중에 버그나 공격으로 덮어쓰려 할 때 바로 멈춥니다.
+
+```c flags=-D_DEFAULT_SOURCE norun
+#include <stdio.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+int main(void)
+{
+    long page = sysconf(_SC_PAGESIZE);
+    char *p = mmap(NULL, (size_t)page, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    strcpy(p, "설정값");
+    mprotect(p, (size_t)page, PROT_READ);      // 이제부터 읽기만
+    printf("읽기: %s (페이지 %ld바이트)\n", p, page);
+    fflush(stdout);
+    p[0] = 'X';                                 // 쓰기를 시도한다
+    puts("여기까지 오지 못한다");
+    return 0;
+}
+```
+
+```text nocheck
+읽기: 설정값 (페이지 4096바이트)
+Segmentation fault      ./prot
+```
+
+권한은 페이지(4,096바이트) 단위로만 바꿀 수 있어서, `malloc` 대신 페이지 단위로 메모리를 받는 `mmap`을 썼습니다.
+
+## 비밀을 확실히 지우기
+
+비밀번호나 암호 키를 다 쓰면 메모리에서 지워야 합니다. 프로그램이 죽어 메모리 덤프가 남거나, 다른 버그로 메모리를 읽혀도 비밀이 새지 않게 하려는 것입니다. 그런데 이 코드는 의도대로 되지 않습니다.
+
+```c nocheck
+void handle(void)
+{
+    char key[32];
+    strcpy(key, "my-secret-password");
+    use(key);
+    memset(key, 0, sizeof key);         // 지우고 끝내려 한다
+}
+```
+
+`gcc-14 -O2`로 컴파일한 어셈블리에는 `memset`이 **없습니다.** `key`는 함수가 끝나면 다시 읽히지 않으니, 컴파일러가 "아무도 안 보는 쓰기"라며 지워 버린 것입니다. 최적화로서는 옳지만 보안으로서는 구멍입니다.
+
+이럴 때는 지우지 않겠다고 약속한 함수를 씁니다. C23은 `memset_explicit`을 표준에 넣었지만, 이 책의 검사 기계(glibc 2.39)에는 아직 없었습니다. 대신 glibc와 BSD에 있는 `explicit_bzero(key, sizeof key)`를 쓰면 `-O2`에서도 호출이 남습니다(우분투에서는 크기를 확인하는 판인 `__explicit_bzero_chk`로 불립니다). 윈도우에서는 `SecureZeroMemory`가 같은 일을 합니다.
+
+<Note kind="tip">
+이 모든 장치는 배포판의 기본 설정으로 이미 켜져 있는 경우가 많습니다. 내가 할 일은 **끄지 않는 것**입니다. 어떤 예제나 블로그가 문제를 "해결"한다며 `-no-pie`, `-z execstack`, `-fno-stack-protector`를 권한다면, 무엇을 잃는지 먼저 따져 봐야 합니다. 이 책의 앞 쪽들에서 이 옵션들을 쓴 것은 원리를 보여 주려는 실험이었습니다.
+</Note>
+
+## 정리
+
+- ASLR은 실행할 때마다 코드, 힙, 스택, 라이브러리의 주소를 흩어 놓고, 코드까지 흩어 놓으려면 PIE로 빌드해야 한다
+- NX는 스택처럼 쓸 수 있는 곳을 실행할 수 없게 하며, `mprotect`로 내 데이터 페이지를 읽기 전용으로 잠글 수도 있다
+- 비밀을 지우는 `memset`은 최적화로 사라질 수 있으므로 `explicit_bzero`나 C23의 `memset_explicit` 같은 지워지지 않는 함수를 쓴다

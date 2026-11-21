@@ -1,0 +1,105 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '빌드 파일을 만들어 주는 CMake와 빠른 실행기 Ninja: 타깃과 속성, 설정과 빌드, 컴파일러마다 다른 옵션';
+
+[「Makefile」](#/read/c-mid/build-make)의 Makefile은 GCC와 Clang에서는 잘 돌지만 윈도우의 MSVC와는 맞지 않고, 헤더 의존성 같은 것을 손으로 챙겨야 했습니다. **CMake**는 빌드 방법을 한 번 적어 두면 OS와 컴파일러에 맞는 빌드 파일(Makefile, Ninja 파일, 비주얼 스튜디오 프로젝트)을 **만들어 주는** 도구입니다. 지금 C·C++ 오픈소스 프로젝트의 대부분이 CMake를 씁니다. 예제는 CMake 3.28과 Ninja 1.11로 돌렸습니다.
+
+## 같은 프로젝트를 CMake로
+
+앞 쪽의 `util.h`, `util.c`, `main.c`를 그대로 두고, Makefile 대신 `CMakeLists.txt`를 적습니다.
+
+```cmake
+cmake_minimum_required(VERSION 3.20)
+project(clampdemo LANGUAGES C)
+
+set(CMAKE_C_STANDARD 23)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
+
+add_library(util STATIC util.c)
+target_include_directories(util PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(app main.c)
+target_link_libraries(app PRIVATE util)
+
+if(CMAKE_C_COMPILER_ID STREQUAL "MSVC")
+    target_compile_options(app PRIVATE /W4)
+else()
+    target_compile_options(app PRIVATE -Wall -Wextra)
+endif()
+```
+
+컴파일 명령은 한 줄도 없습니다. 대신 **무엇을 만드는지**만 적었습니다.
+
+| 줄 | 뜻 |
+| --- | --- |
+| `project(… LANGUAGES C)` | C 프로젝트라고 알린다. CMake가 컴파일러를 찾는다 |
+| `CMAKE_C_STANDARD 23` | C23으로 컴파일한다. 옵션 이름(`-std=…`, `/std:…`)은 CMake가 컴파일러에 맞게 고른다 |
+| `CMAKE_C_EXTENSIONS OFF` | GNU 확장 없는 표준 C로(`gnu23` 대신 `c23`) |
+| `add_library(util STATIC …)` | `util`이라는 정적 라이브러리 타깃 |
+| `add_executable(app …)` | `app`이라는 실행 파일 타깃 |
+| `target_link_libraries(app PRIVATE util)` | `app`은 `util`을 쓴다 |
+
+## 타깃과 속성
+
+CMake의 중심은 **타깃**입니다. 라이브러리나 실행 파일 하나가 타깃 하나이고, 헤더 폴더, 컴파일 옵션, 링크할 것 같은 **속성**을 타깃마다 붙입니다.
+
+`target_include_directories(util PUBLIC …)`의 `PUBLIC`이 중요합니다. "이 헤더 폴더는 `util` 자신도 쓰고, `util`을 쓰는 타깃에게도 물려준다"는 뜻입니다. 그래서 `app`에는 헤더 폴더를 따로 적지 않았는데도 `main.c`가 `#include "util.h"`를 찾습니다.
+
+| 낱말 | 자기가 쓰는가 | 나를 쓰는 타깃에게 물려주는가 |
+| --- | --- | --- |
+| `PRIVATE` | 쓴다 | 안 준다 |
+| `PUBLIC` | 쓴다 | 준다 |
+| `INTERFACE` | 안 쓴다 | 준다 |
+
+`app`의 경고 옵션은 `PRIVATE`라서 `app`에만 붙습니다. 컴파일러가 MSVC인지 보고 옵션의 모양을 고른 것도 볼 수 있습니다. 이 분기 덕분에 같은 `CMakeLists.txt`가 윈도우에서도 돕니다.
+
+## 설정과 빌드
+
+CMake는 두 단계로 씁니다.
+
+```sh
+cmake -S . -B build -G Ninja     # 1. 설정: build 폴더에 빌드 파일을 만든다
+cmake --build build              # 2. 빌드: 만든 빌드 파일로 실제 컴파일
+./build/app
+```
+
+```text nocheck
+-- The C compiler identification is GNU 14.2.0
+-- Configuring done (0.2s)
+-- Generating done (0.0s)
+-- Build files have been written to: /tmp/mk/build
+[1/4] Building C object CMakeFiles/util.dir/util.c.o
+[2/4] Building C object CMakeFiles/app.dir/main.c.o
+[3/4] Linking C static library libutil.a
+[4/4] Linking C executable app
+0 42 100
+```
+
+- `-S .`은 소스 폴더, `-B build`는 빌드 결과를 둘 폴더입니다. 소스 폴더를 더럽히지 않고 결과를 한곳에 모으므로, 다 지우고 싶으면 `build` 폴더만 지우면 됩니다
+- `-G Ninja`는 Ninja용 빌드 파일을 만들라는 뜻입니다. 빼면 리눅스에서는 Makefile을 만듭니다
+- 이 실행에서는 `CC=gcc-14`로 컴파일러를 정했습니다. 설정 단계에서 한 번 정하면 `build` 폴더에 기억됩니다
+
+`util.h`를 고치고 다시 `cmake --build build`를 하면 `main.c`와 `util.c`가 모두 다시 컴파일됩니다. 앞 쪽에서 `-MMD -MP`로 손수 챙긴 헤더 의존성을 CMake가 알아서 넣었기 때문입니다. `-v`로 실제 명령을 보면 `-MD -MT … -MF …main.c.o.d` 옵션이 붙어 있습니다.
+
+<Note>
+같은 명령에 `-std=c23`이 아니라 `-std=c2x`가 붙어 있습니다. CMake 3.28은 GCC 14가 `c23`이라는 이름도 받는다는 것을 아직 몰라서, 옛 이름(`c2x`)을 골랐습니다. 두 이름은 같은 뜻이라 문제는 없습니다. 옵션 이름을 직접 적지 않고 `CMAKE_C_STANDARD`로 맡기면 이렇게 CMake가 컴파일러 버전에 맞춰 줍니다.
+</Note>
+
+## Ninja
+
+Ninja는 Make와 같은 일을 하는 빌드 실행기인데, 사람이 직접 쓰기보다 CMake 같은 도구가 만든 파일을 **빠르게 실행하는** 데 집중합니다. 할 일이 없을 때 그것을 알아내는 데 드는 시간이 아주 짧고, 기본으로 코어 수만큼 동시에 컴파일합니다. 위 출력의 `[1/4]`처럼 진행 상황을 한 줄씩 보여 주는 것도 Ninja입니다. 파일이 수천 개인 프로젝트에서는 Make와의 차이가 크게 납니다.
+
+```sh
+sudo apt install cmake ninja-build
+```
+
+<Note kind="tip">
+CMake 옵션을 매번 치는 대신 `CMakePresets.json`에 "디버그용", "새니타이저용" 같은 설정을 이름 붙여 저장해 둘 수 있습니다. 「C++ 고급」의 [「지속적 통합」](#/read/cpp-advanced/tool-ci)에서 프리셋으로 여러 설정을 한꺼번에 빌드하는 법을 봅니다. 외부 라이브러리를 찾아 붙이는 `find_package`는 「C++ 문법」의 [「CMake로 프로젝트 꾸리기」](#/read/cpp-syntax/mod-cmake)에도 나옵니다.
+</Note>
+
+## 정리
+
+- CMake는 무엇을 만드는지(타깃)만 적으면 OS와 컴파일러에 맞는 빌드 파일을 만들어 주고, Ninja는 그것을 빠르게 실행한다
+- 헤더 폴더, 옵션, 링크할 것은 타깃의 속성으로 붙이며, `PUBLIC`·`PRIVATE`·`INTERFACE`가 쓰는 타깃에게 물려줄지를 정한다
+- `cmake -S . -B build`로 설정하고 `cmake --build build`로 빌드하며, 헤더 의존성과 C 표준 옵션은 CMake가 알아서 챙긴다

@@ -1,0 +1,101 @@
+import { Figure, Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'Qt Quick 3D: QML로 3D 장면 쓰기, View3D와 카메라와 빛, 내장 도형과 물리 기반 재질, 2D UI와 섞기';
+
+3D 제품 보기, 계기판의 차량 모형, 의료 영상 뷰어처럼 앱 안에 3D 장면이 필요할 때, 그래픽 API를 직접 다루지 않고 QML로 장면을 **선언**할 수 있습니다. **Qt Quick 3D**는 [「RHI」](#/read/cpp-qt/qgfx-rhi) 위에서 도는 3D 장면 그래프로, 카메라, 빛, 모델, 재질을 QML 객체로 씁니다. 바인딩과 애니메이션도 2D QML과 똑같이 동작합니다.
+
+<Figure caption="예제가 실제로 그린 200×200 화면을 SVG로 옮긴 그림(실제 렌더링은 조명에 따라 면마다 밝기가 다릅니다)">
+  <svg viewBox="0 0 200 200" width={220} role="img" aria-label="검은 배경에 돌아간 주황 정육면체와 오른쪽의 작은 파란 공">
+    <rect width="200" height="200" fill="#000000" />
+    <polygon points="70,58 150,90 132,146 54,108" fill="#e8930c" />
+    <polygon points="70,58 150,90 122,84 92,62" fill="#f6a623" />
+    <polygon points="150,90 132,146 112,140 120,96" fill="#a8650a" />
+    <circle cx="170" cy="98" r="11" fill="#1e7fe0" />
+  </svg>
+</Figure>
+
+## 정육면체와 공
+
+```cpp qt=Quick xvfb
+#include <QGuiApplication>
+#include <QQmlApplicationEngine>
+#include <QQuickWindow>
+#include <QTimer>
+#include <cstdio>
+
+int main(int argc, char** argv) {
+    QGuiApplication app(argc, argv);
+    QQmlApplicationEngine engine;
+    engine.loadData(R"(
+import QtQuick
+import QtQuick3D
+
+Window {
+    width: 200; height: 200; visible: true; color: "black"
+    View3D {
+        anchors.fill: parent
+        environment: SceneEnvironment { clearColor: "black"
+                                        backgroundMode: SceneEnvironment.Color }
+        // z+에서 원점을 본다
+        PerspectiveCamera { position: Qt.vector3d(0, 0, 300) }
+        DirectionalLight { eulerRotation.x: -30 }
+        Model {
+            objectName: "cube"
+            source: "#Cube"                      // 내장 기본 도형(100단위 정육면체)
+            eulerRotation: Qt.vector3d(30, 45, 0)
+            materials: PrincipledMaterial { baseColor: "orange"; roughness: 0.4 }
+        }
+        Model {
+            source: "#Sphere"
+            position: Qt.vector3d(120, 0, 0)
+            scale: Qt.vector3d(0.4, 0.4, 0.4)
+            materials: PrincipledMaterial { baseColor: "dodgerblue" }
+        }
+    }
+}
+)");
+    auto* win = qobject_cast<QQuickWindow*>(engine.rootObjects().value(0));
+    auto api = win->rendererInterface()->graphicsApi();
+    bool software = api == QSGRendererInterface::Software;
+    std::printf("그래픽 API: %s\n", software ? "소프트웨어" : "RHI(GPU API)");
+    QTimer::singleShot(500, [&] {
+        QImage img = win->grabWindow();
+        QColor center = img.pixelColor(img.width() / 2, img.height() / 2);
+        QColor corner = img.pixelColor(2, 2);
+        std::printf("가운데 화소: 빨강이 파랑보다 큼(주황) %s, 모서리: %s\n",
+                    center.red() > center.blue() + 50 ? "예" : "아니오",
+                    qPrintable(corner.name()));
+        app.quit();
+    });
+    return app.exec();
+}
+```
+
+```text
+그래픽 API: RHI(GPU API)
+가운데 화소: 빨강이 파랑보다 큼(주황) 예, 모서리: #000000
+```
+
+3D 렌더링에는 GPU API가 필요하므로, 이 예제는 가상 X 서버와 Mesa의 소프트웨어 렌더러로 실행했습니다. 그린 화면의 가운데가 주황(정육면체), 모서리가 검정(배경)인 것을 화소로 확인했습니다.
+
+## 장면의 구성
+
+- **View3D**: 3D 장면을 2D QML 화면의 한 사각형 안에 그립니다. 그래서 3D 장면 위에 버튼과 글을 겹치거나, 3D 장면 여러 개를 한 창에 둘 수 있습니다. `environment`로 배경색, 안티에일리어싱, 톤 매핑, 하늘 상자(IBL 조명용 HDR 이미지)를 정합니다
+- **카메라**: `PerspectiveCamera`를 (0, 0, 300)에 두었습니다. 기본으로 -z 방향을 보므로 원점의 물체가 보입니다. Qt Quick 3D는 y가 위, 오른손 좌표계를 씁니다([「좌표계의 약속」](#/read/cpp-game-engine/math-conventions))
+- **빛**: `DirectionalLight`(태양처럼 한 방향), `PointLight`, `SpotLight`가 있습니다. 빛이 없으면 물리 기반 재질은 거의 검게 보입니다
+- **Model**: `source: "#Cube"`, `"#Sphere"`, `"#Cylinder"` 같은 내장 도형이나, `balsam` 도구로 glTF·FBX 파일을 변환한 `.mesh`를 씁니다. `position`, `eulerRotation`(또는 `rotation` 쿼터니언), `scale`로 배치합니다
+- **재질**: `PrincipledMaterial`은 금속성(metalness)과 거칠기(roughness)로 표면을 정하는 물리 기반 재질입니다. 직접 셰이더를 쓰려면 `CustomMaterial`을 씁니다
+
+## QML이라서 편한 것
+
+`eulerRotation.y`에 `NumberAnimation`을 걸면 정육면체가 돌고, 슬라이더의 값에 `roughness`를 바인딩하면 사용자가 재질을 바로 바꿔 볼 수 있습니다. 모델을 클릭으로 고르는 것은 `View3D.pick(x, y)`가 해 줍니다. [「기즈모와 선택」](#/read/cpp-game-engine/ed-gizmo)에서 손으로 만든 광선 고르기를 Qt Quick 3D가 대신하는 셈입니다.
+
+<Note>
+Qt Quick 3D는 소프트웨어 렌더링(`QT_QUICK_BACKEND=software`)으로는 그려지지 않습니다. 이 책의 다른 QML 예제가 쓰는 소프트웨어 백엔드 대신, GPU API가 필요합니다. 오픈 소스판의 라이선스는 [「Qt의 구성과 라이선스」](#/read/cpp-qt/start-what)에서 본 대로 모듈마다 다를 수 있으니, 제품에 쓰기 전에 확인하세요.
+</Note>
+
+## 정리
+
+- Qt Quick 3D는 RHI 위의 3D 장면 그래프로, View3D 안에 카메라, 빛, 모델, 재질을 QML 객체로 선언한다
+- 내장 도형이나 변환한 메시를 PrincipledMaterial 같은 물리 기반 재질로 그리고, 위치와 회전과 크기로 배치한다
+- 바인딩과 애니메이션, 2D UI와의 겹침이 그대로 되며, GPU API가 필요해 소프트웨어 백엔드로는 그려지지 않는다

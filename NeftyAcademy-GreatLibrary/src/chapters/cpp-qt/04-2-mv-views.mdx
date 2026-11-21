@@ -1,0 +1,124 @@
+import { Figure, Note } from 'neftyacademy-paragons-bookshelf';
+import { QtMock } from '../../components/QtMock';
+
+export const summary = '리스트, 테이블, 트리: 뷰는 보이는 행만 묻는다, 한 모델을 여러 뷰로 보기, 루트 인덱스와 선택 공유';
+
+[「모델 인터페이스」](#/read/cpp-qt/mv-model)에서 만든 모델에 이제 진짜 뷰를 붙입니다. Qt에는 세 가지 기본 뷰가 있습니다. 한 줄씩 보여 주는 `QListView`, 행과 열의 `QTableView`, 접고 펴는 계층의 `QTreeView`입니다. 셋 모두 같은 모델 인터페이스로 데이터를 묻기 때문에, 같은 모델을 어느 뷰에든 꽂을 수 있습니다.
+
+<Figure caption="같은 나무 모델을 나무 뷰(첫 번째)와 '문서' 안만 보는 표 뷰(두 번째)로 보는 배치 그림">
+  <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', justifyContent: 'center' }}>
+    <QtMock title="QTreeView" width={220} spec="list ▾ 문서,└ 보고서.txt · 12KB,└ 발표.pdf · 3MB,▸ 사진" />
+    <QtMock title="QTableView" width={220} spec="list 이름 · 크기,보고서.txt · 12KB,발표.pdf · 3MB" />
+  </div>
+</Figure>
+
+## 백만 행과 나무 하나
+
+```cpp qt=Widgets
+#include <algorithm>
+#include <QAbstractListModel>
+#include <QApplication>
+#include <QHeaderView>
+#include <QListView>
+#include <QSet>
+#include <QStandardItemModel>
+#include <QTableView>
+#include <QTreeView>
+#include <cstdio>
+
+// 백만 행짜리 모델: 뷰가 실제로 몇 행을 물어보는지 센다
+class Huge : public QAbstractListModel {
+public:
+    mutable QSet<int> asked;
+    int rowCount(const QModelIndex& p = {}) const override {
+        return p.isValid() ? 0 : 1'000'000;
+    }
+    QVariant data(const QModelIndex& i, int role) const override {
+        if (role != Qt::DisplayRole) return {};
+        asked.insert(i.row());
+        return QString("항목 %1").arg(i.row());
+    }
+};
+
+int main(int argc, char** argv) {
+    QApplication app(argc, argv);
+
+    // 1) 큰 모델과 목록 뷰
+    Huge huge;
+    QListView list;
+    list.setUniformItemSizes(true);              // 모든 줄 높이가 같다고 알려 준다
+    list.setModel(&huge);
+    list.resize(200, 300);
+    list.show();
+    app.processEvents();                         // 한 번 그리게 한다
+    std::printf("백만 행 중 뷰가 물어본 행: %lld개\n",
+                (long long)huge.asked.size());
+    huge.asked.clear();
+    list.scrollTo(huge.index(500000));
+    app.processEvents();
+    auto [lo, hi] = std::minmax_element(huge.asked.begin(), huge.asked.end());
+    std::printf("50만 번째로 스크롤한 뒤: %lld개 (행 %d~%d)\n",
+                (long long)huge.asked.size(), *lo, *hi);
+
+    // 2) 나무 모델 하나를 나무 뷰와 표 뷰가 함께 본다
+    QStandardItemModel tree;
+    tree.setHorizontalHeaderLabels({"이름", "크기"});
+    auto* docs = new QStandardItem("문서");
+    docs->appendRow({new QStandardItem("보고서.txt"), new QStandardItem("12KB")});
+    docs->appendRow({new QStandardItem("발표.pdf"), new QStandardItem("2MB")});
+    tree.appendRow({docs, new QStandardItem("")});
+    tree.appendRow({new QStandardItem("사진"), new QStandardItem("")});
+
+    QTreeView tv;
+    tv.setModel(&tree);
+    tv.expandAll();
+    QTableView table;
+    table.setModel(&tree);
+    table.setRootIndex(docs->index());           // 표는 '문서' 폴더 안만 보여 준다
+    table.setSelectionModel(tv.selectionModel()); // 선택을 공유한다
+
+    tv.setCurrentIndex(tree.index(1, 0, docs->index()));  // 나무에서 발표.pdf
+    auto cur = table.selectionModel()->currentIndex();
+    std::printf("표 뷰의 현재 칸: %s\n", qPrintable(cur.data().toString()));
+
+    // 모델을 바꾸면 둘 다 바뀐다
+    tree.setData(tree.index(1, 1, docs->index()), "3MB");
+    QModelIndex size = table.model()->index(1, 1, table.rootIndex());
+    std::printf("표 뷰가 보는 크기: %s, 표의 행 수: %d\n",
+                qPrintable(size.data().toString()),
+                table.model()->rowCount(table.rootIndex()));
+}
+```
+
+```text
+백만 행 중 뷰가 물어본 행: 18개
+50만 번째로 스크롤한 뒤: 17개 (행 499985~500001)
+표 뷰의 현재 칸: 발표.pdf
+표 뷰가 보는 크기: 3MB, 표의 행 수: 2
+```
+
+## 뷰는 보이는 것만 묻는다
+
+`Huge` 모델은 행이 백만 개인데, 높이 300짜리 목록 뷰가 실제로 값을 물어본 행은 18개였습니다. 50만 번째로 스크롤하자 그 근처 17행(499985~500001)만 물었습니다. 데이터를 미리 만들어 두지 않고, 물어볼 때 계산해서 답하는 모델이면 행이 아무리 많아도 화면은 가볍습니다. 로그 뷰어나 큰 CSV 뷰어가 이렇게 만들어집니다.
+
+`setUniformItemSizes(true)`(표와 나무 뷰는 `setUniformRowHeights`)는 "모든 줄 높이가 같다"고 알려 주는 설정입니다. 이것이 없으면 뷰가 스크롤 막대 크기를 계산하려고 모든 줄의 크기를 물어볼 수 있어, 행이 많을 때 느려집니다.
+
+## 한 모델, 여러 뷰
+
+- 나무 모델 하나를 `QTreeView`와 `QTableView`에 함께 꽂았습니다. 모델에서 발표.pdf의 크기를 3MB로 바꾸자 표 뷰도 3MB를 보았습니다. 두 뷰를 맞추는 코드는 없습니다
+- `setRootIndex`는 뷰가 모델의 어느 칸부터 보여 줄지 정합니다. 표 뷰는 '문서' 항목 아래만 보여 주므로 행이 2개였습니다. 탐색기의 "왼쪽 폴더 나무, 오른쪽 파일 목록" 화면이 이 방식입니다
+- **선택 모델**(`QItemSelectionModel`)은 무엇이 선택되었는지를 뷰와 따로 관리하는 객체입니다. 표 뷰에 나무 뷰의 선택 모델을 넘겨 주자, 나무에서 고른 항목이 표의 현재 칸이 되었습니다
+
+## 나무 모델의 인덱스
+
+나무에서는 칸이 행과 열에 더해 **부모**로 정해집니다. `tree.index(1, 0, docs->index())`는 "문서의 자식 중 1행 0열"입니다. 나무 모델을 직접 만들 때는 `index()`와 `parent()`를 함께 구현해야 하고, 이것이 모델을 만드는 일 중 가장 까다로운 부분입니다. 그래서 작은 나무는 예제처럼 `QStandardItemModel`에 `QStandardItem`을 붙여 만드는 경우가 많습니다.
+
+<Note>
+`QListWidget`, `QTableWidget`, `QTreeWidget`은 뷰와 내장 모델을 합쳐 둔 편의 클래스입니다. 항목이 수십 개 정도이고 다른 곳과 공유할 일이 없다면 이것이 가장 빠른 길입니다. 데이터가 크거나, 여러 화면에서 같은 데이터를 보여 주거나, 정렬·걸러내기가 필요하면 모델/뷰로 나누세요.
+</Note>
+
+## 정리
+
+- 리스트·테이블·트리 뷰는 같은 모델 인터페이스로 데이터를 물으며, 화면에 보이는 행만 묻기 때문에 행이 많아도 가볍다
+- 같은 모델을 여러 뷰에 꽂으면 모델의 변화가 모든 뷰에 나타나고, setRootIndex로 일부만 보여 줄 수 있다
+- 선택은 선택 모델이 따로 관리하므로 뷰끼리 공유할 수 있고, 나무에서 칸은 행·열·부모로 정해진다

@@ -1,0 +1,157 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '핸들과 세대 인덱스: 칸 번호와 세대로 오래된 참조 알아채기, 타입 꼬리표, 세대가 도는 문제';
+
+[「풀 할당자」](#/read/cpp-game-engine/mem-pool)의 끝에서, 돌려준 칸을 옛 포인터로 계속 쓰는 것이 가장 큰 위험이라고 했습니다. 게임에서는 이런 일이 아주 흔합니다. 화살이 겨눈 적이 이미 죽었고, 사운드가 따라가던 물체가 사라졌고, UI가 보여 주던 아이템이 팔렸습니다. 엔진은 객체를 서로 가리킬 때 포인터 대신 **핸들**을 씁니다.
+
+## 칸 번호 + 세대
+
+핸들은 "몇 번 칸"과 "그 칸이 몇 번째로 쓰이는 중인가(세대)"를 함께 담은 작은 정수입니다. 칸을 돌려줄 때마다 그 칸의 세대를 하나 올립니다. 나중에 핸들로 꺼낼 때 핸들의 세대와 칸의 세대가 다르면, 그 핸들은 **이미 죽은 객체를 가리키던 오래된 것**입니다.
+
+```cpp
+#include <cstdint>
+#include <optional>
+#include <print>
+#include <string>
+#include <vector>
+
+// 32비트 하나에 칸 번호 20비트 + 세대 12비트
+template <typename Tag>
+struct Handle {
+    std::uint32_t bits = 0;                       // 0은 "없음"
+    std::uint32_t index() const { return bits & 0xFFFFF; }
+    std::uint32_t gen() const { return bits >> 20; }
+    static Handle make(std::uint32_t i, std::uint32_t g) { return {g << 20 | i}; }
+    explicit operator bool() const { return bits != 0; }
+};
+
+template <typename T>
+class Slots {
+public:
+    using H = Handle<T>;
+
+    H create(T value)
+    {
+        std::uint32_t i;
+        if (!free_.empty()) {
+            i = free_.back();
+            free_.pop_back();
+        } else {
+            i = static_cast<std::uint32_t>(items_.size());
+            items_.push_back({});
+        }
+        auto& s = items_[i];
+        s.value = std::move(value);
+        s.alive = true;
+        return H::make(i, s.gen);
+    }
+
+    void destroy(H h)
+    {
+        if (!get(h))
+            return;                               // 이미 없는 것은 무시
+        auto& s = items_[h.index()];
+        s.alive = false;
+        s.value.reset();
+        s.gen = (s.gen + 1) & 0xFFF;              // 세대를 올린다(12비트)
+        if (s.gen == 0) s.gen = 1;                // 0세대는 "없음"과 겹치지 않게
+        free_.push_back(h.index());
+    }
+
+    T* get(H h)                                   // 세대가 맞을 때만 준다
+    {
+        if (!h || h.index() >= items_.size()) return nullptr;
+        auto& s = items_[h.index()];
+        return s.alive && s.gen == h.gen() ? &*s.value : nullptr;
+    }
+
+private:
+    struct Slot {
+        std::optional<T> value;
+        std::uint32_t gen = 1;
+        bool alive = false;
+    };
+    std::vector<Slot> items_;
+    std::vector<std::uint32_t> free_;
+};
+
+struct Enemy { std::string name; int hp; };
+struct Sound { int id; };
+
+int main()
+{
+    Slots<Enemy> enemies;
+    auto slime = enemies.create({"슬라임", 10});
+    auto bat = enemies.create({"박쥐", 5});
+    auto target = slime;                          // 다른 시스템이 들고 있는 핸들
+
+    enemies.destroy(slime);                       // 슬라임이 죽었다
+    auto orc = enemies.create({"오크", 30});      // 같은 칸을 다시 쓴다
+
+    auto show = [&](const char* who, Handle<Enemy> h) {
+        Enemy* e = enemies.get(h);
+        std::println("{:<6} 칸 {} 세대 {} -> {}", who, h.index(), h.gen(),
+                     e ? e->name : "(없음: 오래된 핸들)");
+    };
+    show("orc", orc);
+    show("target", target);
+    show("bat", bat);
+    std::println("핸들 크기 {}바이트", sizeof(Handle<Enemy>));
+
+    // 같은 칸을 수천 번 다시 쓰면 세대가 한 바퀴 돈다
+    int reuse = 0;
+    Handle<Enemy> h = orc;
+    while (!enemies.get(target)) {
+        enemies.destroy(h);
+        h = enemies.create({"잡몹", 1});
+        ++reuse;
+    }
+    std::println("{}번 다시 쓰자 오래된 target이 다시 살아남: {}", reuse,
+                 enemies.get(target)->name);
+
+    // Slots<Sound> sounds; sounds.get(orc);  // 컴파일 오류: 다른 종류의 핸들
+}
+```
+
+```text
+orc    칸 0 세대 2 -> 오크
+target 칸 0 세대 1 -> (없음: 오래된 핸들)
+bat    칸 1 세대 1 -> 박쥐
+핸들 크기 4바이트
+4094번 다시 쓰자 오래된 target이 다시 살아남: 잡몹
+```
+
+- 슬라임이 죽은 뒤 오크가 같은 칸 0을 받았지만 세대가 2입니다. 다른 시스템이 들고 있던 `target`(칸 0, 세대 1)으로 꺼내 보면 **없음**이 나옵니다. 포인터였다면 슬라임 대신 오크를 공격하는 버그가 되었을 것입니다
+- 핸들은 4바이트 정수라 복사가 값싸고, 파일에 저장하거나 네트워크로 보내기도 쉽습니다(포인터는 실행할 때마다 달라집니다)
+- `Handle<Enemy>`와 `Handle<Sound>`는 서로 다른 타입이라, 적 핸들로 소리 표를 뒤지면 `cannot convert 'Handle<Enemy>' to 'Handle<Sound>'`로 컴파일이 실패합니다(예제의 마지막 주석 줄을 살려서 확인했습니다). 꼬리표 타입 하나로 실수를 컴파일 때 막는 방법입니다
+
+## 세대가 한 바퀴 돈다
+
+마지막 줄이 이 방법의 한계입니다. 세대를 12비트에 담았으니 4095가지 값(0은 "없음"으로 비워 둠)밖에 없어서, 같은 칸을 **4094번** 다시 쓰자 세대가 한 바퀴 돌아 오래된 `target`이 다시 "살아 있는" 것으로 보였습니다. 대처법은 몇 가지입니다.
+
+- 세대 비트를 늘린다. 64비트 핸들에 32비트 세대를 주면 사실상 돌지 않는다
+- 세대가 끝까지 간 칸은 **은퇴**시키고 다시 쓰지 않는다. 칸 하나를 버리는 대신 안전하다
+- 빈 칸을 가장 최근에 빈 것부터가 아니라 **가장 오래전에 빈 것부터**(큐) 다시 써서, 한 칸에 재사용이 몰리지 않게 한다
+
+어느 정도 비트가 필요한지는 "한 칸이 게임 한 판 동안 몇 번 다시 쓰일까"로 정합니다. 1초에 수십 발 쏘는 총알 풀에 12비트는 몇 분이면 돕니다.
+
+## 핸들을 쓰는 곳
+
+| 쓰는 곳 | 핸들이 가리키는 것 |
+| --- | --- |
+| 엔티티끼리의 참조 | 겨눈 적, 따라가는 대상, 부모 객체 |
+| 자원 | 텍스처, 메시, 소리 데이터([「참조 세기와 핫 리로드」](#/read/cpp-game-engine/res-lifetime)) |
+| 그래픽 API | 버퍼, 이미지, 파이프라인([「그래픽 API 감싸기」](#/read/cpp-game-engine/rend-abstraction)) |
+| 실행 중인 일 | 재생 중인 소리, 작업 큐의 작업 |
+
+공통점은 "가리키는 것이 내 의지와 상관없이 사라질 수 있다"는 것입니다. 그런 곳에서는 `get()`이 `nullptr`를 줄 수 있다는 것을 받아들이고, 꺼낼 때마다 확인합니다. 한 프레임 안에서 여러 번 쓸 때는 프레임 처음에 한 번 꺼내 포인터로 쓰고, 그 포인터를 프레임 너머로 들고 가지 않습니다.
+
+<Note>
+`std::weak_ptr`(「C++ 고급」의 [「weak_ptr과 순환 참조」](#/read/cpp-advanced/sp-weak))도 "사라졌는지 알 수 있는 참조"지만, 제어 블록과 원자적 연산이 따라붙고 8~16바이트입니다. 핸들은 4~8바이트의 정수 하나로 같은 일을 하고, 객체들을 촘촘한 배열에 둘 수 있게 해 줍니다. 대신 꺼낼 때 표를 한 번 거쳐야 합니다.
+</Note>
+
+## 정리
+
+- 핸들은 칸 번호와 세대를 담은 작은 정수이고, 칸을 돌려줄 때 세대를 올려 오래된 핸들을 꺼낼 때 알아챈다
+- 꼬리표 타입으로 핸들의 종류를 나눠 다른 표에 쓰는 실수를 컴파일 때 막고, 정수라서 저장·전송이 쉽다
+- 세대 비트가 적으면 한 바퀴 돌아 오래된 핸들이 되살아나므로, 비트를 늘리거나 칸을 은퇴시키거나 재사용을 고르게 한다

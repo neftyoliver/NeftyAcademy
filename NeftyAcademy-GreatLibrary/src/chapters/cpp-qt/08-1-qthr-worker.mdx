@@ -1,0 +1,110 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'QThread와 워커 객체: moveToThread로 작업 스레드에 보내기, 진행 알리기, 끝내고 정리하기, 취소';
+
+[「이벤트 루프」](#/read/cpp-qt/obj-eventloop)에서 슬롯이 오래 걸리면 창이 얼어붙는다고 했습니다. 해결책은 그 일을 다른 스레드로 보내는 것입니다. Qt에서 가장 권장되는 방법은 **워커 객체** 방식입니다. 일을 하는 평범한 QObject를 만들고, 그것을 `QThread`가 돌리는 스레드로 **옮긴** 뒤, 시그널과 슬롯으로만 대화합니다.
+
+## 해시 계산을 작업 스레드로
+
+```cpp qt
+#include <QCoreApplication>
+#include <QThread>
+#include <cstdio>
+
+// 오래 걸리는 일을 하는 객체: 어느 스레드에서 돌지는 모른다
+class Hasher : public QObject {
+    Q_OBJECT
+public slots:
+    void run(int chunks) {
+        emit started(QThread::currentThread()->objectName());   // 출력은 메인에서
+        quint64 h = 1469598103934665603ULL;
+        for (int c = 1; c <= chunks; ++c) {
+            if (QThread::currentThread()->isInterruptionRequested()) {
+                emit finished(0, true);
+                return;
+            }
+            for (int i = 0; i < 2'000'000; ++i)
+                h = (h ^ (i + c)) * 1099511628211ULL;
+            emit progress(c * 100 / chunks);   // 메인 스레드로는 큐를 거쳐 간다
+        }
+        emit finished(h % 1000, false);
+    }
+signals:
+    void started(const QString& threadName);
+    void progress(int percent);
+    void finished(quint64 result, bool cancelled);
+};
+
+int main(int argc, char** argv) {
+    QCoreApplication app(argc, argv);
+    QThread thread;
+    thread.setObjectName("hash-thread");
+    auto* worker = new Hasher;                  // 부모 없이 만들어야 옮길 수 있다
+    // 이제 worker의 슬롯은 thread에서 돈다
+    worker->moveToThread(&thread);
+
+    QObject::connect(&thread, &QThread::finished, worker, &QObject::deleteLater);
+    QObject::connect(worker, &Hasher::started, &app, [](const QString& name) {
+        std::printf("  [메인] 일꾼이 '%s' 스레드에서 시작했다\n", qPrintable(name));
+    });
+    QObject::connect(worker, &Hasher::progress, &app, [](int p) {
+        std::printf("  [메인] 진행 %d%% (%s 스레드에서 받음)\n", p,
+                    QThread::currentThread() == qApp->thread() ? "메인" : "작업");
+    });
+    QObject::connect(worker, &Hasher::finished, &app,
+                     [&](quint64 r, bool cancelled) {
+        std::printf("  [메인] 끝: %s, 결과 %llu\n", cancelled ? "취소됨" : "완료",
+                    (unsigned long long)r);
+        thread.quit();                          // 작업 스레드의 이벤트 루프 끝내기
+    });
+    QObject::connect(&thread, &QThread::finished, &app, &QCoreApplication::quit);
+
+    thread.start();                             // 작업 스레드와 그 이벤트 루프 시작
+    // 다른 스레드의 객체 슬롯은 직접 부르지 말고 큐로 부탁한다
+    QMetaObject::invokeMethod(worker, "run", Qt::QueuedConnection, Q_ARG(int, 4));
+    std::printf("[메인] 일을 맡기고 바로 돌아옴\n");
+    int rc = app.exec();
+    thread.wait();                              // 스레드가 완전히 끝날 때까지
+    std::printf("[메인] 스레드 정리 끝\n");
+    return rc;
+}
+#include "main.moc"
+```
+
+```text
+[메인] 일을 맡기고 바로 돌아옴
+  [메인] 일꾼이 'hash-thread' 스레드에서 시작했다
+  [메인] 진행 25% (메인 스레드에서 받음)
+  [메인] 진행 50% (메인 스레드에서 받음)
+  [메인] 진행 75% (메인 스레드에서 받음)
+  [메인] 진행 100% (메인 스레드에서 받음)
+  [메인] 끝: 완료, 결과 995
+[메인] 스레드 정리 끝
+```
+
+두 스레드가 동시에 `printf`하면 출력 순서가 실행마다 달라지므로, 출력은 모두 메인 스레드에서 하고 일꾼은 시그널로 알리기만 했습니다.
+
+## 구조
+
+- **QThread는 스레드 그 자체가 아니라 스레드를 관리하는 객체**입니다. `start()`하면 새 스레드에서 `run()`이 돌고, 기본 `run()`은 그 스레드의 이벤트 루프(`exec()`)를 돌립니다
+- **moveToThread**: 모든 QObject는 자기가 "사는" 스레드(스레드 친화성)를 가집니다. `worker->moveToThread(&thread)`로 옮기면, 그 뒤로 worker에게 오는 이벤트와 큐 연결 슬롯은 작업 스레드의 이벤트 루프에서 실행됩니다. 부모가 있는 객체는 옮길 수 없으므로 부모 없이 만들었습니다
+- **일 맡기기**: 다른 스레드의 객체 슬롯을 직접 부르면 **부른 스레드**에서 실행되어 버립니다. `invokeMethod(..., Qt::QueuedConnection)`이나 시그널 연결로 부탁하면 작업 스레드에서 실행됩니다. 메인은 맡기자마자 돌아와 다음 줄을 찍었습니다
+- **진행 알리기**: 일꾼이 `emit progress()`하면, 받는 쪽(`&app`)이 메인 스레드에 살기 때문에 Qt가 자동으로 큐 연결로 바꿔 메인 스레드에서 람다를 실행했습니다. GUI 위젯은 메인 스레드에서만 만질 수 있으므로, 진행 막대를 갱신하는 일은 언제나 이렇게 시그널로 넘깁니다. 자세한 규칙은 [「스레드를 건너는 시그널」](#/read/cpp-qt/qthr-signals)에서 봅니다
+
+## 끝내기와 정리
+
+1. 일이 끝나면 `thread.quit()`으로 작업 스레드의 이벤트 루프를 끝냅니다
+2. 스레드의 `finished` 시그널에 `worker->deleteLater()`를 이어 두었으므로, 일꾼은 **자기 스레드에서** 지워집니다
+3. `thread.wait()`로 스레드가 완전히 끝날 때까지 기다린 뒤 `QThread` 객체를 없앱니다. 아직 도는 스레드의 `QThread`를 소멸시키면 프로그램이 멈춥니다
+
+**취소**는 강제로 멈추지 않고 부탁합니다. 메인에서 `thread.requestInterruption()`을 부르면, 일꾼이 반복마다 `isInterruptionRequested()`를 확인하다가 스스로 멈춥니다(예제의 `cancelled` 경로). `QThread::terminate()`는 스레드를 아무 데서나 끊어 잠금이나 메모리를 망가뜨릴 수 있으므로 쓰지 않습니다.
+
+<Note>
+`QThread`를 상속해 `run()`을 재정의하는 방식도 있습니다. 이벤트 루프 없이 한 가지 일만 하고 끝나는 스레드라면 그것도 괜찮습니다. 다만 상속한 `QThread` 객체 자신은 **만든 스레드**(보통 메인)에 살기 때문에, 그 객체의 슬롯이 작업 스레드에서 돌 거라고 착각하기 쉽습니다. 짧은 계산을 여러 개 나눠 돌리는 일이라면 다음 다음 장의 [「QtConcurrent와 스레드 풀」](#/read/cpp-qt/qthr-concurrent)이 더 간단합니다.
+</Note>
+
+## 정리
+
+- 오래 걸리는 일은 워커 QObject로 만들어 moveToThread로 작업 스레드에 보내고, 시그널과 큐 호출로만 대화한다
+- 일꾼의 시그널은 메인 스레드에 사는 받는 쪽에서 자동으로 큐를 거쳐 실행되므로, GUI 갱신은 시그널로 넘긴다
+- 끝낼 때는 quit, finished에 deleteLater, wait 순서로 정리하고, 취소는 requestInterruption으로 부탁한다

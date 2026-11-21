@@ -1,0 +1,126 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'USB의 구조: 호스트가 묻는 버스, 설명자, 끝점과 네 가지 전송, 클래스, libusb로 장치 나열';
+
+**USB**는 키보드부터 외장 SSD까지 거의 모든 주변기기가 쓰는 버스입니다. [「UART」](#/read/c-mid/bus-uart)나 [「SPI」](#/read/c-mid/bus-spi)와 달리 꽂는 순간 장치가 스스로를 소개하고, 운영체제가 알맞은 드라이버를 붙입니다. 이 쪽은 그 "자기소개"의 생김새와, C에서 USB 장치를 직접 다루는 libusb를 봅니다.
+
+## 호스트가 묻고 장치가 답한다
+
+USB는 철저히 **호스트 중심**입니다. 장치는 먼저 말을 걸 수 없고, 호스트(PC)가 정해진 틈마다 "보낼 것 있니?"라고 물어야 답합니다. 키보드의 키 입력도 호스트가 자주 물어보는 덕분에 전달됩니다.
+
+| 속도 이름 | 빠르기 | 예 |
+| --- | --- | --- |
+| Low / Full Speed | 1.5 / 12 Mb/s | 키보드, 마우스, 마이크로컨트롤러 |
+| High Speed (USB 2.0) | 480 Mb/s | 웹캠, 오디오 장치 |
+| SuperSpeed (USB 3.x) | 5~20 Gb/s | 외장 저장 장치 |
+| USB4 | 40~80 Gb/s | 도킹, 외장 GPU |
+
+장치 안에는 데이터가 드나드는 구멍인 **끝점**(endpoint)이 여러 개 있습니다. 0번 끝점은 모든 장치에 있는 제어용이고, 나머지는 장치가 정합니다. 끝점마다 전송 방식이 하나씩 정해집니다.
+
+| 전송 | 성질 | 쓰임 |
+| --- | --- | --- |
+| 제어(control) | 짧은 명령과 응답 | 자기소개, 설정 |
+| 인터럽트(interrupt) | 작지만 정해진 주기로 물어봐 줌 | 키보드, 마우스 |
+| 대량(bulk) | 남는 대역을 다 쓰되 시간은 보장 없음 | 저장 장치, 프린터 |
+| 등시(isochronous) | 시간 보장, 틀려도 다시 안 보냄 | 소리, 영상 |
+
+## 자기소개: 설명자
+
+장치를 꽂으면 호스트는 0번 끝점으로 **설명자**(descriptor)를 달라고 합니다. 맨 먼저 받는 장치 설명자는 18바이트로 모양이 정해져 있습니다. 아래 바이트는 리눅스의 USB 2.0 루트 허브(가상 허브)가 내놓는 모양을 본떠 만든 것입니다.
+
+```c
+#include <stdint.h>
+#include <stdio.h>
+
+// 장치 설명자 18바이트. 두 바이트 값은 리틀 엔디언
+static const uint8_t desc[18] = {
+    0x12, 0x01, 0x00, 0x02, 0x09, 0x00, 0x01, 0x40,
+    0x6b, 0x1d, 0x02, 0x00, 0x18, 0x06, 0x03, 0x02,
+    0x01, 0x01,
+};
+
+static uint16_t le16(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
+
+int main(void)
+{
+    if (desc[0] != 18 || desc[1] != 1)
+        return 1;                       // 길이 18, 종류 1(장치)인지
+    uint16_t usb = le16(desc + 2), dev = le16(desc + 12);
+    printf("USB 규격 %x.%02x\n", usb >> 8, usb & 0xFF);
+    printf("장치 종류(class) 0x%02X, 규약 %u\n", desc[4], desc[6]);
+    printf("제어 끝점 최대 묶음 %u바이트\n", desc[7]);
+    printf("제조사:제품 %04x:%04x, 장치 판 %x.%02x\n",
+           le16(desc + 8), le16(desc + 10), dev >> 8, dev & 0xFF);
+    printf("문자열 번호: 제조사 %u, 제품 %u, 일련번호 %u\n",
+           desc[14], desc[15], desc[16]);
+    printf("설정(configuration) %u개\n", desc[17]);
+    return 0;
+}
+```
+
+```text
+USB 규격 2.00
+장치 종류(class) 0x09, 규약 1
+제어 끝점 최대 묶음 64바이트
+제조사:제품 1d6b:0002, 장치 판 6.18
+문자열 번호: 제조사 3, 제품 2, 일련번호 1
+설정(configuration) 1개
+```
+
+- 두 바이트 값은 **리틀 엔디언**입니다. 바이트 `00 02`가 USB 2.00, `6b 1d`가 제조사 번호 0x1d6b입니다. 규격 판은 BCD(십진 한 자리씩)로 적혀서 16진수로 찍으면 그대로 "2.00"으로 읽힙니다
+- **제조사:제품 번호**(VID:PID)가 장치의 이름표입니다. 제조사 번호는 USB-IF라는 단체가 나눠 주고, 0x1d6b는 리눅스 재단의 번호입니다. 운영체제는 이 번호와 아래의 클래스를 보고 드라이버를 고릅니다
+- 이름 글자는 설명자에 직접 들어 있지 않고 "문자열 3번" 같은 번호만 있습니다. 글자는 따로 요청해 UTF-16으로 받습니다
+- 장치 설명자 다음에는 설정 → 인터페이스 → 끝점 설명자가 나무처럼 이어집니다. 장치 하나가 인터페이스 여럿(예: 헤드셋의 소리 + 버튼)을 가질 수 있습니다
+
+**클래스**는 "이 장치는 이런 종류이니 공용 드라이버로 다뤄도 된다"는 약속입니다. HID(0x03, 키보드·마우스·게임패드), 대용량 저장(0x08, USB 메모리), CDC(0x02, 가상 시리얼 포트), 오디오(0x01), 허브(0x09) 같은 것이 있어서, 이런 장치는 드라이버를 따로 깔지 않아도 동작합니다. 클래스 칸이 0이면 "인터페이스마다 따로 적었다"는 뜻입니다.
+
+## libusb로 장치 나열하기
+
+공용 클래스가 아닌 장치(제조사 고유 명령을 쓰는 장치)는 **libusb**로 사용자 프로그램에서 직접 다룰 수 있습니다. 리눅스, 윈도, macOS에서 같은 함수로 씁니다.
+
+```c flags=-I/usr/include/libusb-1.0,-lusb-1.0
+#include <stdio.h>
+#include <libusb.h>
+
+int main(void)
+{
+    libusb_context *ctx;
+    int r = libusb_init_context(&ctx, nullptr, 0);
+    if (r < 0) {
+        printf("초기화 실패: %s\n", libusb_strerror(r));
+        return 0;
+    }
+    libusb_device **list;
+    ssize_t n = libusb_get_device_list(ctx, &list);
+    printf("장치 %zd개\n", n);
+    for (ssize_t i = 0; i < n; i++) {
+        struct libusb_device_descriptor d;
+        if (libusb_get_device_descriptor(list[i], &d) == 0)
+            printf("버스 %u 장치 %u: %04x:%04x\n",
+                   libusb_get_bus_number(list[i]),
+                   libusb_get_device_address(list[i]),
+                   d.idVendor, d.idProduct);
+    }
+    libusb_free_device_list(list, 1);
+    libusb_exit(ctx);
+    return 0;
+}
+```
+
+```text
+장치 0개
+```
+
+- 이 검사용 컴퓨터는 USB 버스가 없는 가상 머신(`/sys/bus/usb`가 없음)이라 0개가 나왔습니다. USB 장치가 있는 컴퓨터에서는 `lsusb`가 보여 주는 목록과 같은 VID:PID가 줄줄이 나옵니다
+- `libusb_init_context`는 libusb 1.0.27에서 들어온 이름입니다. 이전 판에서는 `libusb_init(&ctx)`를 씁니다. 이 컴퓨터의 판은 1.0.27입니다
+- 실제로 데이터를 주고받으려면 `libusb_open`으로 열고, `libusb_claim_interface`로 인터페이스를 맡은 뒤, `libusb_bulk_transfer`·`libusb_control_transfer` 같은 함수로 끝점과 주고받습니다
+
+<Note>
+리눅스에서 보통 사용자로 USB 장치를 열면 권한이 없다고 나옵니다. `/dev/bus/usb/` 아래의 장치 파일 권한은 udev가 정하므로, 그 VID:PID에 권한을 주는 udev 규칙을 `/etc/udev/rules.d/`에 넣습니다. 윈도에서는 장치에 WinUSB 드라이버가 붙어 있어야 libusb로 열 수 있습니다. 키보드·저장 장치처럼 이미 커널 드라이버가 쥐고 있는 장치는 libusb로 가로채지 않는 것이 원칙입니다.
+</Note>
+
+## 정리
+
+- USB는 호스트가 묻고 장치가 답하는 버스이며, 장치 안의 끝점마다 제어·인터럽트·대량·등시 중 한 전송 방식이 정해진다
+- 장치는 리틀 엔디언으로 된 설명자로 VID:PID와 클래스를 알리고, 운영체제는 이것으로 드라이버를 고른다
+- 공용 클래스가 아닌 장치는 libusb로 나열하고 열어 끝점과 직접 주고받으며, 리눅스에서는 udev 규칙으로 권한을 준다

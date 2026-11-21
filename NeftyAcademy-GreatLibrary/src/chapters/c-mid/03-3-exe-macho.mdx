@@ -1,0 +1,109 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '맥의 실행 파일 형식 Mach-O: 마법의 수, 두 겹의 구역 이름, 밑줄 붙은 심볼, 유니버설 바이너리';
+
+맥, 아이폰, 아이패드의 실행 파일은 Mach-O라는 형식입니다. 이름은 이 형식이 처음 쓰인 Mach 커널에서 왔고, 그 계보가 지금 macOS의 커널(XNU)로 이어집니다([「커널의 종류」](#/read/basics/kernels)). [「ELF」](#/read/c-mid/exe-elf), [「PE」](#/read/c-mid/exe-pe)와 같은 일을 하는 세 번째 형식입니다.
+
+<Note kind="warn">
+이 책의 검사 기계에는 맥이 없습니다. 아래의 Mach-O 파일은 리눅스의 Clang 18로 `--target=arm64-apple-macos14`를 주어 만든 **목적 파일**이고, LLVM 도구로 열어 봤습니다. 실행 파일까지 링크하려면 맥의 SDK가 있어야 해서 하지 못했습니다. 맥에서 직접 해 보려면 `xcode-select --install`로 명령 줄 도구를 깔면 `clang`, `otool`, `lipo`가 생깁니다.
+</Note>
+
+## 만들어 보기
+
+[「ELF」](#/read/c-mid/exe-elf)에서 쓴 것과 같은 전역 변수 셋에 함수 하나를 둔 파일입니다. `#include`가 없어서 맥의 SDK 없이도 컴파일됩니다.
+
+```c nocheck
+int counter = 5;
+int zeros[1000];
+const char greeting[] = "hi";
+
+int scale(int value, int percent)
+{
+    return value * percent / 100 + counter;
+}
+```
+
+```sh
+clang --target=arm64-apple-macos14 -O2 -c m.c -o m-arm.o
+clang --target=x86_64-apple-macos14 -O2 -c m.c -o m-x86.o
+file m-arm.o m-x86.o
+```
+
+```text nocheck
+m-arm.o: Mach-O 64-bit arm64 object, flags:<|SUBSECTIONS_VIA_SYMBOLS>
+m-x86.o: Mach-O 64-bit x86_64 object, flags:<|SUBSECTIONS_VIA_SYMBOLS>
+```
+
+애플 실리콘(ARM64)용과 인텔 맥(x86-64)용을 하나씩 만들었습니다.
+
+## 마법의 수
+
+```text nocheck
+$ xxd -l 16 m-arm.o
+00000000: cffa edfe 0c00 0001 0000 0000 0100 0000  ................
+```
+
+첫 네 바이트 `cf fa ed fe`는 리틀 엔디언으로 읽으면 `0xFEEDFACF`입니다. 64비트 Mach-O의 표시이고, 32비트 때는 `0xFEEDFACE`였습니다. 16진수 글자(A~F)로 영어 낱말을 만드는 프로그래머들의 장난이 표준이 된 경우입니다. 다음의 `0c 00 00 01`(0x0100000C)은 CPU 종류로, 64비트 ARM이라는 뜻입니다.
+
+## 세그먼트와 구역
+
+Mach-O는 이름이 두 겹입니다. 대문자로 쓰는 **세그먼트** 안에 소문자로 쓰는 **구역**이 들어 있고, 둘 다 밑줄 두 개로 시작합니다.
+
+```text nocheck
+$ llvm-objdump --macho --section-headers m-arm.o
+Idx Name             Size     VMA              Type
+  0 __text           0000002c 0000000000000000 TEXT
+  1 __data           00000004 000000000000002c DATA
+  2 __const          00000003 0000000000000030 DATA
+  3 __common         00000fa0 0000000000000058 BSS
+```
+
+| Mach-O (세그먼트, 구역) | ELF | 담는 것 |
+| --- | --- | --- |
+| `__TEXT,__text` | `.text` | 기계어 |
+| `__TEXT,__const`, `__TEXT,__cstring` | `.rodata` | 상수와 문자열 |
+| `__DATA,__data` | `.data` | 값이 있는 전역 변수 |
+| `__DATA,__common`, `__DATA,__bss` | `.bss` | 0으로 시작하는 전역 변수 |
+
+`zeros`는 크기가 `0xfa0`(4,000바이트)인 `__common`에 들어갔습니다. ELF의 `.bss`처럼 파일에는 자리를 차지하지 않습니다. Mach-O는 이 정보를 "로드 명령"(load command)이라는 목록에 담아 두고, 맥의 `otool -l`이나 LLVM의 `llvm-otool -l`로 볼 수 있습니다. 상수 `greeting`이 `__TEXT` 세그먼트에 든 것은, 읽기 전용이라 코드와 같은 권한으로 묶을 수 있기 때문입니다.
+
+## 밑줄이 붙는 심볼
+
+```text nocheck
+$ llvm-nm m-arm.o | grep -v ltmp
+000000000000002c D _counter
+0000000000000030 S _greeting
+0000000000000000 T _scale
+0000000000000058 S _zeros
+```
+
+C의 `scale`이 Mach-O에서는 `_scale`이 됩니다. 애플의 플랫폼은 C 심볼 이름 앞에 밑줄을 붙이는 옛 관례를 지금도 따릅니다. ELF는 붙이지 않습니다. 맥에서 어셈블리로 C 함수를 부를 때나, 링크 오류 메시지에서 `_main`을 보게 되는 까닭입니다. 심볼은 「컴퓨터 프로그래밍 초급」의 [「심볼이란」](#/read/c-basic/symbols)에서 봤습니다.
+
+ARM64용 기계어도 잠깐 보면, 전역 변수 `counter`를 읽는 데 `adrp`(4KiB 페이지 주소 얻기)와 `ldr`(그 안의 위치에서 읽기) 두 명령을 씁니다. [「CPU와 레지스터」](#/read/basics/arch-cpu)에서 본 대로 ARM64는 명령 하나가 4바이트라, 64비트 주소를 한 명령에 담을 수 없기 때문입니다.
+
+## 유니버설 바이너리
+
+애플은 2020년에 맥의 CPU를 인텔에서 자체 ARM 칩으로 바꿨습니다([「스마트폰과 ARM」](#/read/basics/modern-arm-mobile)). 그래서 한 프로그램이 두 CPU에서 모두 돌아야 했고, Mach-O는 **두 CPU용 파일을 한 파일에 묶는** 방법을 씁니다. 이것이 유니버설 바이너리입니다.
+
+```sh
+llvm-lipo -create m-arm.o m-x86.o -output m-fat.o    # 맥에서는 lipo
+file m-fat.o
+xxd -l 8 m-fat.o
+```
+
+```text nocheck
+m-fat.o: Mach-O universal binary with 2 architectures: [x86_64 …] [arm64 …]
+00000000: cafe babe 0000 0002                      ........
+```
+
+묶은 파일은 `0xCAFEBABE`로 시작하고, 뒤의 `2`는 안에 든 아키텍처 수입니다. 맥은 실행할 때 자기 CPU에 맞는 쪽을 골라 올립니다. 리눅스와 윈도우에는 이런 방식이 흔하지 않아서, 보통 CPU마다 다른 파일을 내려받습니다.
+
+<Note>
+맥에서 앱은 보통 `.app`이라는 폴더(번들)로 배포되고, 그 안의 `Contents/MacOS/` 아래에 Mach-O 실행 파일이 들어 있습니다. 인터넷에서 받은 앱은 애플의 서명과 공증이 없으면 실행이 막히는데, 그 서명도 Mach-O 파일 안의 정해진 자리에 들어갑니다. 이 이야기는 [「프로그램을 공개하는 방법」](#/read/c-mid/publishing)에서 이어집니다.
+</Note>
+
+## 정리
+
+- Mach-O는 맥과 iOS의 실행 파일 형식으로, 64비트 파일은 `0xFEEDFACF`로 시작하고 안에 CPU 종류와 로드 명령을 담는다
+- 이름이 `__TEXT,__text`, `__DATA,__data`처럼 세그먼트와 구역의 두 겹이고, C 심볼 이름 앞에 밑줄이 붙는다
+- 유니버설 바이너리는 `0xCAFEBABE`로 시작해 ARM64와 x86-64용 파일을 한 파일에 담고, 맥은 자기 CPU에 맞는 쪽을 골라 실행한다

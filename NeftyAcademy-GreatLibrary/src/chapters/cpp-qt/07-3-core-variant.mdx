@@ -1,0 +1,90 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'QVariant: 어떤 값이든 담는 상자, 타입 묻기와 안전하게 꺼내기, 사용자 정의 타입, 나무 모양 데이터';
+
+[「속성」](#/read/cpp-qt/obj-properties)의 `property("target")`은 `double`도 `QString`도 아닌 `QVariant`를 돌려주었습니다. 모델의 `data()`, 설정 파일의 값, QML과 주고받는 값도 모두 `QVariant`입니다. 이름으로 오가는 값은 컴파일할 때 타입을 알 수 없으니, **어떤 타입이든 담을 수 있는 상자**가 필요합니다. `QVariant`는 값과 그 값의 타입 정보를 함께 들고 다닙니다.
+
+## 상자 열어 보기
+
+```cpp qt
+#include <QCoreApplication>
+#include <QDateTime>
+#include <QVariant>
+#include <cstdio>
+
+struct Rgb { int r, g, b; };                     // 사용자 정의 값 타입
+
+int main(int argc, char** argv) {
+    QCoreApplication app(argc, argv);
+    // 1) 무엇이든 담는 상자
+    QList<QVariant> box{42, 3.5, QString("사과"), true, QDate(2026, 11, 22)};
+    for (const QVariant& v : box)
+        std::printf("  %-8s -> 글로 '%s'\n",
+                    v.typeName(), qPrintable(v.toString()));
+
+    // 2) 바꾸기: 되는지 묻고, 결과를 확인한다
+    QVariant text("123"), word("abc");
+    bool ok1 = false, ok2 = false;
+    int n1 = text.toInt(&ok1), n2 = word.toInt(&ok2);
+    std::printf("'123'->%d(%s), 'abc'->%d(%s)\n", n1, ok1 ? "성공" : "실패",
+                n2, ok2 ? "성공" : "실패");
+
+    // 3) 사용자 정의 타입: Qt 6은 fromValue만으로 메타 타입이 생긴다
+    QVariant c = QVariant::fromValue(Rgb{255, 128, 0});
+    std::printf("타입 이름 %s, 담긴 것인가 %s\n", c.typeName(),
+                c.canConvert<Rgb>() ? "예" : "아니오");
+    Rgb back = c.value<Rgb>();
+    std::printf("꺼낸 값 (%d,%d,%d)\n", back.r, back.g, back.b);
+
+    // 4) 나무 모양 데이터: JSON, 설정, QML과 주고받는 형태
+    QVariantMap user{{"이름", "네프티"}, {"점수", QVariantList{90, 85, 100}}};
+    QVariantList scores = user["점수"].toList();
+    int sum = 0;
+    for (const QVariant& s : scores) sum += s.toInt();
+    std::printf("%s의 점수 합 %d\n", qPrintable(user["이름"].toString()), sum);
+
+    // 5) 비어 있음과 null
+    QVariant empty;
+    std::printf("빈 QVariant: isValid %s, toInt %d\n",
+                empty.isValid() ? "예" : "아니오", empty.toInt());
+}
+```
+
+```text
+  int      -> 글로 '42'
+  double   -> 글로 '3.5'
+  QString  -> 글로 '사과'
+  bool     -> 글로 'true'
+  QDate    -> 글로 '2026-11-22'
+'123'->123(성공), 'abc'->0(실패)
+타입 이름 Rgb, 담긴 것인가 예
+꺼낸 값 (255,128,0)
+네프티의 점수 합 275
+빈 QVariant: isValid 아니오, toInt 0
+```
+
+## 담고, 묻고, 꺼내기
+
+- **담기**: 기본 타입과 Qt 타입은 그대로 넣으면 됩니다(`QVariant(42)`, `QVariant(QDate(...))`). 사용자 정의 타입은 `QVariant::fromValue(값)`으로 넣습니다
+- **묻기**: `typeName()`, `metaType()`로 무엇이 들었는지 알 수 있고, `canConvert<T>()`로 그 타입으로 꺼낼 수 있는지 묻습니다
+- **꺼내기**: `toInt()`, `toString()`, `toDate()` 같은 편의 함수나 `value<T>()`를 씁니다. 바꿀 수 없으면 예외 대신 **기본값**(0, 빈 문자열)을 돌려주므로, 실패를 구분해야 하면 `toInt(&ok)`처럼 성공 여부를 받습니다. "abc"는 0이 되었지만 `ok`가 거짓이라 "실패"를 알 수 있었습니다
+
+`toString()`은 여러 타입을 글로 바꿔 줍니다. 날짜는 ISO 형식("2026-11-22"), bool은 "true"가 되었습니다. 사람에게 보여 줄 글이 필요하다면 [「QString과 유니코드」](#/read/cpp-qt/core-string)의 `QLocale`로 따로 만드는 것이 좋습니다.
+
+## 사용자 정의 타입
+
+`Rgb` 구조체를 아무 등록 없이 `fromValue`로 담고 `value<Rgb>()`로 꺼냈습니다. Qt 6은 컴파일할 때 타입마다 메타 타입 정보를 자동으로 만들기 때문입니다. Qt 5에서는 `Q_DECLARE_METATYPE(Rgb)`가 필요했으므로 옛 코드에서 자주 보입니다. 다만 타입을 **문자열 이름**으로 찾아야 하는 경우(일부 QML 상황, 옛 문자열 문법의 큐 연결)에는 여전히 이름을 등록해야 할 수 있습니다. 타입을 담는 일은 쉽지만, `QVariant` 안의 사용자 정의 타입을 `==`로 비교하거나 글로 바꾸려면 그 타입에 비교 연산자나 변환 함수가 있어야 합니다.
+
+## 나무 모양 데이터
+
+`QVariantMap`(`QMap<QString, QVariant>`)과 `QVariantList`(`QList<QVariant>`)를 겹치면 JSON과 같은 나무 모양 데이터를 만들 수 있습니다. 사용자 정보 안에 점수 목록을 넣고 꺼내 더했습니다. 이 형태는 [「JSON」](#/read/cpp-qt/core-json)의 `QJsonDocument::toVariant()`, 설정 파일, QML의 자바스크립트 객체와 배열로 그대로 오가므로, 계층 사이의 공통 언어로 쓰기 좋습니다.
+
+<Note>
+`QVariant`는 편하지만 타입 검사를 실행 시간으로 미룹니다. 앱 내부의 C++ 코드끼리는 진짜 타입(또는 `std::variant`)으로 주고받고, 이름으로 오가는 경계(속성, 모델, 설정, QML)에서만 `QVariant`를 쓰는 것이 버그를 줄이는 방법입니다. 빈 `QVariant`(`isValid()`가 거짓)는 모델의 `data()`가 "이 역할에는 줄 값이 없다"고 답할 때 쓰는 약속이기도 합니다.
+</Note>
+
+## 정리
+
+- QVariant는 값과 타입 정보를 함께 담는 상자로, 속성·모델·설정·QML처럼 이름으로 오가는 값에 쓰인다
+- canConvert로 묻고 toInt(&ok)처럼 성공 여부를 받아 꺼내며, 실패하면 예외 대신 기본값이 나온다
+- Qt 6에서는 사용자 정의 타입도 fromValue로 바로 담을 수 있고, QVariantMap과 QVariantList로 나무 모양 데이터를 만든다

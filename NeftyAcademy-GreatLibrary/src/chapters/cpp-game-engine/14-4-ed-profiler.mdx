@@ -1,0 +1,149 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '엔진 안의 프로파일러: 범위 타이머로 구간 기록, 계층 보고와 크롬 트레이스로 프레임 차이 찾기';
+
+외부 프로파일러(perf, VTune 등)는 함수별 평균 시간을 잘 보여 주지만, 게임의 질문은 조금 다릅니다. "평균은 괜찮은데 **가끔 한 프레임이** 왜 튀나?", "그 프레임에서 물리와 애니메이션 중 무엇이 늘었나?" 이런 질문에는 프레임 단위로, 엔진이 아는 이름(물리, 스키닝, 그리기 준비)으로 시간을 재는 **엔진 내장 프로파일러**가 필요합니다.
+
+## 범위 타이머
+
+```cpp
+#include <cstdint>
+#include <print>
+#include <string>
+#include <vector>
+
+// 실제로는 std::chrono::steady_clock이나 CPU 시각 계수기를 읽는다.
+// 여기서는 결과를 매번 같게 하려고 "일한 척"하면 시계를 직접 넘긴다.
+std::uint64_t fake_now_us = 0;
+void work(std::uint64_t us) { fake_now_us += us; }
+
+struct Event { const char* name; std::uint64_t begin, end; int depth; };
+
+struct Profiler {
+    std::vector<Event> events;            // 실제로는 스레드마다 하나
+    int depth = 0;
+    struct Scope {                        // 생성될 때 시작, 소멸될 때 끝
+        Profiler& p; std::size_t idx;
+        Scope(Profiler& p, const char* name) : p(p), idx(p.events.size()) {
+            p.events.push_back({name, fake_now_us, 0, p.depth++});
+        }
+        ~Scope() { p.events[idx].end = fake_now_us; --p.depth; }
+    };
+};
+Profiler prof;
+#define CAT2(a, b) a##b
+#define CAT(a, b) CAT2(a, b)                // __LINE__을 먼저 펼친 뒤 잇는다
+#define PROFILE(name) Profiler::Scope CAT(prof_scope_, __LINE__)(prof, name)
+
+void physics() {
+    PROFILE("물리");
+    { PROFILE("넓은 단계"); work(400); }
+    { PROFILE("좁은 단계"); work(900); }
+    { PROFILE("풀기"); work(1700); }
+}
+void animation(int characters) {
+    PROFILE("애니메이션");
+    for (int i = 0; i < characters; ++i) { PROFILE("캐릭터"); work(250); }
+}
+void frame(int characters) {
+    PROFILE("프레임");
+    physics();
+    animation(characters);
+    { PROFILE("그리기 준비"); work(1200); }
+}
+
+std::uint64_t dur(const Event& e) { return e.end - e.begin; }
+
+// i번째 사건의 자식들을 보여 준다. 이웃한 같은 이름 형제는 하나로 합친다
+void report_children(std::size_t i, std::uint64_t frame_us) {
+    int d = prof.events[i].depth + 1;
+    std::size_t j = i + 1;
+    while (j < prof.events.size() && prof.events[j].depth >= d) {
+        if (prof.events[j].depth > d) { ++j; continue; }   // 손주는 아래에서
+        auto& e = prof.events[j];
+        std::uint64_t total = 0;
+        int count = 0;
+        std::size_t k = j;
+        for (; k < prof.events.size() && prof.events[k].depth >= d; ++k)
+            if (prof.events[k].depth == d) {
+                if (std::string(prof.events[k].name) != e.name) break;
+                total += dur(prof.events[k]);
+                ++count;
+            }
+        std::println("{}{} {:.1f}ms{} ({:.0f}%)", std::string(d * 2, ' '), e.name,
+                     total / 1000.0, count > 1 ? std::format(" x{}", count) : "",
+                     100.0 * total / frame_us);
+        if (count == 1) report_children(j, frame_us);
+        j = k;
+    }
+}
+void report(std::size_t i) {
+    std::println("{}: {:.1f}ms", prof.events[i].name, dur(prof.events[i]) / 1000.0);
+    report_children(i, dur(prof.events[i]));
+}
+
+int main() {
+    frame(4);
+    frame(12);                             // 캐릭터가 늘어난 프레임
+    // 1) 계층 보고
+    for (std::size_t i = 0; i < prof.events.size(); ++i)
+        if (prof.events[i].depth == 0) report(i);
+    // 2) 크롬 트레이스 형식(chrome://tracing, Perfetto에서 열린다), 앞 3개만
+    std::println("[");
+    for (int k = 0; k < 3; ++k) {
+        auto& e = prof.events[k];
+        std::println(R"(  {{"name":"{}","ph":"X",)"
+                     R"("ts":{},"dur":{},"pid":1,"tid":1}},)",
+                     e.name, e.begin, e.end - e.begin);
+    }
+    std::println("  ...");
+}
+```
+
+```text
+프레임: 5.2ms
+  물리 3.0ms (58%)
+    넓은 단계 0.4ms (8%)
+    좁은 단계 0.9ms (17%)
+    풀기 1.7ms (33%)
+  애니메이션 1.0ms (19%)
+    캐릭터 1.0ms x4 (19%)
+  그리기 준비 1.2ms (23%)
+프레임: 7.2ms
+  물리 3.0ms (42%)
+    넓은 단계 0.4ms (6%)
+    좁은 단계 0.9ms (12%)
+    풀기 1.7ms (24%)
+  애니메이션 3.0ms (42%)
+    캐릭터 3.0ms x12 (42%)
+  그리기 준비 1.2ms (17%)
+[
+  {"name":"프레임","ph":"X","ts":0,"dur":5200,"pid":1,"tid":1},
+  {"name":"물리","ph":"X","ts":0,"dur":3000,"pid":1,"tid":1},
+  {"name":"넓은 단계","ph":"X","ts":0,"dur":400,"pid":1,"tid":1},
+  ...
+```
+
+결과를 매번 같게 하려고 예제는 가짜 시계를 썼습니다. 실제로는 `Scope`가 생성될 때와 소멸될 때 `std::chrono::steady_clock` 같은 고해상도 시계를 읽습니다.
+
+## 기록하기
+
+- `PROFILE("물리")` 한 줄이 그 블록이 끝날 때까지의 구간을 잽니다. 생성자에서 시작 시각을 적고 소멸자에서 끝 시각을 적는 RAII 덕분에, 중간에 `return`하거나 예외가 나도 구간이 닫힙니다
+- 매크로 안에서 `__LINE__`을 이름에 붙일 때는 한 번 더 감싼 매크로(`CAT`)를 거쳐야 줄 번호가 숫자로 펼쳐집니다. 그냥 `##__LINE__`이라고 쓰면 모든 줄에서 같은 이름이 되어 버립니다
+- 사건은 깊이와 함께 순서대로 배열에 쌓기만 합니다. 기록하는 동안 무거운 일을 하지 않아야 재는 것 자체가 결과를 흐리지 않습니다. 실제로는 스레드마다 버퍼를 따로 두어 잠금 없이 쌓고, 이름은 문자열을 복사하지 않고 문자열 리터럴의 주소만 저장합니다
+
+## 보기
+
+계층 보고는 같은 이름의 이웃 형제를 합쳐서(`캐릭터 x12`) 보여 줍니다. 두 프레임을 나란히 보면 원인이 바로 보입니다. 물리는 3.0ms로 같은데, 캐릭터가 4명에서 12명으로 늘면서 애니메이션이 1.0ms에서 3.0ms가 되었습니다. 평균만 봤다면 "애니메이션이 2ms쯤 쓴다"로 뭉개졌을 것입니다.
+
+뒤의 JSON은 **크롬 트레이스** 형식입니다. 사건마다 이름, 시작 시각(`ts`), 길이(`dur`, 마이크로초), 스레드를 적은 것뿐인데, Perfetto나 크롬의 `chrome://tracing`에 넣으면 스레드별로 막대가 겹겹이 쌓인 타임라인으로 보입니다. [「의존 그래프」](#/read/cpp-game-engine/job-graph)의 작업들이 워커 스레드에 어떻게 퍼졌는지, 임계 경로가 어디인지, 워커가 어디서 놀았는지가 눈으로 보입니다.
+
+<Note>
+게임 개발에서는 Tracy 같은 프로파일러를 엔진에 넣어 쓰는 경우가 많습니다. 원리는 같은 범위 타이머이지만, 기록을 네트워크로 별도 프로그램에 실시간으로 보내고, 프레임 사이의 메모리 할당, 잠금 대기, GPU 시간까지 함께 보여 줍니다. 어떤 도구를 쓰든 출시 빌드에서는 매크로를 빈 것으로 바꿔 비용을 0으로 만들 수 있게 해 둡니다. 다음 장 [「성능 예산」](#/read/cpp-game-engine/ship-budget)은 이 측정값을 기준과 비교하는 방법입니다.
+</Note>
+
+## 정리
+
+- 엔진 내장 프로파일러는 엔진이 아는 이름으로, 프레임 단위로 구간 시간을 잰다
+- 범위 타이머는 RAII로 구간을 닫고, 기록 중에는 스레드별 버퍼에 쌓기만 해서 측정이 결과를 흐리지 않게 한다
+- 계층 보고로 프레임 사이의 차이를 찾고, 크롬 트레이스 형식으로 스레드별 타임라인을 본다

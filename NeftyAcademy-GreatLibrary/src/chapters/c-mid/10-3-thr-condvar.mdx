@@ -1,0 +1,146 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '조건 변수로 기다리고 깨우기: 일꾼들이 일을 꺼내 가는 줄, cnd_wait를 while 안에서 부르는 까닭';
+
+[「뮤텍스와 경쟁 상태」](#/read/c-mid/thr-mutex)의 뮤텍스는 "동시에 들어오지 마"를 지켜 줍니다. 그런데 스레드 프로그램에는 다른 종류의 약속도 필요합니다. "일이 생길 때까지 기다렸다가, 생기면 깨워 줘"입니다. 일꾼 스레드가 할 일이 없을 때 반복문을 돌며 줄을 계속 들여다보면 CPU를 헛되이 씁니다. **조건 변수**는 스레드를 재워 두었다가 조건이 바뀌면 깨우는 도구이고, 늘 뮤텍스와 짝으로 씁니다.
+
+## 일 줄
+
+서버, 사진 처리기, 센서 데이터를 모으는 IoT 장치가 공통으로 쓰는 모양이 있습니다. 한쪽(생산자)은 일을 **줄**에 넣고, 여러 일꾼(소비자)이 줄에서 일을 꺼내 처리합니다. 아래 프로그램은 1부터 10까지의 수를 줄에 넣고, 일꾼 셋이 꺼내 제곱해서 더합니다. 줄의 크기는 4칸으로 정해 두어서, 줄이 꽉 차면 넣는 쪽도 기다려야 합니다.
+
+```c
+#include <stdbool.h>
+#include <stdio.h>
+#include <threads.h>
+
+enum { CAP = 4, WORKERS = 3, JOBS = 10 };
+
+// 크기가 정해진 일 줄. 아래의 자물쇠를 잡고만 만진다
+typedef struct {
+    int items[CAP];
+    int head, count;
+    bool closed;            // 더 넣을 일이 없다
+    mtx_t lock;
+    cnd_t not_empty;        // 줄이 비어 있지 않게 되면 알린다
+    cnd_t not_full;         // 줄에 자리가 나면 알린다
+} Queue;
+
+static void push(Queue *q, int v)
+{
+    mtx_lock(&q->lock);
+    while (q->count == CAP)                 // 자리가 날 때까지 잔다
+        cnd_wait(&q->not_full, &q->lock);
+    q->items[(q->head + q->count) % CAP] = v;
+    q->count++;
+    cnd_signal(&q->not_empty);              // 기다리는 일꾼 하나를 깨운다
+    mtx_unlock(&q->lock);
+}
+
+// 일을 하나 꺼낸다. 줄이 닫혔고 비었으면 false
+static bool pop(Queue *q, int *out)
+{
+    mtx_lock(&q->lock);
+    while (q->count == 0 && !q->closed)     // 일이 오거나 닫힐 때까지 잔다
+        cnd_wait(&q->not_empty, &q->lock);
+    bool got = q->count > 0;
+    if (got) {
+        *out = q->items[q->head];
+        q->head = (q->head + 1) % CAP;
+        q->count--;
+        cnd_signal(&q->not_full);
+    }
+    mtx_unlock(&q->lock);
+    return got;
+}
+
+static void close_queue(Queue *q)
+{
+    mtx_lock(&q->lock);
+    q->closed = true;
+    cnd_broadcast(&q->not_empty);           // 자는 일꾼을 모두 깨운다
+    mtx_unlock(&q->lock);
+}
+
+static Queue q;
+static long total;
+static int done;
+static mtx_t result_lock;
+
+static int worker(void *arg)
+{
+    (void)arg;
+    int v;
+    while (pop(&q, &v)) {
+        mtx_lock(&result_lock);
+        total += (long)v * v;               // 일: 제곱해서 더하기
+        done++;
+        mtx_unlock(&result_lock);
+    }
+    return 0;
+}
+
+int main(void)
+{
+    mtx_init(&q.lock, mtx_plain);
+    cnd_init(&q.not_empty);
+    cnd_init(&q.not_full);
+    mtx_init(&result_lock, mtx_plain);
+
+    thrd_t t[WORKERS];
+    for (int k = 0; k < WORKERS; k++)
+        thrd_create(&t[k], worker, NULL);
+    for (int v = 1; v <= JOBS; v++)         // 1부터 10까지 일을 넣는다
+        push(&q, v);
+    close_queue(&q);
+    for (int k = 0; k < WORKERS; k++)
+        thrd_join(t[k], NULL);
+
+    printf("처리한 일 %d개, 제곱의 합 %ld\n", done, total);
+    return 0;
+}
+```
+
+```text
+처리한 일 10개, 제곱의 합 385
+```
+
+1²부터 10²까지의 합 385가 나왔습니다. 어느 일꾼이 어떤 수를 처리했는지는 돌릴 때마다 다르지만, 합과 개수는 늘 같습니다.
+
+## 조건 변수의 세 동작
+
+| C11 `threads.h` | POSIX `pthread.h` | 하는 일 |
+| --- | --- | --- |
+| `cnd_wait(&c, &m)` | `pthread_cond_wait(&c, &m)` | 잡고 있던 뮤텍스를 놓고 잠든다. 깨어나면 다시 뮤텍스를 잡고 돌아온다 |
+| `cnd_signal(&c)` | `pthread_cond_signal(&c)` | 기다리는 스레드 하나를 깨운다 |
+| `cnd_broadcast(&c)` | `pthread_cond_broadcast(&c)` | 기다리는 스레드를 모두 깨운다 |
+
+`cnd_wait`가 **뮤텍스를 놓고 잠드는 것을 한 번에** 한다는 점이 핵심입니다. 뮤텍스를 쥔 채 잠들면 아무도 줄에 일을 넣지 못하고, 놓은 뒤 잠들기 전에 틈이 있으면 그 사이에 온 알림을 놓칩니다. 조건 변수는 이 둘을 끊기지 않게 묶어 줍니다.
+
+## while로 다시 확인하는 까닭
+
+`pop`에서 `if`가 아니라 `while`로 기다린 데는 두 가지 까닭이 있습니다.
+
+- **다른 일꾼이 먼저 가져갈 수 있다.** 일 하나가 들어와 `cnd_signal`이 일꾼을 깨워도, 그 일꾼이 뮤텍스를 다시 잡기 전에 막 일을 마친 다른 일꾼이 그 일을 꺼내 갈 수 있습니다. 깨어났을 때 줄이 다시 비어 있을 수 있는 것입니다
+- **까닭 없이 깨어날 수 있다.** 표준은 `cnd_wait`가 아무도 알리지 않았는데 돌아오는 것(가짜 깨어남)을 허락합니다. 구현을 빠르게 하려는 약속입니다
+
+그래서 조건 변수는 언제나 **조건을 다시 확인하는 반복문** 안에서 기다립니다. "깨어났다"는 "조건이 맞다"가 아니라 "한번 다시 봐라"라는 뜻입니다.
+
+<Note kind="warn">
+조건(`count`, `closed`)은 반드시 같은 뮤텍스를 잡고 바꾸고 확인해야 합니다. 뮤텍스 없이 `closed = true`를 쓰고 `cnd_broadcast`를 부르면, 일꾼이 조건을 확인한 직후와 잠들기 직전 사이에 그 변화가 끼어들어 알림을 영영 놓칠 수 있습니다. 「C++ 고급」의 [「조건 변수」](#/read/cpp-advanced/sync-condvar)에서 이 틈을 자세히 봅니다.
+</Note>
+
+## 줄 닫기
+
+일을 다 넣은 뒤에는 일꾼들에게 "더는 없다"고 알려야 합니다. 그렇지 않으면 일꾼들은 빈 줄 앞에서 영원히 잡니다. `close_queue`는 `closed`를 켜고 `cnd_broadcast`로 **잠든 일꾼을 모두** 깨웁니다. 깨어난 일꾼은 `while` 조건을 다시 보고, 줄이 비었고 닫혔으면 `pop`이 `false`를 돌려주어 일꾼 함수가 끝납니다. 줄에 일이 남아 있으면 그것부터 마저 처리합니다.
+
+여기서 `cnd_signal`(하나만 깨우기)을 썼다면 일꾼 셋 가운데 하나만 깨어나 끝나고, 나머지 둘은 계속 잠들어 `thrd_join`이 영원히 돌아오지 않았을 것입니다. 깨워야 할 스레드가 여럿일 수 있으면 `cnd_broadcast`를 씁니다.
+
+<Note kind="tip">
+이 줄은 크기가 정해진 고리 버퍼(`head`와 `count`를 `% CAP`로 돌리는 배열)입니다. 줄이 꽉 차면 넣는 쪽이 `not_full`을 기다리므로, 일꾼이 느려도 메모리가 끝없이 불지 않습니다. 센서 데이터처럼 들어오는 속도를 조절할 수 없는 경우에는, 꽉 찼을 때 기다리는 대신 가장 오래된 것을 버리는 설계도 씁니다.
+</Note>
+
+## 정리
+
+- 조건 변수는 스레드를 재워 두었다가 조건이 바뀌면 깨우는 도구이고, `cnd_wait`는 뮤텍스를 놓고 잠드는 일을 끊기지 않게 한다
+- 깨어나도 조건이 맞는다는 보장이 없으므로(다른 스레드가 먼저 가져가거나 가짜로 깨어남) `cnd_wait`는 언제나 `while` 안에서 부른다
+- 일 줄을 닫을 때는 조건을 바꾼 뒤 `cnd_broadcast`로 잠든 스레드를 모두 깨워 스스로 끝나게 한다

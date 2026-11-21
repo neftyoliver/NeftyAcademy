@@ -1,0 +1,136 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '델리게이트: 뷰의 칸을 그리고 편집하는 객체, 화면 글 바꾸기, 막대 그리기, 편집기와 값 주고받기';
+
+뷰는 칸을 어떻게 그리고 어떻게 편집할지를 직접 정하지 않습니다. 그 일은 **델리게이트**에게 맡깁니다. 기본 델리게이트(`QStyledItemDelegate`)는 글을 쓰고, 편집할 때 값의 타입에 맞는 편집기(글이면 줄 입력, 정수면 스핀 상자)를 띄웁니다. 칸을 다르게 그리거나 특별한 편집기를 쓰고 싶으면 델리게이트를 바꿉니다. 모델은 그대로입니다.
+
+## 크기 칸과 진행률 칸
+
+```cpp qt=Widgets
+#include <QApplication>
+#include <QPainter>
+#include <QSpinBox>
+#include <QStandardItemModel>
+#include <QStyledItemDelegate>
+#include <QTableView>
+#include <cstdio>
+
+// 진행률 칸: 숫자 대신 막대를 그리고, 편집할 때는 0~100 스핀 상자를 띄운다
+class ProgressDelegate : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+    void paint(QPainter* p, const QStyleOptionViewItem& opt,
+               const QModelIndex& i) const override {
+        int v = i.data().toInt();
+        QRect bar = opt.rect.adjusted(2, 4, -2, -4);
+        p->fillRect(bar, QColor("#e5e7eb"));
+        QRect done(bar.left(), bar.top(), bar.width() * v / 100, bar.height());
+        p->fillRect(done, QColor("#22c55e"));
+        p->drawText(opt.rect, Qt::AlignCenter, QString("%1%").arg(v));
+    }
+    QWidget* createEditor(QWidget* parent, const QStyleOptionViewItem&,
+                          const QModelIndex&) const override {
+        auto* spin = new QSpinBox(parent);
+        spin->setRange(0, 100);
+        spin->setSuffix("%");
+        return spin;
+    }
+    void setEditorData(QWidget* e, const QModelIndex& i) const override {
+        static_cast<QSpinBox*>(e)->setValue(i.data().toInt());   // 모델 -> 편집기
+    }
+    void setModelData(QWidget* e, QAbstractItemModel* m,
+                      const QModelIndex& i) const override {
+        m->setData(i, static_cast<QSpinBox*>(e)->value());       // 편집기 -> 모델
+    }
+};
+
+// 화면에 보이는 글만 바꾸는 델리게이트: 모델 값은 그대로
+class BytesDelegate : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+    QString displayText(const QVariant& v, const QLocale&) const override {
+        double b = v.toDouble();
+        const char* unit[] = {"B", "KB", "MB", "GB"};
+        int k = 0;
+        while (b >= 1024 && k < 3) { b /= 1024; ++k; }
+        return QString::number(b, 'f', k ? 1 : 0) + unit[k];
+    }
+};
+
+int main(int argc, char** argv) {
+    QApplication app(argc, argv);
+    QStandardItemModel model(2, 2);
+    model.setHorizontalHeaderLabels({"크기", "진행"});
+    model.setData(model.index(0, 0), 512);
+    model.setData(model.index(1, 0), 3'500'000);
+    model.setData(model.index(0, 1), 30);
+    model.setData(model.index(1, 1), 75);
+
+    QTableView view;
+    view.setModel(&model);
+    view.setItemDelegateForColumn(0, new BytesDelegate(&view));
+    auto* progress = new ProgressDelegate(&view);
+    view.setItemDelegateForColumn(1, progress);
+    view.resize(320, 140);
+    view.show();
+    app.processEvents();
+
+    auto* bytes = static_cast<BytesDelegate*>(view.itemDelegateForColumn(0));
+    auto shown = [&](int row) {
+        return bytes->displayText(model.index(row, 0).data(), {});
+    };
+    std::printf("크기 칸 화면 글: %s, %s (모델 값 %d)\n", qPrintable(shown(0)),
+                qPrintable(shown(1)), model.index(1, 0).data().toInt());
+
+    // 그려진 화면에서 진행 칸 두 곳의 색을 읽는다(막대 안쪽 / 바깥쪽)
+    QImage img = view.viewport()->grab().toImage();
+    QRect cell = view.visualRect(model.index(0, 1));
+    int y = cell.center().y();
+    auto at = [&](int percent) {
+        return img.pixelColor(cell.left() + cell.width() * percent / 100, y).name();
+    };
+    std::printf("30%% 칸: 10%% 지점 %s, 90%% 지점 %s\n",
+                qPrintable(at(10)), qPrintable(at(90)));
+
+    // 편집 흐름: 편집기 만들기 -> 모델 값 싣기 -> 사용자가 바꿈 -> 모델에 쓰기
+    QModelIndex idx = model.index(0, 1);
+    QWidget* editor = progress->createEditor(view.viewport(), {}, idx);
+    progress->setEditorData(editor, idx);
+    auto* spin = static_cast<QSpinBox*>(editor);
+    std::printf("편집기 처음 값 %s", qPrintable(spin->text()));
+    spin->setValue(150);                          // 범위 밖: 100으로 막힌다
+    progress->setModelData(editor, &model, idx);
+    std::printf(" -> 모델에 쓴 값 %d\n", model.index(0, 1).data().toInt());
+    delete editor;
+}
+```
+
+```text
+크기 칸 화면 글: 512B, 3.3MB (모델 값 3500000)
+30% 칸: 10% 지점 #22c55e, 90% 지점 #e5e7eb
+편집기 처음 값 30% -> 모델에 쓴 값 100
+```
+
+## 세 가지 수준의 손대기
+
+- **displayText만 바꾸기**: `BytesDelegate`는 모델의 3500000을 화면에서 "3.3MB"로 보여 줍니다. 모델은 숫자를 그대로 갖고 있으므로 정렬도 숫자로 정확히 되고, 다른 뷰에서는 다른 형식으로 보여 줄 수 있습니다. 가장 가벼운 사용자 정의이고, 나머지 그리기(선택 강조, 초점 사각형)는 기본 동작이 그대로 해 줍니다
+- **paint 재정의**: `ProgressDelegate`는 칸에 회색 바탕과 초록 막대를 그리고 가운데에 글을 씁니다. 그려진 화면을 읽어 보니 30% 칸의 10% 지점은 초록, 90% 지점은 회색이었습니다. 칸 하나에 위젯을 실제로 올려놓는 것(`setIndexWidget`)보다 훨씬 가볍습니다. 행이 만 개라도 화면에 보이는 칸만 그리기 때문입니다
+- **편집기 바꾸기**: 편집이 시작되면 뷰가 세 함수를 차례로 부릅니다
+
+## 편집의 세 단계
+
+1. `createEditor`: 편집기 위젯을 만듭니다. 0~100 범위와 "%" 꼬리말을 가진 스핀 상자를 만들었습니다
+2. `setEditorData`: 모델의 현재 값을 편집기에 싣습니다. 처음 값이 "30%"였습니다
+3. `setModelData`: 편집이 끝나면(Enter, 다른 칸 클릭) 편집기의 값을 모델에 씁니다. 150을 넣으려 했지만 스핀 상자 범위에서 100으로 막혀, 모델에는 100이 들어갔습니다
+
+예제는 이 흐름을 보여 주려고 세 함수를 직접 불렀습니다. 실제로는 사용자가 칸을 두 번 누르거나 F2를 누를 때 뷰가 부르고, 편집기의 위치와 크기도 `updateEditorGeometry`로 칸에 맞춰 줍니다. 편집기에서 값 검사를 하면 모델의 `setData`에 잘못된 값이 들어올 일이 줄어듭니다.
+
+<Note>
+델리게이트는 칸마다 객체를 만드는 것이 아니라 **하나가 모든 칸을 그립니다**. 그래서 `paint` 안에 칸별 상태를 저장하면 안 되고, 필요한 것은 모두 인덱스와 모델에서 읽어야 합니다. 칸 크기를 바꾸고 싶으면 `sizeHint`를 재정의합니다. 이 방식은 QML의 `ListView`에서 delegate가 칸마다 실제 항목을 만드는 것과 다르므로, 두 세계를 오갈 때 헷갈리지 않도록 주의하세요.
+</Note>
+
+## 정리
+
+- 델리게이트는 뷰의 칸을 그리고 편집하며, 모델을 바꾸지 않고 보이는 모습과 편집 방식을 바꾼다
+- 글 형식만 바꿀 때는 displayText, 칸을 직접 그릴 때는 paint를 재정의하고, 하나의 델리게이트가 모든 칸을 그린다
+- 편집은 createEditor, setEditorData, setModelData 세 단계로 이루어지며, 편집기에서 값을 검사하면 모델이 안전해진다

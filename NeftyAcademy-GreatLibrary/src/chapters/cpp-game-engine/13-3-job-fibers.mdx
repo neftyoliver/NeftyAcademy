@@ -1,0 +1,130 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '파이버: 기다리는 작업을 스택째 치워 두고 스레드는 다른 일을 하게 하기, 사용자 모드 문맥 전환';
+
+[「작업 큐와 워커 스레드」](#/read/cpp-game-engine/job-queue)의 `wait`는 기다리는 동안 남의 작업을 도왔습니다. 그런데 돕기 시작한 작업이 길면, 기다리던 작업은 이미 조건이 풀렸는데도 그 작업이 끝날 때까지 다시 시작하지 못합니다. 호출 스택 위에 남의 작업이 얹혀 있기 때문입니다. **파이버**는 이 문제를 정면으로 풉니다. 작업마다 자기 스택을 주고, 기다려야 할 때 그 스택을 통째로 치워 둔 채 스레드는 다른 파이버로 넘어갑니다. 조건이 풀리면 치워 둔 파이버를 멈췄던 줄에서 이어서 실행합니다.
+
+## 한 스레드 위의 파이버
+
+리눅스의 `ucontext` 함수로 파이버를 만들어, 캐릭터 셋이 각자 애니메이션 표본 작업 둘을 내고 기다렸다가 섞게 합니다.
+
+```cpp
+#include <ucontext.h>
+#include <deque>
+#include <functional>
+#include <memory>
+#include <print>
+#include <vector>
+
+// 한 스레드 위의 파이버 스케줄러: 기다릴 일이 생기면 파이버째 비켜 준다
+struct Fiber {
+    ucontext_t ctx{};
+    std::vector<char> stack = std::vector<char>(64 * 1024);
+    std::function<void()> body;
+    bool finished = false;
+    const int* wait_on = nullptr;          // 이 카운터가 0이 되길 기다리는 중
+};
+
+ucontext_t scheduler_ctx;
+Fiber* current = nullptr;
+std::deque<std::unique_ptr<Fiber>> fibers;
+
+void trampoline() {
+    current->body();
+    current->finished = true;
+    swapcontext(&current->ctx, &scheduler_ctx);   // 돌아오지 않는다
+}
+
+void spawn(std::function<void()> f) {
+    auto fb = std::make_unique<Fiber>();
+    fb->body = std::move(f);
+    getcontext(&fb->ctx);
+    fb->ctx.uc_stack.ss_sp = fb->stack.data();
+    fb->ctx.uc_stack.ss_size = fb->stack.size();
+    fb->ctx.uc_link = nullptr;
+    makecontext(&fb->ctx, trampoline, 0);
+    fibers.push_back(std::move(fb));
+}
+
+void wait_for(const int& counter) {               // 작업 안에서 부른다
+    if (counter == 0) return;
+    current->wait_on = &counter;
+    swapcontext(&current->ctx, &scheduler_ctx);   // 스케줄러로 비켜 줌
+}
+
+void run_all() {
+    while (!fibers.empty()) {
+        auto fb = std::move(fibers.front());
+        fibers.pop_front();
+        if (fb->wait_on && *fb->wait_on > 0) {    // 아직이면 뒤로 미룬다
+            fibers.push_back(std::move(fb));
+            continue;
+        }
+        fb->wait_on = nullptr;
+        current = fb.get();
+        swapcontext(&scheduler_ctx, &fb->ctx);    // 멈췄던 자리에서 이어서
+        current = nullptr;
+        if (!fb->finished) fibers.push_back(std::move(fb));
+    }
+}
+
+int main() {
+    int pending = 0;
+    // 캐릭터 3명: 각자 애니메이션 표본 작업 2개를 내고, 끝나길 기다렸다가 섞는다
+    for (int c = 0; c < 3; ++c)
+        spawn([c, &pending] {
+            int mine = 2;
+            pending += 2;
+            for (int j = 0; j < 2; ++j)
+                spawn([c, j, &mine, &pending] {
+                    std::println("    캐릭터{} 클립{} 표본", c, j);
+                    --mine; --pending;
+                });
+            std::println("  캐릭터{}: 표본 작업 2개 냄, 기다림(비켜 줌)", c);
+            wait_for(mine);                       // 스레드는 막히지 않는다
+            std::println("  캐릭터{}: 다시 깨어나 섞기", c);
+        });
+    run_all();
+    std::println("남은 작업 {}", pending);
+}
+```
+
+```text
+  캐릭터0: 표본 작업 2개 냄, 기다림(비켜 줌)
+  캐릭터1: 표본 작업 2개 냄, 기다림(비켜 줌)
+  캐릭터2: 표본 작업 2개 냄, 기다림(비켜 줌)
+    캐릭터0 클립0 표본
+    캐릭터0 클립1 표본
+  캐릭터0: 다시 깨어나 섞기
+    캐릭터1 클립0 표본
+    캐릭터1 클립1 표본
+  캐릭터1: 다시 깨어나 섞기
+    캐릭터2 클립0 표본
+    캐릭터2 클립1 표본
+  캐릭터2: 다시 깨어나 섞기
+남은 작업 0
+```
+
+## 무엇이 일어났나
+
+- 파이버마다 64KB 스택을 따로 줬습니다. `makecontext`로 그 스택에서 시작할 함수를 정하고, `swapcontext`로 지금의 레지스터와 스택 위치를 저장하면서 다른 문맥으로 넘어갑니다. 운영체제를 거치지 않는 **사용자 모드 문맥 전환**이라 스레드 전환보다 훨씬 쌉니다
+- 캐릭터0은 `wait_for(mine)`에서 스케줄러로 비켜 줬습니다. 지역 변수 `mine`과 반복문의 위치가 그 파이버의 스택에 그대로 남아 있어서, 나중에 돌아왔을 때 다음 줄 "다시 깨어나 섞기"부터 이어졌습니다
+- 세 캐릭터가 모두 비켜 준 뒤에 표본 작업들이 돌았고, 각 캐릭터는 자기 작업 둘이 끝나자 깨어났습니다. **스레드는 한 번도 잠들지 않았습니다.** 코드는 위에서 아래로 읽히는 평범한 함수인데, 실행은 작업 사이를 오갑니다
+
+실제 작업 시스템에서는 워커 스레드마다 이 스케줄러가 돌고, 파이버 수백 개를 미리 만들어 둔 풀에서 꺼내 씁니다. 기다리는 파이버는 카운터별 대기 목록에 넣어 두고, 카운터가 0이 될 때 다시 큐에 넣습니다. 예제처럼 매번 훑으며 확인하지 않습니다. Naughty Dog가 PS4에서 이 구조로 엔진 전체를 파이버 위에 올린 발표(GDC 2015)가 널리 알려져 있습니다.
+
+## 조심할 것
+
+- **스택 크기**: 파이버 수 × 스택 크기만큼 메모리를 미리 잡습니다. 작게 잡으면 깊은 호출에서 넘치므로, 작은 스택과 큰 스택 풀을 따로 두기도 합니다
+- **스레드 지역 변수**: 파이버는 다른 워커 스레드에서 깨어날 수 있습니다. 그러면 `thread_local` 변수와 스레드에 묶인 잠금이 깨어나기 전과 다른 것을 가리킵니다. 파이버 안에서는 `std::mutex`를 잡은 채로 기다리면 안 됩니다
+- **도구 지원**: 디버거와 검사 도구는 스택이 바뀌는 것을 잘 따라가지 못합니다. 이 예제도 주소 검사기로 돌리면 `swapcontext`를 완전히 지원하지 않는다는 경고가 나오고(결과는 같았습니다), Windows는 `ucontext` 대신 `ConvertThreadToFiber`, `SwitchToFiber` 같은 자체 파이버 API를 씁니다
+
+<Note>
+C++20 코루틴도 "멈췄다가 이어서 실행"을 제공합니다. 코루틴은 스택 전체가 아니라 필요한 지역 변수만 힙의 코루틴 프레임에 저장하는 스택 없는 방식이라 가볍지만, `co_await`를 쓰는 함수만 멈출 수 있고 그 함수를 부르는 쪽도 코루틴이 되어야 합니다. 파이버는 어느 깊이의 평범한 함수에서든 멈출 수 있다는 점이 다릅니다.
+</Note>
+
+## 정리
+
+- 파이버는 작업마다 자기 스택을 주어, 기다릴 때 스택째 치워 두고 스레드는 다른 일을 하게 한다
+- 사용자 모드 문맥 전환이라 싸고, 기다리던 코드는 지역 변수를 그대로 가진 채 멈춘 줄에서 이어진다
+- 스택 메모리, 스레드 지역 변수와 잠금, 도구 지원을 조심해야 하며, 코루틴은 더 가볍지만 멈출 수 있는 곳이 제한된다

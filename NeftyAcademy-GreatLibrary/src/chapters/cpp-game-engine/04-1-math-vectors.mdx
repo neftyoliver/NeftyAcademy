@@ -1,0 +1,144 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '벡터와 행렬: 내적과 외적, 열 우선 4×4 행렬, 점과 방향, 곱하는 순서, constexpr 시험';
+
+게임 엔진의 거의 모든 서브시스템이 3차원 수학을 씁니다. 렌더러는 정점을 화면으로 옮기고, 물리는 힘과 속도를 더하고, 애니메이션은 뼈의 변환을 곱합니다. 수학 라이브러리는 [「층으로 나눈 구조」](#/read/cpp-game-engine/arch-layers)의 코어 층에 두고, 모두가 같은 타입과 같은 약속을 쓰게 합니다. 이 쪽은 그 바탕인 벡터와 행렬을 직접 만들어 봅니다.
+
+## 벡터와 행렬 만들기
+
+```cpp
+#include <array>
+#include <cmath>
+#include <numbers>
+#include <print>
+
+struct Vec3 {
+    float x, y, z;
+    constexpr Vec3 operator+(Vec3 b) const { return {x + b.x, y + b.y, z + b.z}; }
+    constexpr Vec3 operator-(Vec3 b) const { return {x - b.x, y - b.y, z - b.z}; }
+    constexpr Vec3 operator*(float s) const { return {x * s, y * s, z * s}; }
+    constexpr bool operator==(const Vec3&) const = default;
+};
+constexpr float dot(Vec3 a, Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+constexpr Vec3 cross(Vec3 a, Vec3 b)
+{
+    return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+inline float length(Vec3 v) { return std::sqrt(dot(v, v)); }
+
+// 4x4 행렬. 열 우선으로 저장: m[열][행]
+struct Mat4 {
+    std::array<std::array<float, 4>, 4> m{};
+    static constexpr Mat4 identity()
+    {
+        Mat4 r;
+        for (int i = 0; i < 4; ++i) r.m[i][i] = 1;
+        return r;
+    }
+    static constexpr Mat4 translate(Vec3 t)
+    {
+        Mat4 r = identity();
+        r.m[3] = {t.x, t.y, t.z, 1};           // 넷째 열이 이동
+        return r;
+    }
+    static Mat4 rotate_z(float rad)
+    {
+        Mat4 r = identity();
+        float c = std::cos(rad), s = std::sin(rad);
+        r.m[0][0] = c;  r.m[0][1] = s;          // 첫째 열 = x축이 가는 곳
+        r.m[1][0] = -s; r.m[1][1] = c;          // 둘째 열 = y축이 가는 곳
+        return r;
+    }
+    constexpr Mat4 operator*(const Mat4& b) const   // (this · b)
+    {
+        Mat4 r;
+        for (int c = 0; c < 4; ++c)
+            for (int rr = 0; rr < 4; ++rr)
+                for (int k = 0; k < 4; ++k)
+                    r.m[c][rr] += m[k][rr] * b.m[c][k];
+        return r;
+    }
+    constexpr Vec3 point(Vec3 p) const          // 점: w = 1이라 이동이 붙는다
+    {
+        return {m[0][0] * p.x + m[1][0] * p.y + m[2][0] * p.z + m[3][0],
+                m[0][1] * p.x + m[1][1] * p.y + m[2][1] * p.z + m[3][1],
+                m[0][2] * p.x + m[1][2] * p.y + m[2][2] * p.z + m[3][2]};
+    }
+    constexpr Vec3 dir(Vec3 v) const            // 방향: w = 0이라 이동이 없다
+    {
+        return {m[0][0] * v.x + m[1][0] * v.y + m[2][0] * v.z,
+                m[0][1] * v.x + m[1][1] * v.y + m[2][1] * v.z,
+                m[0][2] * v.x + m[1][2] * v.y + m[2][2] * v.z};
+    }
+};
+
+// 컴파일 시간에 확인해 두는 성질들
+static_assert(dot(Vec3{1, 0, 0}, Vec3{0, 1, 0}) == 0);
+static_assert(cross(Vec3{1, 0, 0}, Vec3{0, 1, 0}) == Vec3{0, 0, 1});
+static_assert(Mat4::translate({1, 2, 3}).point({0, 0, 0}) == Vec3{1, 2, 3});
+static_assert(Mat4::translate({1, 2, 3}).dir({1, 0, 0}) == Vec3{1, 0, 0});
+
+void show(const char* what, Vec3 v)
+{
+    auto z = [](float f) { return std::abs(f) < 1e-6f ? 0.0f : f; };  // -0 정리
+    std::println("{:<26} ({:.2f}, {:.2f}, {:.2f})", what, z(v.x), z(v.y), z(v.z));
+}
+
+int main()
+{
+    Vec3 a{3, 4, 0};
+    std::println("길이 {:.2f}, a·(1,0,0) = {:.2f}", length(a), dot(a, {1, 0, 0}));
+
+    Mat4 T = Mat4::translate({10, 0, 0});
+    Mat4 R = Mat4::rotate_z(std::numbers::pi_v<float> / 2);   // 90도
+    Vec3 p{1, 0, 0};
+    show("T·R·p (돌리고 옮김)", (T * R).point(p));
+    show("R·T·p (옮기고 돌림)", (R * T).point(p));
+    show("방향 (1,0,0)에 T·R", (T * R).dir({1, 0, 0}));
+    std::println("Mat4 크기 {}바이트", sizeof(Mat4));
+}
+```
+
+```text
+길이 5.00, a·(1,0,0) = 3.00
+T·R·p (돌리고 옮김)        (10.00, 1.00, 0.00)
+R·T·p (옮기고 돌림)        (0.00, 11.00, 0.00)
+방향 (1,0,0)에 T·R         (0.00, 1.00, 0.00)
+Mat4 크기 64바이트
+```
+
+## 내적과 외적
+
+- **내적** a·b = |a||b|cos θ는 두 벡터가 얼마나 같은 쪽을 보는지입니다. 0이면 직각, 양수면 같은 쪽, 음수면 반대쪽입니다. "적이 내 앞에 있나"(내 정면 벡터와 적 쪽 벡터의 내적 > 0), "빛이 면을 얼마나 비추나"(면의 법선과 빛 방향의 내적), "벡터를 한 축에 내린 길이"(단위 벡터와의 내적, 위의 3.00)가 모두 내적입니다
+- **외적** a×b는 두 벡터에 모두 직각인 벡터이고, 길이는 두 벡터가 만드는 평행사변형의 넓이입니다. 삼각형의 법선을 구하거나, 회전축을 구할 때 씁니다. x×y = z인지 x×y = −z인지는 좌표계의 손잡이에 따라 그림이 달라지는데, 이것은 [「좌표계의 약속」](#/read/cpp-game-engine/math-conventions)에서 다룹니다
+
+## 4×4 행렬과 w
+
+3차원에서 회전과 크기 변환은 3×3 행렬로 되지만, **이동**은 곱셈으로 표현되지 않습니다. 그래서 네 번째 성분 w를 붙인 4×4 행렬을 씁니다.
+
+- **점**은 w = 1로 곱해서 넷째 열(이동)이 더해집니다
+- **방향**(속도, 법선, 축)은 w = 0으로 곱해서 이동이 무시됩니다. 위 결과의 셋째 줄처럼, 방향 (1,0,0)은 이동 (10,0,0)이 붙지 않고 회전만 받아 (0,1,0)이 되었습니다
+
+점과 방향을 같은 타입으로 섞어 쓰다가 법선에 이동이 붙는 버그가 흔해서, 위 예제처럼 `point()`와 `dir()`을 나눠 두거나 아예 `Point3`와 `Vec3`를 다른 타입으로 만드는 엔진도 있습니다.
+
+## 곱하는 순서
+
+행렬 곱셈은 순서를 바꾸면 결과가 다릅니다. 이 예제의 약속(열 벡터, 오른쪽에서 왼쪽으로 적용)에서 `T·R·p`는 "p를 **먼저 돌리고** 그다음 옮긴다"입니다. (1,0,0)을 90도 돌려 (0,1,0), 그다음 x로 10 옮겨 (10,1,0)입니다. `R·T·p`는 먼저 옮겨 (11,0,0)을 만든 뒤 원점을 중심으로 돌려서 (0,11,0)이 됩니다. 물체를 제자리에서 돌린 뒤 세상에 놓으려면 `T·R·S`(크기 → 회전 → 이동)의 순서가 보통입니다. 이것은 [「변환과 계층」](#/read/cpp-game-engine/math-transform)에서 계층으로 이어집니다.
+
+## 저장 순서
+
+`Mat4`는 64바이트(float 16개)이고, 이 예제는 **열 우선**(column-major)으로 담았습니다. `m[3]`이 넷째 열 전체, 곧 이동 벡터라서 이동을 꺼내기 쉽고, OpenGL과 Vulkan의 GLSL이 기본으로 기대하는 배치와 같습니다. 행 우선으로 담는 라이브러리도 많아서, 셰이더에 행렬을 넘길 때 전치가 필요한지 꼭 확인해야 합니다. 같은 행렬이라도 "곱하는 약속(열 벡터 / 행 벡터)"과 "메모리에 담는 순서(열 우선 / 행 우선)"는 **서로 다른 두 선택**이라는 것이 헷갈리는 지점입니다.
+
+## constexpr로 성질 지키기
+
+예제 위쪽의 `static_assert` 네 줄은 컴파일할 때 계산됩니다. x·y = 0, x×y = z, 이동 행렬이 원점을 옮기는지, 방향에는 이동이 붙지 않는지를 확인합니다. 누군가 `cross`의 부호를 바꾸거나 행렬의 저장 순서를 뒤집으면 **빌드가 실패**합니다. 수학 라이브러리의 기본 성질은 이렇게 컴파일 시간 시험으로 묶어 두면 좋습니다(「C++ 문법」의 [「constexpr 변수와 함수」](#/read/cpp-syntax/ct-constexpr)). `rotate_z`는 `std::cos`를 쓰는데, C++23까지는 `std::cos` 같은 삼각함수가 `constexpr`가 아니어서(C++26에서 더해짐) 실행 시간 함수로 두었습니다.
+
+<Note>
+실제 엔진은 수학 라이브러리를 직접 만들기도 하지만, 검증된 것(GLM, DirectXMath, Eigen 등)을 쓰는 경우도 많습니다. 어느 쪽이든 엔진 안에서는 **한 가지**만 쓰고, 다른 라이브러리(물리 엔진, 에셋 가져오기)와 만나는 경계에서만 변환합니다. 성능을 위한 SIMD 배치는 [「SIMD로 빠르게」](#/read/cpp-game-engine/math-simd)에서 봅니다.
+</Note>
+
+## 정리
+
+- 내적은 같은 쪽을 보는 정도와 축으로 내린 길이, 외적은 두 벡터에 직각인 벡터이며 법선과 회전축에 쓴다
+- 4×4 행렬에 w를 붙여 점(w = 1)에는 이동이 붙고 방향(w = 0)에는 붙지 않으며, 곱하는 순서에 따라 결과가 달라진다
+- 곱하는 약속과 저장 순서는 서로 다른 선택이므로 셰이더와 맞추고, 기본 성질은 `static_assert`로 컴파일 때 지킨다
