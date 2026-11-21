@@ -1,0 +1,151 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '내장 키-값 저장소: 바이트 키의 순서, 큰 끝 정수, 가리키기만 하는 값, LMDB의 MVCC, RocksDB 일괄 쓰기';
+
+SQLite처럼 프로그램 안에 라이브러리로 들어가지만, SQL 없이 바이트열 키와 값만 다루는 저장소들이 있습니다. 키는 정렬된 채로 저장되어서, 키 하나로 찾는 것 말고도 키 순서대로 훑거나 앞부분이 같은 키들을 모아 읽을 수 있습니다. 캐시, 메타데이터, 큰 시스템의 저장 엔진으로 많이 쓰입니다. 읽기에 강한 B+트리 계열의 **LMDB**와 쓰기에 강한 LSM 트리 계열의 **LevelDB**, **RocksDB**를 봅니다.
+
+## LMDB와 RocksDB
+
+```cpp pkg=rocksdb,lmdb
+#include <lmdb.h>
+#include <rocksdb/db.h>
+#include <rocksdb/write_batch.h>
+#include <cstdint>
+#include <cstdio>
+#include <filesystem>
+#include <memory>
+#include <string>
+#include <unistd.h>
+
+namespace fs = std::filesystem;
+
+// 정수를 큰 끝(big-endian) 4바이트로: 바이트 순서가 곧 수의 순서가 된다
+std::string be32(std::uint32_t v) {
+    return {char(v >> 24), char(v >> 16), char(v >> 8), char(v)};
+}
+std::string le32(std::uint32_t v) {          // 작은 끝: x86의 메모리 순서 그대로
+    return {char(v), char(v >> 8), char(v >> 16), char(v >> 24)};
+}
+
+// MDB_val은 데이터를 복사하지 않고 가리키기만 한다. s가 살아 있는 동안만 쓴다
+MDB_val val(const std::string& s) {
+    return {s.size(), const_cast<char*>(s.data())};
+}
+std::string str(const MDB_val& v) {
+    return {static_cast<char*>(v.mv_data), v.mv_size};
+}
+
+void lmdb_demo(const fs::path& dir) {
+    MDB_env* env;
+    mdb_env_create(&env);
+    mdb_env_set_maxdbs(env, 2);
+    mdb_env_set_mapsize(env, 16 << 20);       // 파일이 자랄 수 있는 최대 크기(16MB)
+    mdb_env_open(env, dir.c_str(), 0, 0644);
+    MDB_txn* w;
+    MDB_dbi be, le;
+    mdb_txn_begin(env, nullptr, 0, &w);
+    mdb_dbi_open(w, "be", MDB_CREATE, &be);
+    mdb_dbi_open(w, "le", MDB_CREATE, &le);
+    for (std::uint32_t id : {1u, 2u, 256u, 300u, 65536u}) {
+        std::string v = std::to_string(id), bkey = be32(id), lkey = le32(id);
+        MDB_val bk = val(bkey), lk = val(lkey), d = val(v);   // 가리키기만 한다
+        mdb_put(w, be, &bk, &d, 0);
+        mdb_put(w, le, &lk, &d, 0);
+    }
+    mdb_txn_commit(w);
+
+    MDB_txn* r;                                  // 읽기 트랜잭션: 시작한 때의 모습
+    mdb_txn_begin(env, nullptr, MDB_RDONLY, &r);
+    for (auto [dbi, label] :
+         {std::pair{be, "큰 끝 키"}, std::pair{le, "작은 끝 키"}}) {
+        MDB_cursor* cur;
+        mdb_cursor_open(r, dbi, &cur);
+        MDB_val k, d;
+        std::string order;
+        auto op = MDB_FIRST;                     // 처음, 그다음부터는 다음
+        while (mdb_cursor_get(cur, &k, &d, op) == 0) {
+            op = MDB_NEXT;
+            order += (order.empty() ? "" : " ") + str(d);
+        }
+        mdb_cursor_close(cur);
+        std::printf("LMDB %s의 순서: %s\n", label, order.c_str());
+    }
+    mdb_txn_begin(env, nullptr, 0, &w);          // 읽는 중에 쓰기도 할 수 있다
+    std::string key1 = be32(1), one = "하나";
+    MDB_val k = val(key1), d = val(one);
+    mdb_put(w, be, &k, &d, 0);
+    mdb_txn_commit(w);
+    MDB_val got;
+    mdb_get(r, be, &k, &got);
+    std::printf("  열려 있던 읽기 트랜잭션: %s", str(got).c_str());
+    mdb_txn_abort(r);
+    mdb_txn_begin(env, nullptr, MDB_RDONLY, &r);
+    mdb_get(r, be, &k, &got);
+    std::printf(", 새 읽기 트랜잭션: %s\n", str(got).c_str());
+    mdb_txn_abort(r);
+    mdb_env_close(env);
+}
+
+void rocks_demo(const fs::path& dir) {
+    rocksdb::Options opt;
+    opt.create_if_missing = true;
+    rocksdb::DB* raw;
+    rocksdb::Status s = rocksdb::DB::Open(opt, dir.string(), &raw);
+    if (!s.ok()) return void(std::printf("열기 실패: %s\n", s.ToString().c_str()));
+    std::unique_ptr<rocksdb::DB> db(raw);
+    db->Put({}, "user:42:name", "앨리스");
+    rocksdb::WriteBatch batch;                   // 여러 쓰기를 한 번에, 원자적으로
+    batch.Put("user:42:order:0007", "볼트 10개");
+    batch.Put("user:42:order:0012", "너트 5개");
+    batch.Put("user:43:order:0001", "와셔 3개");
+    batch.Delete("user:42:name");
+    db->Write({}, &batch);
+    std::unique_ptr<rocksdb::Iterator> it(db->NewIterator({}));
+    std::printf("RocksDB에서 user:42: 로 시작하는 키:\n");
+    for (it->Seek("user:42:"); it->Valid() && it->key().starts_with("user:42:");
+         it->Next())
+        std::printf("  %s = %s\n", it->key().ToString().c_str(),
+                    it->value().ToString().c_str());
+    std::string name;
+    bool gone = db->Get({}, "user:42:name", &name).IsNotFound();
+    std::printf("  user:42:name: %s\n", gone ? "지워짐" : name.c_str());
+}
+
+int main() {
+    fs::path base =
+        fs::temp_directory_path() / ("kv_demo_" + std::to_string(::getpid()));
+    fs::create_directories(base / "lmdb");
+    lmdb_demo(base / "lmdb");
+    rocks_demo(base / "rocks");
+    fs::remove_all(base);
+}
+```
+
+```text
+LMDB 큰 끝 키의 순서: 1 2 256 300 65536
+LMDB 작은 끝 키의 순서: 65536 256 1 2 300
+  열려 있던 읽기 트랜잭션: 1, 새 읽기 트랜잭션: 하나
+RocksDB에서 user:42: 로 시작하는 키:
+  user:42:order:0007 = 볼트 10개
+  user:42:order:0012 = 너트 5개
+  user:42:name: 지워짐
+```
+
+- **키는 바이트의 사전순**: 키는 바이트 단위(memcmp)로 견주어집니다. 정수를 큰 끝으로 담으면 바이트 순서가 수의 순서와 같아 1, 2, 256, 300, 65536으로 섰지만, x86의 메모리 순서인 작은 끝으로 담자 65536이 맨 앞에 오는 엉뚱한 순서가 되었습니다. 여러 부분으로 된 키도 `user:42:order:0007`처럼 칸의 폭을 맞추거나 구분자를 정해야 순서가 뜻대로 됩니다
+- **가리키기만 하는 값**: `MDB_val`과 RocksDB의 `Slice`는 데이터를 복사하지 않고 주소와 길이만 듭니다. 이 예제를 처음 짰을 때 함수가 돌려준 임시 문자열로 `MDB_val`을 만들었다가 ASan이 사라진 메모리 읽기를 잡았습니다. `mdb_get`이 준 값도 메모리 매핑된 파일 안을 가리키므로 트랜잭션이 끝나기 전까지만 씁니다
+- **LMDB의 트랜잭션**: 쓰는 쪽은 한 번에 하나, 읽는 쪽은 여럿입니다. 열려 있던 읽기 트랜잭션은 시작한 때의 값 1을 계속 보았고, 새 읽기 트랜잭션은 바뀐 값을 보았습니다. 읽는 쪽이 쓰는 쪽을 막지 않는 대신, 오래 열어 둔 읽기 트랜잭션은 옛 페이지를 붙잡아 파일을 키웁니다. 파일이 자랄 최대 크기(`mdb_env_set_mapsize`)를 미리 정해야 하고, 넘으면 `MDB_MAP_FULL`이 납니다
+- **RocksDB의 일괄 쓰기와 앞부분 찾기**: `WriteBatch`의 넣기 셋과 지우기 하나가 한꺼번에 반영되었습니다. `Seek`로 앞부분의 첫 키로 간 뒤 앞부분이 같은 동안만 돌면, 한 사용자의 데이터처럼 키가 이웃한 것들을 한 번에 읽습니다
+
+## 두 구조의 차이
+
+LMDB는 메모리 매핑된 파일 하나에 B+트리를 두고, 고칠 때 페이지를 복사해 새로 씁니다. 읽기는 복사 없이 매핑된 메모리를 바로 읽어 아주 빠르고, 따로 로그 파일이 없습니다. LevelDB와 RocksDB는 쓰기를 먼저 로그(WAL)와 메모리 표(memtable)에 붙이고, 차면 정렬된 파일(SST)로 내린 뒤 뒤에서 합칩니다(컴팩션). 쓰기는 빠르지만 컴팩션이 디스크를 더 쓰고, 읽기는 여러 층을 확인해야 해서 블룸 필터로 줄입니다. RocksDB는 LevelDB에서 출발해 컬럼 패밀리, 트랜잭션, 수많은 조정 옵션을 더한 것입니다. 질의와 조인이 필요하면 SQLite가, 단순한 키로 많이 읽으면 LMDB가, 많이 쓰면 RocksDB가 맞습니다.
+
+<Note>
+여러 프로세스가 함께 쓰는 방식도 다릅니다. LMDB는 잠금 파일로 여러 프로세스가 같은 환경을 열어 읽고 쓰게 합니다. RocksDB는 한 번에 한 프로세스만 읽기-쓰기로 열 수 있고, 다른 프로세스는 읽기 전용이나 보조(secondary) 인스턴스로 엽니다.
+</Note>
+
+## 정리
+
+- 내장 키-값 저장소는 바이트 키를 사전순으로 저장하므로, 정수는 큰 끝으로 담고 여러 부분으로 된 키는 폭이나 구분자를 정해 순서를 맞춘다
+- MDB_val과 Slice는 가리키기만 하므로 버퍼의 수명을 지키고, LMDB의 읽기 트랜잭션은 시작한 때의 모습을 보며 쓰기를 막지 않는다
+- LMDB의 B+트리는 읽기에, RocksDB의 LSM 트리는 쓰기에 강하며, RocksDB의 WriteBatch는 여러 쓰기를 원자적으로 반영한다

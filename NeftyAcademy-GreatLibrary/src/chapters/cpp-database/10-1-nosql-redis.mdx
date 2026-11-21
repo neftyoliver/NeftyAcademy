@@ -1,0 +1,116 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'Redis: 메모리 위의 자료 구조, hiredis의 명령과 인자, TTL과 카운터, 파이프라인, WATCH와 EXEC, 캐시';
+
+Redis는 메모리에 자료 구조를 두고 명령으로 다루는 서버입니다. 키 하나에 문자열, 해시, 리스트, 집합, 정렬된 집합, 스트림 같은 값을 담고, 키마다 수명(TTL)을 정할 수 있습니다. 명령을 한 줄로 세워 하나씩 실행하므로 명령 하나하나는 원자적입니다. 디스크에 오래 남길 데이터의 원본보다는 캐시, 세션, 카운터, 순위표, 작업 줄처럼 빠르고 가벼운 일에 많이 씁니다. C에서는 공식 클라이언트인 hiredis로 붙습니다.
+
+## hiredis로 쓰기
+
+```cpp pkg=hiredis
+#include <hiredis.h>
+#include <cstdio>
+#include <string>
+
+// 응답 하나를 사람이 읽을 글자로 (배열은 펼친다)
+std::string show(const redisReply* r) {
+    switch (r->type) {
+    case REDIS_REPLY_STRING:
+    case REDIS_REPLY_STATUS: return std::string(r->str, r->len);
+    case REDIS_REPLY_ERROR: return "오류 " + std::string(r->str, r->len);
+    case REDIS_REPLY_INTEGER: return std::to_string(r->integer);
+    case REDIS_REPLY_NIL: return "(nil)";
+    case REDIS_REPLY_ARRAY: {
+        std::string s = "[";
+        for (size_t i = 0; i < r->elements; ++i)
+            s += (i ? ", " : "") + show(r->element[i]);
+        return s + "]";
+    }
+    }
+    return "?";
+}
+
+// 명령 하나를 보내고 응답을 글자로 받는다. %s 자리는 따로 떨어진 인자로 간다
+template <class... A> std::string cmd(redisContext* c, const char* fmt, A... args) {
+    auto* r = static_cast<redisReply*>(redisCommand(c, fmt, args...));
+    if (r == nullptr) return "연결 오류: " + std::string(c->errstr);
+    std::string s = show(r);
+    freeReplyObject(r);
+    return s;
+}
+
+int main() {
+    redisContext* c = redisConnect("127.0.0.1", 6379);
+    redisContext* other = redisConnect("127.0.0.1", 6379);
+    if (c == nullptr || c->err) return 1;
+    cmd(c, "DEL na:session na:views na:user:42 na:score na:note na:evil na:stock");
+
+    std::string set = cmd(c, "SET na:session %s EX 60", "user=42");  // 60초 뒤 삭제
+    std::printf("SET EX → %s, TTL %s초\n", set.c_str(),
+                cmd(c, "TTL na:session").c_str());
+    cmd(c, "INCR na:views");
+    cmd(c, "INCR na:views");
+    std::printf("INCR 세 번 → %s\n", cmd(c, "INCR na:views").c_str());
+    cmd(c, "HSET na:user:42 name %s city %s", "앨리스", "대전");
+    std::printf("HGETALL → %s\n", cmd(c, "HGETALL na:user:42").c_str());
+    cmd(c, "ZADD na:score 90 %s 75 %s 82 %s", "앨리스", "밥", "캐럴");
+    std::printf("점수 높은 순 → %s\n",
+                cmd(c, "ZREVRANGE na:score 0 -1 WITHSCORES").c_str());
+
+    // 값에 공백과 줄바꿈, 명령처럼 보이는 글자가 있어도 값 하나로 간다
+    std::string tricky = "a b\r\nSET na:evil 1";
+    cmd(c, "SET na:note %b", tricky.data(), tricky.size());
+    std::printf("까다로운 값 그대로: %s, na:evil 있음: %s\n",
+                cmd(c, "STRLEN na:note").c_str(), cmd(c, "EXISTS na:evil").c_str());
+
+    for (int i = 0; i < 1000; ++i)               // 파이프라인: 쌓아 두고 한꺼번에
+        redisAppendCommand(c, "INCR na:views");
+    for (int i = 0; i < 1000; ++i) {
+        void* reply;
+        redisGetReply(c, &reply);
+        freeReplyObject(reply);
+    }
+    std::printf("파이프라인으로 INCR 1000번 → %s\n",
+                cmd(c, "GET na:views").c_str());
+
+    cmd(c, "SET na:stock 5");                    // 지켜보던 키가 바뀌면 EXEC 취소
+    cmd(c, "WATCH na:stock");
+    int stock = std::stoi(cmd(c, "GET na:stock"));
+    cmd(other, "DECR na:stock");                 // 그 사이 다른 연결이 하나 팔았다
+    cmd(c, "MULTI");
+    cmd(c, "SET na:stock %d", stock - 1);        // 읽은 5를 바탕으로 4를 쓰려 한다
+    std::string exec = cmd(c, "EXEC");          // 인자 안에서 부르면 순서가 없다
+    std::printf("EXEC → %s, 재고 %s\n", exec.c_str(),
+                cmd(c, "GET na:stock").c_str());
+    redisFree(other);
+    redisFree(c);
+}
+```
+
+```text
+SET EX → OK, TTL 60초
+INCR 세 번 → 3
+HGETALL → [name, 앨리스, city, 대전]
+점수 높은 순 → [앨리스, 90, 캐럴, 82, 밥, 75]
+까다로운 값 그대로: 18, na:evil 있음: 0
+파이프라인으로 INCR 1000번 → 1003
+EXEC → (nil), 재고 4
+```
+
+- **명령과 인자는 따로 간다**: `redisCommand`는 printf처럼 형식 문자열을 받지만, `%s`와 `%b` 자리의 값은 RESP 프로토콜에서 길이가 붙은 별도의 인자로 갑니다. 그래서 공백, 줄바꿈, 명령처럼 보이는 글자가 든 18바이트가 값 하나로 저장되었고 `na:evil`은 생기지 않았습니다. SQL의 값 묶기와 같은 원리입니다([「SQL 주입과 매개변수 바인딩」](#/read/cpp-database/injection)). 형식 문자열 자체에 사용자 입력을 넣지 않고, 인자 수가 정해지지 않았으면 `redisCommandArgv`를 씁니다
+- **자료 구조마다 명령**: `SET ... EX 60`은 60초 뒤 저절로 사라지는 세션, `INCR`은 여럿이 동시에 올려도 틀리지 않는 카운터, 해시는 객체의 필드, 정렬된 집합은 점수 순위표에 맞습니다. 응답은 문자열, 정수, nil, 배열 같은 형을 가진 나무이고, `freeReplyObject`가 나무 전체를 풉니다
+- **파이프라인**: `redisAppendCommand`는 명령을 보낼 버퍼에 쌓기만 하고, `redisGetReply`가 그것을 보내며 응답을 차례대로 읽습니다. INCR 1000번이 응답을 하나씩 기다리지 않고 지나갔습니다
+- **WATCH와 MULTI/EXEC**: [「낙관적 잠금」](#/read/cpp-database/tx-optimistic)의 버전 열과 같은 일을 합니다. 지켜보던 키를 그 사이 다른 연결이 바꾸자 `EXEC`가 nil을 돌려주며 쌓인 명령을 버렸고, 재고는 다른 연결이 만든 4로 남았습니다. 그러면 처음부터 다시 읽고 다시 합니다. 결과를 변수에 먼저 받은 까닭은, 함수 인자 안에서 명령을 부르면 실행 순서가 정해지지 않기 때문입니다([「행을 구조체로」](#/read/cpp-database/map-rows))
+
+## 캐시로 쓸 때와 주의할 점
+
+MULTI/EXEC는 관계형 데이터베이스의 트랜잭션과 다릅니다. 쌓인 명령 하나가 실행 중에 실패해도 나머지는 그대로 실행되고 되돌리지 않습니다. 읽고 판단하고 쓰는 일을 서버 안에서 원자적으로 하려면 Lua 스크립트(`EVAL`)를 씁니다. 캐시는 보통 먼저 Redis를 보고, 없으면 데이터베이스에서 읽어 TTL과 함께 넣는 방식(cache-aside)으로 씁니다. 데이터를 고칠 때는 데이터베이스를 고친 뒤 캐시 키를 지우고, TTL은 지우기를 놓쳤을 때의 안전망이 됩니다. Redis는 스냅숏(RDB)과 명령 기록(AOF)으로 디스크에 남길 수 있지만, 기본 설정에서는 장애 때 마지막 몇 초의 쓰기를 잃을 수 있습니다.
+
+<Note>
+Redis의 라이선스는 몇 번 바뀌었습니다. 2024년 3월에 BSD에서 RSALv2와 SSPLv1로 바꾸자, 리눅스 재단이 7.2.4에서 갈라져 나온 BSD 라이선스의 Valkey를 시작했습니다. 2025년 5월의 Redis 8은 OSI가 인정하는 AGPLv3을 세 번째 선택지로 더했습니다. 이 예제가 붙은 서버는 BSD 시절의 7.0.15이고, 명령과 프로토콜은 Valkey에서도 같습니다.
+</Note>
+
+## 정리
+
+- Redis는 메모리 위의 자료 구조 서버로, 명령 하나하나가 원자적이며 캐시, 세션, 카운터, 순위표에 맞고 키마다 TTL을 둘 수 있다
+- hiredis의 %s와 %b 인자는 따로 떨어진 값으로 가서 주입되지 않으며, 파이프라인은 명령을 쌓아 두고 응답을 차례로 읽는다
+- WATCH와 MULTI/EXEC는 낙관적 잠금처럼 충돌하면 nil로 알리지만 되돌리기는 없으므로, 원자적인 읽고-쓰기는 Lua 스크립트로 한다

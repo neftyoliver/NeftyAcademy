@@ -1,0 +1,149 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '시계열 데이터베이스: 시간으로 나눈 파티션, BRIN 인덱스, date_bin 집계, 파티션째 지우기, 줄 프로토콜';
+
+센서 값, 서버 지표, 거래 기록처럼 시각이 붙은 데이터는 거의 언제나 뒤에 붙기만 하고, 최근 것을 많이 읽고, 오래된 것은 집계만 남긴 채 지웁니다. [「시계열 저장」](#/read/cpp-industrial/data-timeseries)에서는 압축과 SQLite 일괄 쓰기, 분 단위 집계를 보았습니다. 이 쪽은 양이 커졌을 때 데이터베이스 쪽에서 하는 일, 곧 시간으로 나누기, 작은 인덱스, 시간 묶음 집계, 통째로 지우기를 PostgreSQL로 보고, 전용 시계열 데이터베이스에 보내는 글자 형식을 만듭니다.
+
+## PostgreSQL로 시계열 다루기
+
+```cpp pkg=libpq
+#include <libpq-fe.h>
+#include <cstdint>
+#include <cstdio>
+#include <string>
+#include <utility>
+#include <vector>
+
+void run(PGconn* c, const char* sql) { PQclear(PQexec(c, sql)); }
+
+// 결과를 한 행에 한 줄로. 계획의 긴 조건 줄(Cond, Filter)은 뺀다
+void rows(PGconn* c, const char* sql) {
+    PGresult* r = PQexec(c, sql);
+    for (int i = 0; i < PQntuples(r); ++i) {
+        std::string line;
+        for (int j = 0; j < PQnfields(r); ++j)
+            line += (j ? "  " : "") + std::string(PQgetvalue(r, i, j));
+        if (line.find("Cond:") == std::string::npos &&
+            line.find("Filter:") == std::string::npos)
+            std::printf("  %s\n", line.c_str());
+    }
+    PQclear(r);
+}
+
+// InfluxDB 줄 프로토콜: 측정값,태그=값 필드=값 시각(나노초)
+// 이름과 태그는 쉼표, 공백, 등호를, 글자 필드는 큰따옴표와 역슬래시를 막는다
+std::string esc(const std::string& s, const char* special) {
+    std::string out;
+    for (char ch : s) {
+        if (std::string(special).find(ch) != std::string::npos) out += '\\';
+        out += ch;
+    }
+    return out;
+}
+
+using Pairs = std::vector<std::pair<std::string, std::string>>;
+
+std::string line_protocol(const std::string& measurement, const Pairs& tags,
+                          const Pairs& fields, std::int64_t ns) {
+    std::string s = esc(measurement, ", ");
+    for (auto& [k, v] : tags) s += "," + esc(k, ",= ") + "=" + esc(v, ",= ");
+    for (std::size_t i = 0; i < fields.size(); ++i)
+        s += (i ? "," : " ") + esc(fields[i].first, ",= ") + "=" + fields[i].second;
+    return s + " " + std::to_string(ns);
+}
+
+std::string text_field(const std::string& v) {
+    return "\"" + esc(v, "\"\\") + "\"";
+}
+
+int main() {
+    PGconn* c = PQconnectdb("host=localhost dbname=academy user=academy "
+                            "password=academy options='-c TimeZone=UTC'");
+    const char* setup[] = {
+        "SET client_min_messages = warning",
+        "DROP TABLE IF EXISTS ts_readings",
+        "CREATE TABLE ts_readings (tag text, at timestamptz NOT NULL, "
+        "value double precision) PARTITION BY RANGE (at)",
+        "CREATE TABLE ts_2026_09 PARTITION OF ts_readings "
+        "FOR VALUES FROM ('2026-09-01') TO ('2026-10-01')",
+        "CREATE TABLE ts_2026_10 PARTITION OF ts_readings "
+        "FOR VALUES FROM ('2026-10-01') TO ('2026-11-01')",
+        "CREATE TABLE ts_2026_11 PARTITION OF ts_readings "
+        "FOR VALUES FROM ('2026-11-01') TO ('2026-12-01')",
+        "INSERT INTO ts_readings SELECT 'oven1', t, "      // 5분마다, 시각 순서대로
+        "60 + 10 * sin(2 * pi() * extract(epoch FROM t) / 86400) "
+        "FROM generate_series('2026-09-01'::timestamptz, '2026-11-30 23:55', "
+        "'5 minutes') t",
+        "CREATE INDEX ts_at_brin ON ts_readings USING brin (at) "
+        "WITH (pages_per_range = 8)",
+        "CREATE INDEX ts_at_btree ON ts_readings (at)",
+        "ANALYZE ts_readings"};
+    for (const char* sql : setup) run(c, sql);
+
+    std::printf("행 수와 인덱스 크기 (11월 파티션)\n");
+    rows(c, "SELECT (SELECT count(*) FROM ts_readings) || '행', "
+            "'BRIN ' || pg_size_pretty(pg_relation_size('ts_2026_11_at_idx')), "
+            "'B-tree ' || pg_size_pretty(pg_relation_size('ts_2026_11_at_idx1'))");
+    std::printf("11월 15일 한 시간만 찾기\n");
+    run(c, "DROP INDEX ts_at_btree");                // BRIN만 남겨 계획을 본다
+    rows(c, "EXPLAIN (COSTS OFF) SELECT avg(value) FROM ts_readings "
+            "WHERE at >= '2026-11-15 06:00' AND at < '2026-11-15 07:00'");
+    std::printf("date_bin으로 6시간씩 묶기 (11월 15일)\n");
+    rows(c, "SELECT to_char(date_bin('6 hours', at, '2026-01-01'), "
+            "'MM-DD HH24:MI'), count(*), round(min(value)::numeric, 1), "
+            "round(max(value)::numeric, 1) "
+            "FROM ts_readings WHERE at >= '2026-11-15' AND at < '2026-11-16' "
+            "GROUP BY 1 ORDER BY 1");
+    run(c, "DROP TABLE ts_2026_09");                 // 보관 기간이 지난 달을 통째로
+    std::printf("9월 파티션을 지운 뒤\n");
+    rows(c, "SELECT count(*) || '행, 가장 이른 시각 ' || "
+            "to_char(min(at), 'YYYY-MM-DD') FROM ts_readings");
+
+    std::printf("InfluxDB 줄 프로토콜 (시각은 초 단위, precision=s)\n");
+    std::string lp = line_protocol("oven temp",
+                                   {{"line", "1번 라인"}, {"id", "t,1"}},
+                                   {{"value", "72.5"}, {"n", "17i"},
+                                    {"note", text_field("정상 \"운전\"")}},
+                                   1795305600);
+    std::printf("  %s\n", lp.c_str());
+    PQfinish(c);
+}
+```
+
+```text
+행 수와 인덱스 크기 (11월 파티션)
+  26208행  BRIN 24 kB  B-tree 208 kB
+11월 15일 한 시간만 찾기
+  Aggregate
+    ->  Bitmap Heap Scan on ts_2026_11 ts_readings
+          ->  Bitmap Index Scan on ts_2026_11_at_idx
+date_bin으로 6시간씩 묶기 (11월 15일)
+  11-15 00:00  72  60.0  70.0
+  11-15 06:00  72  60.2  70.0
+  11-15 12:00  72  50.0  60.0
+  11-15 18:00  72  50.0  59.8
+9월 파티션을 지운 뒤
+  17568행, 가장 이른 시각 2026-10-01
+InfluxDB 줄 프로토콜 (시각은 초 단위, precision=s)
+  oven\ temp,line=1번\ 라인,id=t\,1 value=72.5,n=17i,note="정상 \"운전\"" 1795305600
+```
+
+- **시간으로 나눈 파티션**: `PARTITION BY RANGE (at)`로 달마다 테이블을 나눴습니다. 11월 15일을 찾는 쿼리는 11월 파티션만 읽었고, 다른 달의 파티션은 계획에 나오지도 않았습니다(파티션 가지치기). 시각 조건이 쿼리에 들어 있어야 가지치기가 됩니다
+- **BRIN 인덱스**: BRIN은 페이지 묶음마다 최솟값과 최댓값만 적어 두는 인덱스라서, 같은 열의 B-tree 208kB에 비해 24kB였습니다. 시각 순서대로 쌓여 물리적 순서와 값의 순서가 같은 열에 맞습니다. 이 예제처럼 파티션이 작으면 묶음 크기(`pages_per_range`, 기본 128페이지)를 줄여야 쓸모가 있습니다. 행이 순서 없이 들어오면 묶음마다 범위가 넓어져 걸러 내지 못합니다
+- **date_bin으로 묶기**: PostgreSQL 14부터 있는 `date_bin`은 시각을 정한 간격의 칸으로 내려 맞춥니다. 6시간 칸마다 개수, 최솟값, 최댓값을 냈습니다. 평균만 남기면 짧게 튄 값이 사라지므로 최솟값과 최댓값도 함께 남깁니다
+- **파티션째 지우기**: 보관 기간이 지난 9월은 `DROP TABLE`로 파티션 하나를 지웠습니다. 수많은 행을 `DELETE`하면 오래 걸리고 VACUUM이 치울 죽은 행이 남지만, 파티션을 지우는 것은 파일을 지우는 일이라 순식간입니다. 지우기 전에 다른 곳으로 옮기려면 `DETACH PARTITION`을 씁니다
+- **줄 프로토콜**: InfluxDB는 `측정값,태그=값 필드=값 시각`의 글자 형식으로 데이터를 받습니다. 이름과 태그에서는 쉼표, 공백, 등호를, 글자 필드에서는 큰따옴표와 역슬래시를 역슬래시로 막고, 정수 필드에는 `i`를 붙입니다. 시각의 기본 단위는 나노초이고, 보낼 때 정밀도를 바꿀 수 있습니다
+
+## 전용 시계열 데이터베이스
+
+PostgreSQL 확장인 TimescaleDB는 위에서 손으로 한 일을 자동으로 합니다. 하이퍼테이블이 시간 칸(청크)을 알아서 만들고, `time_bucket`으로 묶고, 집계를 미리 계산해 두고(continuous aggregate), 오래된 청크를 열 단위로 압축합니다. InfluxDB 같은 전용 데이터베이스는 줄 프로토콜을 HTTP로 받아 열 단위로 저장하고, 보관 기간을 넘은 데이터를 저절로 지웁니다. 어느 쪽이든 쓰기는 몇 초치를 모아 한 번에 보내고([「배치 삽입」](#/read/cpp-database/dbperf-batch)), 시각은 UTC로 저장합니다([「시간과 소수」](#/read/cpp-database/map-time)).
+
+<Note>
+태그의 값은 시리즈를 가르는 열쇠라서, 값의 가짓수가 많은 것(요청 번호, 사용자 번호)을 태그로 두면 시리즈가 끝없이 늘어나 인덱스와 메모리가 불어납니다. 이렇게 가짓수가 폭발하는 문제를 카디널리티 문제라고 부르며, 그런 값은 태그가 아니라 필드에 둡니다.
+</Note>
+
+## 정리
+
+- 시계열은 시간으로 파티션을 나눠 쿼리가 필요한 기간만 읽게 하고, 오래된 기간은 파티션째 지운다
+- 시각 순서로 쌓이는 열에는 작은 BRIN 인덱스가 맞고, date_bin으로 칸을 묶어 개수와 최솟값, 최댓값을 함께 낸다
+- 전용 시계열 데이터베이스에 보낼 때는 줄 프로토콜의 이스케이프와 시각 단위를 지키고, 가짓수가 많은 값은 태그로 두지 않는다
