@@ -1,0 +1,169 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'ORM과 쿼리 빌더: SOCI의 묶기와 매핑, sqlpp23의 컴파일 시간 검사, sqlite_orm과 ODB, 날 SQL의 문';
+
+드라이버 API 위에는 SQL을 얼마나 대신 써 주느냐에 따라 여러 층의 라이브러리가 있습니다. SOCI나 Qt SQL 같은 얇은 층은 SQL은 그대로 두고 값 묶기와 형 변환을 맡습니다. sqlpp23 같은 **쿼리 빌더**는 SQL을 C++ 식으로 짜게 해서 컴파일러가 검사하게 하고, sqlite_orm이나 ODB 같은 **ORM**(객체 관계 매핑)은 객체를 넣고 꺼내는 SQL을 아예 만들어 줍니다. 대신 써 주는 몫이 클수록 실제로 도는 SQL이 눈에서 멀어지고, 어느 층이든 SQL 글자를 직접 넣는 문은 남겨 둡니다.
+
+## SOCI: SQL은 그대로, 묶기와 매핑은 라이브러리가
+
+SOCI는 `<<`로 SQL을 쓰고 `use`로 값을 묶고 `into`로 결과를 받습니다. `type_conversion<T>`를 특수화하면 행과 구조체를 통째로 주고받고, 같은 코드가 SQLite, PostgreSQL, MySQL, ODBC 등의 백엔드에서 돕니다. 아래 예제는 Ubuntu 24.04 꾸러미인 4.0.3으로 돌렸고, 지금 안정판은 C++14 이상을 요구하는 4.1입니다.
+
+```cpp pkg=libpq flags=-lsoci_core,-lsoci_sqlite3,-lsoci_postgresql,-fno-sanitize=vptr
+#include <soci/soci.h>
+#include <soci/postgresql/soci-postgresql.h>
+#include <soci/sqlite3/soci-sqlite3.h>
+#include <cstdio>
+#include <string>
+
+struct Part {
+    int id = 0;
+    std::string sku, name;
+    int price = 0;
+    soci::indicator price_ind = soci::i_null;          // 값이 NULL인지는 따로 든다
+};
+
+// 열과 멤버의 짝을 SOCI에 한 번 알려 준다
+namespace soci {
+template <> struct type_conversion<Part> {
+    using base_type = values;
+    static void from_base(const values& v, indicator, Part& p) {
+        p.id = v.get<int>("id");
+        p.sku = v.get<std::string>("sku");
+        p.name = v.get<std::string>("name");
+        p.price_ind = v.get_indicator("price_cents");
+        p.price = p.price_ind == i_ok ? v.get<int>("price_cents") : 0;
+    }
+    static void to_base(const Part& p, values& v, indicator& ind) {
+        v.set("sku", p.sku);
+        v.set("name", p.name);
+        v.set("price_cents", p.price, p.price_ind);
+        ind = i_ok;
+    }
+};
+}  // namespace soci
+
+const char* category(const soci::soci_error& e) {
+    switch (e.get_error_category()) {
+    case soci::soci_error::constraint_violation: return "constraint_violation";
+    case soci::soci_error::unknown: return "unknown";
+    default: return "그 밖";
+    }
+}
+
+// 같은 코드를 어느 백엔드의 세션에서든 돌린다
+void run(soci::session& sql, const char* ddl) {
+    std::printf("[%s]\n", sql.get_backend_name().c_str());
+    sql << ddl;
+    const Part news[] = {{0, "P-100", "볼트", 120, soci::i_ok},
+                         {0, "P-200", "너트", 80, soci::i_ok},
+                         {0, "P-300", "와셔", 0, soci::i_null}};
+    for (const Part& p : news)
+        sql << "INSERT INTO parts (sku, name, price_cents) "
+               "VALUES (:sku, :name, :price_cents)", soci::use(p);
+    soci::rowset<Part> rows = (sql.prepare << "SELECT id, sku, name, price_cents "
+                                              "FROM parts ORDER BY id");
+    for (const Part& p : rows)
+        std::printf("  %d %s %s %s\n", p.id, p.sku.c_str(), p.name.c_str(),
+                    p.price_ind == soci::i_ok ? std::to_string(p.price).c_str()
+                                              : "가격 없음");
+    // 날 SQL: 이어 붙이면 주입되고, use로 묶으면 값으로만 쓰인다
+    std::string sku = "x' OR '1'='1";
+    int glued = 0, bound = 0;
+    sql << "SELECT count(*) FROM parts WHERE sku = '" + sku + "'",
+        soci::into(glued);
+    sql << "SELECT count(*) FROM parts WHERE sku = :sku", soci::use(sku),
+        soci::into(bound);
+    std::printf("  이어 붙인 SQL %d행, use로 묶은 SQL %d행\n", glued, bound);
+    try {                                         // 오류는 예외로 온다
+        sql << "INSERT INTO parts (sku, name) VALUES ('P-100', '중복')";
+    } catch (const soci::sqlite3_soci_error& e) {
+        std::printf("  같은 sku: %s, SQLite 코드 %d\n", category(e), e.result());
+    } catch (const soci::postgresql_soci_error& e) {
+        std::printf("  같은 sku: %s, SQLSTATE %s\n", category(e),
+                    e.sqlstate().c_str());
+    }
+}
+
+int main() {
+    try {
+        soci::session lite(soci::sqlite3, ":memory:");
+        run(lite, "CREATE TABLE parts (id INTEGER PRIMARY KEY, sku TEXT NOT NULL "
+                  "UNIQUE, name TEXT NOT NULL, price_cents INTEGER)");
+        soci::session pg(soci::postgresql, "host=localhost dbname=academy "
+                                           "user=academy password=academy");
+        run(pg, "CREATE TEMP TABLE parts (id serial PRIMARY KEY, sku text NOT NULL "
+                "UNIQUE, name text NOT NULL, price_cents integer)");
+    } catch (const soci::soci_error& e) {
+        std::printf("연결 실패: %s\n", e.what());
+    }
+}
+```
+
+```text
+[sqlite3]
+  1 P-100 볼트 120
+  2 P-200 너트 80
+  3 P-300 와셔 가격 없음
+  이어 붙인 SQL 3행, use로 묶은 SQL 0행
+  같은 sku: unknown, SQLite 코드 19
+[postgresql]
+  1 P-100 볼트 120
+  2 P-200 너트 80
+  3 P-300 와셔 가격 없음
+  이어 붙인 SQL 3행, use로 묶은 SQL 0행
+  같은 sku: constraint_violation, SQLSTATE 23505
+```
+
+- **짝은 type_conversion에**: `from_base`와 `to_base`가 [「행을 구조체로」](#/read/cpp-database/map-rows)의 `fields()`가 하던 일을 합니다. `use(p)`는 `to_base`가 채운 값을 `:sku`, `:name` 같은 이름 붙은 자리에 묶고, `rowset<Part>`는 행마다 `from_base`를 부릅니다
+- **NULL은 indicator로**: 값과 함께 `i_ok`나 `i_null`을 주고받습니다
+- **백엔드만 바꿔 같은 코드**: `run`은 두 세션에서 그대로 돌았고, 다른 것은 DDL(`INTEGER PRIMARY KEY`와 `serial`)뿐입니다
+- **날 SQL은 여전히 날 SQL**: `<<`는 문자열을 받으므로 이어 붙이면 주입되어 3행이 세어졌습니다. `use`로 묶으면 0행입니다. `<<` 뒤에서 `+`로 문자열을 잇는 곳이 검토할 자리입니다([「SQL 주입과 매개변수 바인딩」](#/read/cpp-database/injection))
+- **오류의 분류는 백엔드마다**: 4.0.3에서 PostgreSQL 백엔드는 중복을 `constraint_violation`으로 분류했지만 sqlite3 백엔드는 `unknown`이었습니다. 백엔드별 예외 형으로 받으면 SQLite 결과 코드나 SQLSTATE를 볼 수 있고, 4.1.1에서 이 분류가 다듬어졌습니다
+
+## 쿼리 빌더: SQL을 C++ 식으로
+
+sqlpp23은 sqlpp11을 잇는 헤더 전용 라이브러리로 C++23을 씁니다. 표 구조체는 `CREATE TABLE` 문에서 `sqlpp23-ddl2cpp` 스크립트로 만들고(기본으로 `price_cents`는 `priceCents`가 됩니다), 문장은 함수로 짭니다. 표가 `from()`에 빠졌거나 글자 열을 수와 견주면 컴파일 단계에서 막힙니다.
+
+```cpp nocheck
+constexpr auto parts = model::Parts{};          // 생성된 표 구조체
+for (const auto& row : db(select(parts.name)
+                              .from(parts)
+                              .where(parts.priceCents < 100))) {
+    std::println("{}", row.name);   // NOT NULL 글자 열이라 std::string_view
+}
+db("CREATE INDEX parts_name ON parts (name)");  // 문자열 SQL도 받는다
+```
+
+`db("...")`처럼 문자열로 실행하는 길과 `sqlpp::verbatim<T>("...")`, `verbatim_table`, `verbatim_clause`는 검사를 받지 않는 문입니다. 이 문자열에는 사용자 입력이 섞이지 않게 합니다.
+
+## ORM: 객체를 표에
+
+sqlite_orm은 SQLite 전용 헤더 하나짜리 ORM입니다. 열과 멤버 포인터를 짝짓는 모습은 「행을 구조체로」와 같고, `insert`나 `get_all` 같은 함수가 SQL을 만들어 실행합니다.
+
+```cpp nocheck
+using namespace sqlite_orm;
+auto storage = make_storage("shop.db",
+    make_table("parts",
+               make_column("id", &Part::id, primary_key().autoincrement()),
+               make_column("sku", &Part::sku, unique()),
+               make_column("name", &Part::name),
+               make_column("price_cents", &Part::price)));
+storage.sync_schema();                      // 파일의 스키마를 정의에 맞춘다
+Part p{0, "P-400", "핀", 30};
+p.id = storage.insert(p);                   // INSERT를 만들고 새 id를 돌려준다
+auto cheap = storage.get_all<Part>(where(c(&Part::price) < 100));
+```
+
+`sync_schema`는 편하지만, 저장소의 README가 밝히듯 데이터 보존을 보장하지 않습니다. 기본값(`preserve`가 false)에서는 정의에 없는 열이 남은 표를 지우고 다시 만듭니다. 운영 중인 DB의 스키마는 [「스키마와 마이그레이션」](#/read/cpp-database/schema)의 방식으로 바꿉니다.
+
+ODB는 `#pragma db object`를 단 클래스를 `odb` 컴파일러가 읽어 영속화 코드를 생성하는 ORM으로, SQLite, PostgreSQL, MySQL, Oracle, SQL Server를 지원합니다. 날 SQL은 `db->execute("...")`로 실행하고, 결과는 `#pragma db view`로 선언한 네이티브 뷰 구조체로 받습니다. 실행 중에 SQL을 짤 때는 값을 이어 붙이지 말고 `query::_val(x)`로 묶습니다. Qt를 쓴다면 `QSqlQuery`의 `prepare`와 `bindValue`가 이 층을 맡습니다([「연결과 쿼리」](#/read/cpp-qt/qsql-connect)).
+
+<Note>
+대신 써 준 SQL은 직접 봐야 합니다. SOCI는 `get_last_query`와 `set_log_stream`, sqlite_orm은 `storage.prepare(...)`가 돌려준 문장의 `sql()`, sqlpp23은 연결 설정의 `debug` 로거로 실행한 SQL을 보여 줍니다. 객체 하나를 읽을 때마다 쿼리가 하나씩 더 나가는 [「N+1 문제」](#/read/cpp-database/dbperf-nplus1)는 대개 이렇게 로그를 봐야 드러납니다.
+</Note>
+
+## 정리
+
+- SOCI 같은 얇은 층은 SQL을 그대로 쓰고 묶기, 형 변환, 구조체 매핑, 백엔드 차이를 맡지만, 오류 분류 같은 세부는 백엔드마다 다를 수 있다
+- 쿼리 빌더는 SQL을 C++ 식으로 짜서 컴파일러가 검사하게 하고, ORM은 SQL을 만들어 주는 대신 무엇이 실행되는지 로그로 확인해야 한다
+- 어느 층이든 문자열 SQL을 넣는 문(SOCI의 `<<`, sqlpp23의 `verbatim`, ODB의 `execute`)이 있으므로, 그곳에 사용자 입력을 이어 붙이지 않고 값은 묶는다
