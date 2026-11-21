@@ -1,0 +1,128 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '교착 상태: 반대 순서의 잠금, deadlock_timeout과 40P01, 같은 순서로 미리 잠그기, 짧은 트랜잭션';
+
+두 트랜잭션이 서로 상대가 쥔 잠금을 기다리면 둘 다 영원히 기다립니다. 이것이 **교착 상태**(deadlock)입니다. A가 1번 행을 고치고 2번 행으로 가는 동안 B가 2번 행을 고치고 1번 행으로 오면, 이체 두 건만으로도 생깁니다. 데이터베이스는 이런 고리를 찾아 한쪽을 되돌려 풀어 주지만, 그 전까지 기다린 시간과 되돌린 일은 손해입니다.
+
+## 고리가 생기고 풀리는 모습
+
+아래 예제는 A와 B가 두 행을 반대 순서로 고치게 합니다. A의 두 번째 UPDATE는 기다리게 될 것이므로 `PQsendQuery`로 보내 두고, 관리자 연결의 `pg_blocking_pids`로 A가 실제로 기다리기 시작한 것을 확인한 뒤 B를 움직입니다. 그래야 결과가 매번 같습니다.
+
+```cpp pkg=libpq
+#include <libpq-fe.h>
+#include <chrono>
+#include <cstdio>
+#include <string>
+#include <thread>
+
+using namespace std::chrono_literals;
+
+std::string one(PGconn* c, const std::string& sql) {   // 첫 칸 (오류면 SQLSTATE)
+    PGresult* r = PQexec(c, sql.c_str());
+    const char* st = PQresultErrorField(r, PG_DIAG_SQLSTATE);
+    std::string v = st ? st : PQntuples(r) > 0 ? PQgetvalue(r, 0, 0) : "ok";
+    PQclear(r);
+    return v;
+}
+
+// 보내 둔 쿼리의 결과를 거둔다 (오류면 SQLSTATE와 메시지)
+std::string collect(PGconn* c) {
+    std::string v = "ok";
+    while (PGresult* r = PQgetResult(c)) {
+        if (PQresultStatus(r) == PGRES_FATAL_ERROR)
+            v = std::string(PQresultErrorField(r, PG_DIAG_SQLSTATE)) + " " +
+                PQresultErrorField(r, PG_DIAG_MESSAGE_PRIMARY);
+        PQclear(r);
+    }
+    return v;
+}
+
+// pid의 서버 프로세스가 누군가의 잠금을 기다리기 시작할 때까지 기다린다
+void wait_blocked(PGconn* admin, int pid) {
+    std::string q =
+        "SELECT cardinality(pg_blocking_pids(" + std::to_string(pid) + "))";
+    while (one(admin, q) == "0") std::this_thread::sleep_for(10ms);
+}
+
+int main() {
+    const char* ci = "host=localhost dbname=academy user=academy password=academy";
+    PGconn* admin = PQconnectdb(ci);
+    PGconn* a = PQconnectdb(ci);
+    PGconn* b = PQconnectdb(ci);
+    one(admin, "SET client_min_messages = warning");
+    one(admin, "DROP TABLE IF EXISTS dl_acct");
+    one(admin, "CREATE TABLE dl_acct (id int PRIMARY KEY, bal int)");
+    one(admin, "INSERT INTO dl_acct VALUES (1, 100), (2, 100)");
+    std::printf("deadlock_timeout %s\n",
+                one(admin, "SHOW deadlock_timeout").c_str());
+
+    std::printf("반대 순서로 잠그기: A는 1→2, B는 2→1\n");
+    one(a, "BEGIN");
+    one(a, "UPDATE dl_acct SET bal = bal - 10 WHERE id = 1");    // A가 1번을 잠근다
+    one(b, "BEGIN");
+    one(b, "UPDATE dl_acct SET bal = bal - 10 WHERE id = 2");    // B가 2번을 잠근다
+    PQsendQuery(a, "UPDATE dl_acct SET bal = bal + 10 WHERE id = 2");
+    wait_blocked(admin, PQbackendPID(a));                        // A는 2번을 기다림
+    std::printf("  A는 B가 쥔 2번 행을 기다림\n");
+    std::string rb = one(b, "UPDATE dl_acct SET bal = bal + 10 WHERE id = 1");
+    std::printf("  A: %s\n", collect(a).c_str());           // 서버가 A를 되돌림
+    std::printf("  B: %s\n", rb.c_str());                   // B는 잠금을 얻음
+    one(a, "ROLLBACK");
+    one(b, "COMMIT");
+    std::string bal = one(admin, "SELECT string_agg(bal::text, ' ' ORDER BY id) "
+                                 "FROM dl_acct");
+    std::printf("  잔액 %s\n", bal.c_str());
+
+    std::printf("같은 순서로 잠그기: 둘 다 id 순서로 FOR UPDATE\n");
+    const char* lock = "SELECT id FROM dl_acct WHERE id IN (1, 2) "
+                       "ORDER BY id FOR UPDATE";
+    one(a, "BEGIN");
+    one(a, lock);                                                // A가 둘 다 쥔다
+    one(b, "BEGIN");
+    PQsendQuery(b, lock);                                   // B는 1번에서 기다림
+    wait_blocked(admin, PQbackendPID(b));
+    std::printf("  B는 1번 행에서 기다림 (2번은 아직 건드리지 않음)\n");
+    one(a, "UPDATE dl_acct SET bal = bal - 10 WHERE id = 1");
+    one(a, "UPDATE dl_acct SET bal = bal + 10 WHERE id = 2");
+    one(a, "COMMIT");
+    std::printf("  A 커밋, B의 잠금: %s\n", collect(b).c_str());
+    one(b, "UPDATE dl_acct SET bal = bal + 10 WHERE id = 1");
+    one(b, "UPDATE dl_acct SET bal = bal - 10 WHERE id = 2");
+    std::printf("  B 커밋: %s\n", one(b, "COMMIT").c_str());
+    PQfinish(a);
+    PQfinish(b);
+    PQfinish(admin);
+}
+```
+
+```text
+deadlock_timeout 1s
+반대 순서로 잠그기: A는 1→2, B는 2→1
+  A는 B가 쥔 2번 행을 기다림
+  A: 40P01 deadlock detected
+  B: ok
+  잔액 110 90
+같은 순서로 잠그기: 둘 다 id 순서로 FOR UPDATE
+  B는 1번 행에서 기다림 (2번은 아직 건드리지 않음)
+  A 커밋, B의 잠금: ok
+  B 커밋: ok
+```
+
+- **찾기까지 걸리는 시간**: PostgreSQL은 잠금을 `deadlock_timeout`(기본 1초)만큼 기다린 프로세스가 그때 교착 검사를 돌립니다. 그래서 이 예제는 약 1초 걸렸습니다. 검사가 비싸서 기다릴 때마다 바로 하지 않는 것입니다
+- **한쪽이 40P01로 되돌려진다**: 고리를 찾은 쪽인 A가 "deadlock detected"로 되돌려졌고, A가 놓은 1번 행 잠금을 B가 얻어 이체를 마쳤습니다. 어느 쪽이 되돌려질지는 문서도 기대지 말라고 하므로, 양쪽 모두 40P01을 받으면 다시 하게 짭니다([「재시도」](#/read/cpp-database/tx-retry))
+- **같은 순서로 미리 잠그기**: 둘 다 `ORDER BY id FOR UPDATE`로 필요한 행을 id 순서대로 먼저 잠그자, B는 1번 행에서 기다렸다가 A가 커밋한 뒤 이어서 성공했습니다. 잠금을 늘 같은 순서로 얻으면 고리가 생길 수 없습니다. `UPDATE ... WHERE id IN (1, 2)`처럼 여러 행을 한 문장으로 고치는 것만으로는 순서가 정해지지 않으니, 잠그는 SELECT에 순서를 적습니다
+- **짧게 쥔다**: 잠금은 트랜잭션이 끝날 때 풀립니다. 트랜잭션 안에서 사용자의 입력을 기다리거나 다른 서비스를 부르면 잠금을 쥔 시간이 길어져 교착과 기다림이 모두 늘어납니다
+
+## 다른 데이터베이스와 진단
+
+MySQL과 MariaDB의 InnoDB는 기본으로 교착을 곧바로 찾아(`innodb_deadlock_detect`) 고친 행 수가 적은 쪽을 골라 1213으로 되돌립니다. 이 검사를 끄면 `innodb_lock_wait_timeout`(기본 50초)이 지나야 1205로 끝납니다. SQLite는 데이터베이스 전체를 잠그므로 행 단위 교착은 없지만, 읽다가 쓰기로 올라가는 두 트랜잭션은 비슷한 상황에서 `SQLITE_BUSY`를 받습니다([「트랜잭션」](#/read/cpp-database/sqlite-tx)).
+
+<Note>
+PostgreSQL의 `log_lock_waits`를 켜면 `deadlock_timeout`보다 오래 잠금을 기다린 세션이 누구를 기다리는지 서버 로그에 남아, 교착이 되기 전의 긴 기다림까지 찾을 수 있습니다. PostgreSQL 18까지는 기본으로 꺼져 있고 19에서 켜짐이 기본이 되었습니다. 지금 누가 누구를 막고 있는지는 `pg_locks`와 `pg_blocking_pids`로 봅니다([「모니터링」](#/read/cpp-database/dbops-monitor)).
+</Note>
+
+## 정리
+
+- 두 트랜잭션이 서로의 잠금을 기다리면 교착이 생기고, PostgreSQL은 deadlock_timeout 뒤 검사로 고리를 찾아 한쪽을 40P01로 되돌린다
+- 어느 쪽이 되돌려질지 기대지 말고 40P01은 트랜잭션째로 다시 하게 짠다
+- 필요한 행을 늘 같은 순서로 FOR UPDATE로 먼저 잠그고 트랜잭션을 짧게 유지하면 교착 자체가 생기지 않는다
