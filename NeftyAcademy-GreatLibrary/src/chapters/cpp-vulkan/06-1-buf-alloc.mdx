@@ -1,0 +1,146 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '메모리 할당과 VMA: 힙과 메모리 타입, 할당 수 한도와 정렬, 큰 블록 나눠 쓰기, VMA가 타입을 고르는 법';
+
+[「렌더 패스와 동적 렌더링」](#/read/cpp-vulkan/tri-renderpass)의 `allocate`는 리소스마다 `vkAllocateMemory`를 한 번씩 불렀습니다. 예제에는 이것으로 충분하지만 실제 프로그램에서는 두 가지가 걸립니다. 동시에 살아 있을 수 있는 할당 수(`maxMemoryAllocationCount`)를 명세는 4096개까지만 보장하고 실제로 4096을 알리는 드라이버도 흔하며, 할당 자체가 CPU에서 비싼 호출입니다. 그래서 큰 블록을 몇 개 받아 오프셋으로 나눠 쓰는데, 이 일을 맡는 대표 라이브러리가 AMD GPUOpen의 **VMA**(Vulkan Memory Allocator)입니다. 헤더 파일 하나로 된 MIT 라이선스 라이브러리이고, 최신판은 2025년 5월에 나온 3.3.0입니다(이 책은 우분투 패키지의 3.1 개발판으로 시험했습니다). 아래 프로그램은 장치의 메모리를 둘러본 뒤 VMA로 버퍼 102개를 만들고, 어느 블록의 어디에 놓였는지 찍습니다.
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp
+#define VMA_IMPLEMENTATION              // VMA의 구현을 이 파일 하나에 넣는다
+#include <vk_mem_alloc.h>
+#include <cstring>
+#include <set>
+#include <string>
+#include "vkx_device.hpp"
+
+std::string names(VkMemoryPropertyFlags f) {
+    const std::pair<VkMemoryPropertyFlags, const char*> bits[] = {
+        {VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, "DEVICE_LOCAL"},
+        {VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, "HOST_VISIBLE"},
+        {VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, "HOST_COHERENT"},
+        {VK_MEMORY_PROPERTY_HOST_CACHED_BIT, "HOST_CACHED"},
+        {VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT, "LAZILY_ALLOCATED"}};
+    std::string s;
+    for (auto [bit, name] : bits)
+        if (f & bit) s += (s.empty() ? "" : " | ") + std::string(name);
+    return s.empty() ? "(성질 없음)" : s;
+}
+
+struct Made { VkBuffer buffer; VmaAllocation alloc; VmaAllocationInfo info; };
+
+// 버퍼를 만들고 메모리를 붙이는 일을 VMA가 한 번에 한다. 메모리 타입은
+// 버퍼의 쓰임새와 CPU가 어떻게 만질지(flags)를 보고 VMA가 고른다
+Made make(VmaAllocator vma, VkDeviceSize size, VkBufferUsageFlags usage,
+          VmaAllocationCreateFlags flags = 0) {
+    VkBufferCreateInfo bi{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                          .size = size, .usage = usage};
+    VmaAllocationCreateInfo ci{.flags = flags, .usage = VMA_MEMORY_USAGE_AUTO};
+    Made m;
+    vkx::check(vmaCreateBuffer(vma, &bi, &ci, &m.buffer, &m.alloc, &m.info),
+               "vmaCreateBuffer");
+    return m;
+}
+
+int main() {
+    vkx::Instance inst = vkx::make_instance();
+    vkx::Device dev = vkx::make_device(inst.handle);
+    const VkPhysicalDeviceMemoryProperties& mem = dev.memory;
+    for (uint32_t h = 0; h < mem.memoryHeapCount; ++h) {
+        const VkMemoryHeap& heap = mem.memoryHeaps[h];
+        std::printf("힙 %u: %s, %s\n", h,
+                    heap.size > (1ull << 30) ? "1GiB보다 큼" : "1GiB 이하",
+                    heap.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ? "DEVICE_LOCAL"
+                                                                 : "호스트 메모리");
+    }
+    for (uint32_t t = 0; t < mem.memoryTypeCount; ++t)
+        std::printf("타입 %u(힙 %u): %s\n", t, mem.memoryTypes[t].heapIndex,
+                    names(mem.memoryTypes[t].propertyFlags).c_str());
+    std::printf("동시 할당 한도 %u개, bufferImageGranularity %u바이트\n",
+                dev.props.limits.maxMemoryAllocationCount,
+                unsigned(dev.props.limits.bufferImageGranularity));
+
+    VmaAllocatorCreateInfo ai{.physicalDevice = dev.gpu, .device = dev.handle,
+                              .instance = inst.handle,
+                              .vulkanApiVersion = VK_API_VERSION_1_3};
+    VmaAllocator vma;
+    vkx::check(vmaCreateAllocator(&ai, &vma), "vmaCreateAllocator");
+
+    std::vector<Made> small;                     // 1000바이트짜리 저장 버퍼 100개
+    std::set<VkDeviceMemory> blocks;
+    for (int i = 0; i < 100; ++i) {
+        small.push_back(make(vma, 1000, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT));
+        const VmaAllocationInfo& info = small.back().info;
+        blocks.insert(info.deviceMemory);
+        if (i < 3)
+            std::printf("버퍼 %d: 타입 %u, 오프셋 %u\n", i, info.memoryType,
+                        unsigned(info.offset));
+    }
+    std::printf("버퍼 100개 → VkDeviceMemory %zu개\n", blocks.size());
+
+    Made big = make(vma, 160ull << 20, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    bool shared = blocks.count(big.info.deviceMemory) > 0;
+    std::printf("160MiB 버퍼: 오프셋 %u, %s\n", unsigned(big.info.offset),
+                shared ? "같은 블록" : "따로 받은 블록");
+
+    // CPU가 차례로 채워 GPU로 보낼 업로드 버퍼. 매핑된 채로 받는다
+    Made up = make(vma, 4096, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                   VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                   VMA_ALLOCATION_CREATE_MAPPED_BIT);
+    std::memset(up.info.pMappedData, 0x3f, 4096);
+    vmaFlushAllocation(vma, up.alloc, 0, VK_WHOLE_SIZE);   // COHERENT면 할 일 없음
+    std::printf("업로드 버퍼: 타입 %u, 매핑 %s\n", up.info.memoryType,
+                up.info.pMappedData ? "됨" : "안 됨");
+
+    VmaTotalStatistics stats;
+    vmaCalculateStatistics(vma, &stats);
+    const VmaStatistics& s = stats.total.statistics;
+    std::printf("모두 %u개 할당이 블록 %u개(%u MiB)에 들어 있음\n",
+                s.allocationCount, s.blockCount, unsigned(s.blockBytes >> 20));
+
+    for (Made* m : {&up, &big}) vmaDestroyBuffer(vma, m->buffer, m->alloc);
+    for (Made& m : small) vmaDestroyBuffer(vma, m.buffer, m.alloc);
+    vmaDestroyAllocator(vma);
+    vkx::destroy(dev);
+    vkx::destroy(inst);
+}
+```
+
+```text
+힙 0: 1GiB보다 큼, DEVICE_LOCAL
+타입 0(힙 0): DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT | HOST_CACHED
+동시 할당 한도 4294967295개, bufferImageGranularity 64바이트
+버퍼 0: 타입 0, 오프셋 0
+버퍼 1: 타입 0, 오프셋 1024
+버퍼 2: 타입 0, 오프셋 2048
+버퍼 100개 → VkDeviceMemory 1개
+160MiB 버퍼: 오프셋 0, 따로 받은 블록
+업로드 버퍼: 타입 0, 매핑 됨
+모두 102개 할당이 블록 2개(192 MiB)에 들어 있음
+```
+
+- **힙과 타입**: 힙은 물리적인 메모리 풀(비디오 메모리, 시스템 메모리)이고, 타입은 한 힙 안에서 성질을 묶은 조합입니다. lavapipe는 CPU 메모리를 쓰므로 모든 성질을 가진 타입 하나뿐입니다. 따로 꽂는 GPU는 보통 DEVICE_LOCAL인 비디오 메모리 힙과 시스템 메모리 힙을 따로 알리고, 비디오 메모리 가운데 CPU가 직접 쓸 수 있는 창(BAR, 흔히 256MiB이고 Resizable BAR를 켜면 전체)을 DEVICE_LOCAL이면서 HOST_VISIBLE인 타입으로 알립니다. 통합 GPU는 모든 타입이 둘 다인 경우가 흔합니다
+- **한 블록에 여럿**: 1000바이트 버퍼 100개가 VkDeviceMemory 하나에 들어갔습니다. 오프셋이 1024씩 띄는 것은 버퍼가 요구하는 정렬(lavapipe는 64바이트)에 맞춰 1000을 올렸기 때문입니다. 버퍼와 최적 타일링 이미지를 한 블록에 이웃하게 놓을 때는 `bufferImageGranularity`만큼 떨어뜨려야 하는데, 이것도 VMA가 챙깁니다
+- **큰 요청은 따로**: VMA는 1GiB가 넘는 힙에서 256MiB(그 이하의 힙에서는 힙의 1/8) 블록을 기본으로 삼되, 처음에는 그 1/8, 1/4, 1/2로 작게 시작합니다. 그래서 첫 블록은 32MiB였고, 블록 크기의 절반(128MiB)을 넘는 160MiB 버퍼는 전용 VkDeviceMemory를 따로 받았습니다. 드라이버가 `VkMemoryDedicatedRequirements`로 전용 할당을 권하는 리소스도 VMA가 따로 받습니다
+- **업로드 버퍼**: CPU가 차례로 쓰기만 한다고 알리고(`HOST_ACCESS_SEQUENTIAL_WRITE`) `MAPPED`를 주면 살아 있는 동안 매핑된 주소를 줍니다. HOST_COHERENT가 아닌 메모리에 썼다면 `vmaFlushAllocation`으로 알려야 하는데, `nonCoherentAtomSize` 단위 맞춤은 VMA가 하고 COHERENT 메모리에서는 아무 일도 하지 않습니다
+
+## VMA가 메모리 타입을 고르는 법
+
+`VMA_MEMORY_USAGE_AUTO`는 버퍼나 이미지의 쓰임새와 CPU 접근 플래그를 보고 원하는 성질을 정합니다. 쓰임새가 복사(TRANSFER_SRC, TRANSFER_DST)뿐이면 GPU가 직접 읽지 않는 것으로 봅니다.
+
+| CPU 접근 | 쓰임새의 예 | VMA가 찾는 메모리 |
+| --- | --- | --- |
+| 없음 | 정점 버퍼, 렌더 타깃 | DEVICE_LOCAL을 선호 |
+| 순차 쓰기, GPU는 복사만 | 스테이징 버퍼 | HOST_VISIBLE 필수, DEVICE_LOCAL은 피함 |
+| 순차 쓰기, GPU가 직접 읽음 | 매 프레임 바꾸는 UBO | HOST_VISIBLE 필수, DEVICE_LOCAL 선호 |
+| 무작위 접근 | GPU 결과 읽어 오기 | HOST_VISIBLE 필수, HOST_CACHED 선호 |
+
+그래서 GPU가 자주 읽는 큰 데이터는 DEVICE_LOCAL에 두고 스테이징 버퍼로 옮겨 넣으며([「스테이징」](#/read/cpp-vulkan/buf-staging)), 매 프레임 바뀌는 작은 데이터는 CPU가 바로 쓸 수 있는 메모리에 둡니다([「유니폼 버퍼」](#/read/cpp-vulkan/buf-uniform)). 이 책의 나머지 예제는 리소스를 몇 개만 만들므로 계속 `vkx_resource.hpp`의 간단한 할당을 씁니다.
+
+<Note>
+힙 크기는 이 프로그램이 다 쓸 수 있다는 약속이 아니라 다른 프로그램과 함께 쓰는 전체 크기입니다. 장치 확장 `VK_EXT_memory_budget`을 켜고 VMA에 `VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT`를 주면, `vmaGetHeapBudgets`로 힙마다 지금 쓰는 양과 쓸 수 있는 양(예산)을 볼 수 있어 큰 리소스를 올리기 전에 확인할 수 있습니다.
+</Note>
+
+## 정리
+
+- 동시 할당 수는 4096개까지만 보장되고 할당은 비싸므로, 큰 블록을 받아 정렬과 `bufferImageGranularity`를 지키며 나눠 쓴다
+- VMA는 256MiB(작은 힙은 1/8) 블록을 작게 시작해 키우고, 블록의 절반이 넘거나 드라이버가 권하는 리소스는 전용 메모리로 따로 받는다
+- 메모리 타입은 쓰임새와 CPU 접근 방식으로 고르며, `VMA_MEMORY_USAGE_AUTO`가 DEVICE_LOCAL, HOST_VISIBLE, HOST_CACHED 사이의 선택을 대신한다
