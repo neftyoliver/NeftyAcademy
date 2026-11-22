@@ -1,0 +1,114 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '보드마다의 카메라·디스플레이 단자, 케이블 꽂는 법, rpicam으로 확인하기, 터치 디스플레이, 영상 크기';
+export const terms = ['display_auto_detect', 'swapxy'];
+
+카메라 모듈과 작은 화면은 USB나 HDMI가 아니라 납작한 띠 케이블로 보드에 바로 붙습니다. 카메라 쪽 규격이 CSI, 디스플레이 쪽 규격이 DSI이고, 둘 다 MIPI라는 단체가 정한 것입니다. 센서가 내놓는 날것의 화소를 보드의 영상 처리 회로가 받아 다듬는 길입니다.
+
+## 보드마다의 단자
+
+| 보드 | 단자 | 핀 |
+| --- | --- | --- |
+| 5 | CAM/DISP 0과 CAM/DISP 1. 카메라와 디스플레이 겸용 | 22핀, 0.5mm 간격 |
+| 4 Model B | CAMERA 하나와 DISPLAY 하나 | 15핀, 1mm 간격 |
+| Zero 2 W | 카메라 단자 하나. 디스플레이 단자는 없다 | 22핀 |
+
+- **5의 두 단자는 겸용이다**: 카메라 둘, 디스플레이 둘, 하나씩의 어느 조합으로도 씁니다. micro HDMI와 이더넷 사이에 나란히 있습니다
+- **4는 자리가 정해져 있다**: CAMERA는 HDMI와 오디오 잭 사이에 있고, DISPLAY라고 적힌 단자가 따로 있습니다. 서로 바꿔 꽂지 않습니다
+- **Zero 2 W**: 카메라 단자가 SD카드 슬롯의 맞은편인 짧은 가장자리에 있습니다
+- **레인**: 데이터가 지나는 선 쌍의 수입니다. 많을수록 큰 해상도와 빠른 프레임을 나릅니다. 5의 단자는 네 레인이고 4의 단자는 두 레인입니다
+
+## 케이블 꽂기
+
+- **전원을 끄고 뽑은 다음에**: 켜진 채로 꽂고 빼지 않습니다
+- **걸쇠를 올리고 넣는다**: 단자의 걸쇠를 살짝 들어 올리고, 케이블의 금속 접점이 걸쇠의 반대쪽을 보게 넣은 다음 걸쇠를 눌러 잠급니다. 비스듬히 들어가면 인식되지 않습니다
+- **케이블의 이름**: 15핀 단자끼리 잇는 것이 Standard-Standard, 22핀 단자의 보드에 카메라를 잇는 것이 Standard-Mini입니다. 5와 Zero에는 뒤의 것이 필요합니다([「케이블, 케이스, USB-시리얼 어댑터」](#/read/sbc-start/prt-cables))
+- **5에 쿨러를 달 것이라면**: 쿨러를 얹기 전에 케이블부터 꽂습니다. 얹은 뒤에는 손이 잘 닿지 않습니다
+- **디스플레이는 전원선도**: 공식 터치 디스플레이는 헤더의 2번 핀(5V)과 6번 핀(GND)에서 전원을 받습니다
+
+## 카메라 확인하기
+
+```sh
+rpicam-hello --list-cameras         # 알아본 카메라와 그 카메라의 모드들
+rpicam-still -n --output test.jpg   # 한 장 찍는다. -n은 미리보기 창을 띄우지 않는다
+rpicam-vid -n -t 10s -o test.h264   # 10초 동안 찍는다
+```
+
+- **저절로 알아본다**: `config.txt`의 `camera_auto_detect=1`이 공식 카메라를 알아보고 오버레이를 얹습니다. Raspberry Pi OS에는 이 줄이 처음부터 들어 있습니다
+- **모니터가 없을 때**: 미리보기 창을 띄울 화면이 없으므로 `-n`을 붙입니다. Lite에는 창 기능을 뺀 `rpicam-apps-lite`가 들어 있습니다
+- **손으로 적어야 할 때**: 다른 회사의 카메라는 `camera_auto_detect=0`으로 바꾸고 센서에 맞는 오버레이를 적습니다
+
+| 카메라 | 센서 | 적는 줄 |
+| --- | --- | --- |
+| Camera Module 3 | IMX708 | `dtoverlay=imx708` |
+| HQ Camera | IMX477 | `dtoverlay=imx477` |
+| Global Shutter Camera | IMX296 | `dtoverlay=imx296` |
+| Camera Module 2 | IMX219 | `dtoverlay=imx219` |
+
+- **5의 두 단자**: 오버레이는 1번 단자가 기본입니다. 0번 단자에 꽂았다면 `dtoverlay=imx708,cam0`처럼 `,cam0`을 붙입니다. 카메라가 둘이면 명령에 `--camera 1`을 주어 고릅니다
+- **네트워크로 보기**: `rpicam-vid -t 0 -n --inline --listen -o tcp://0.0.0.0:8888`로 보드가 기다리게 하고, PC에서 `ffplay tcp://sensor-01.local:8888`로 엽니다. `-t 0`은 멈추라고 할 때까지입니다
+- **코드에서 쓰기**: 이 서가의 「libcamera」와 「V4L2」가 프레임을 프로그램으로 받는 법을 다룹니다
+
+## 압축하지 않은 영상의 크기
+
+카메라가 내놓는 프레임은 압축하기 전에는 매우 큽니다. 램이 512MB인 Zero 2 W와 16GB까지 있는 5에서 할 수 있는 일이 여기서 갈립니다. 아래 예제는 흔한 해상도 몇 가지로 크기를 셉니다.
+
+```c
+// 압축하지 않은 영상의 크기: 프레임 하나, 1초, 1분, 그리고 램에 담기는 장수
+#include <stdio.h>
+
+struct mode { int w, h, fps; };
+
+int main(void) {
+    const struct mode modes[] = {
+        {640, 480, 30}, {1280, 720, 30}, {1920, 1080, 30}, {1920, 1080, 60},
+    };
+    const double ram_budget = 256.0 * 1024 * 1024;   // 영상에 내줄 램 256MiB
+    printf("해상도      초당  프레임 하나  1초      1분     256MiB에\n");
+    for (size_t i = 0; i < sizeof modes / sizeof modes[0]; ++i) {
+        const struct mode* m = &modes[i];
+        // YUV420: 밝기는 화소마다 1바이트, 색은 네 화소가 2바이트를 나눠 쓴다
+        double frame = m->w * m->h * 1.5;
+        double second = frame * m->fps;
+        printf("%4dx%-4d  %3d장  %6.2fMB     %5.1fMB  %4.1fGB  %3.0f장\n",
+               m->w, m->h, m->fps, frame / 1e6, second / 1e6,
+               second * 60 / 1e9, ram_budget / frame);
+    }
+}
+```
+
+```text
+해상도      초당  프레임 하나  1초      1분     256MiB에
+ 640x480    30장    0.46MB      13.8MB   0.8GB  583장
+1280x720    30장    1.38MB      41.5MB   2.5GB  194장
+1920x1080   30장    3.11MB      93.3MB   5.6GB   86장
+1920x1080   60장    3.11MB     186.6MB  11.2GB   86장
+```
+
+- **그대로는 저장할 수 없다**: 1080p를 그대로 적으면 1분에 5.6GB입니다. `rpicam-vid`가 H.264로 압축해서 적는 까닭입니다
+- **램에 쌓아 두는 장수**: 프레임을 몇 장씩 모아 처리하는 프로그램은 해상도를 올리는 만큼 램이 빨리 찹니다. 필요한 만큼만 낮춰 받습니다(`--width 1280 --height 720`)
+- **압축은 누가 하나**: 문서의 GStreamer 예는 4에서 칩의 인코더(`v4l2h264enc`)를, 5에서 CPU로 도는 인코더(`x264enc`)를 씁니다. 5에서는 인코딩이 CPU의 일이라는 뜻입니다
+
+## 터치 디스플레이
+
+- **Touch Display 2**: 5인치와 7인치는 720×1280 화소이고 다섯 손가락까지 읽는 터치가 됩니다. 10인치는 해상도도, 맞는 보드도 다릅니다. Model B+와 그 뒤의 보드가 저절로 알아봅니다. Zero 계열과 키보드형에는 맞지 않습니다
+- **손으로 적을 때**: 7인치는 `dtoverlay=vc4-kms-dsi-ili9881-7inch`, 5인치는 이름의 끝이 `5inch`입니다. 5의 CAM/DISP 0에 꽂았다면 `,dsi0`을 붙입니다
+- **세로가 기본이다**: 데스크톱에서는 화면 설정에서 돌립니다. 글자 콘솔은 `cmdline.txt`에 `video=DSI-1:720x1280@60,rotate=90`을 적어 돌립니다. 문서는 이것이 글자 콘솔에만 듣는다고 적습니다. 화면에 직접 그리는 프로그램은 스스로 돌려야 합니다
+- **터치가 어긋날 때**: 오버레이에 `invx`, `invy`, `swapxy`를 붙여 좌표를 뒤집거나 바꿉니다
+- **직접 그리기**: 데스크톱 없이 이 화면에 그리는 법은 이 서가의 「DRM/KMS」와 「LVGL」에서 다룹니다
+
+<Note>
+단자, 케이블, 명령, 오버레이는 공식 문서에서 옮겼습니다. 카메라도 디스플레이도 없는 검사 환경이라 명령을 돌려 보지는 못했습니다. 예제의 계산은 화소의 수에서 나오는 것이라 보드와 상관없이 맞습니다. 네트워크로 보는 줄의 포트 번호 8888은 본보기로 고른 것입니다.
+</Note>
+
+## 정리
+
+- 5는 겸용 단자 둘(22핀), 4는 카메라와 디스플레이 단자 하나씩(15핀), Zero 2 W는 카메라 단자 하나(22핀)다
+- 카메라는 `rpicam-hello --list-cameras`로 알아봤는지 확인하고, 모니터가 없으면 `-n`을 붙여 찍는다
+- 압축하지 않은 1080p는 프레임 하나가 3MB를 넘는다. 해상도는 필요한 만큼만 받는다
+
+## 참고 문서
+
+- [Raspberry Pi 문서: Camera software(단자와 케이블, 꽂는 법, rpicam 명령과 옵션, 센서별 오버레이, cam0)](https://www.raspberrypi.com/documentation/accessories/camera-software.html)
+- [Raspberry Pi 문서: Raspberry Pi computers(5의 CAM/DISP 단자와 4의 CAMERA, DISPLAY 단자)](https://www.raspberrypi.com/documentation/computers/sbcs.html)
+- [Raspberry Pi 문서: Touch Display 2(크기와 해상도, 전원선, 오버레이와 dsi0, 돌리기, 터치 좌표)](https://www.raspberrypi.com/documentation/accessories/touch-display-2.html)
