@@ -1,0 +1,150 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '기록의 자리 하나, 되돌린 뒤 버려지는 가지, 한도, 저장한 자리를 잃는 두 경우, 버리지 않는 Emacs와 Vim';
+export const terms = ['levelsOfUndo', 'undofile', 'maxCommands'];
+
+명령을 쌓아 두는 기록은 겉으로는 벡터 하나와 자리 하나입니다. 어려운 곳은 가장자리입니다. 되돌린 뒤에 새 명령이 오면 무엇을 버리는지, 한도를 넘으면 어떻게 되는지, 저장한 뒤로 바뀌었는지를 어떻게 아는지가 그렇습니다.
+
+```cpp
+// 실행 취소 스택의 속: 자리 하나, 버려지는 가지, 한도, 저장한 자리
+#include <print>
+#include <string>
+#include <utility>
+#include <vector>
+
+class Stack {                                    // 흔한 방식: 줄 하나와 자리 하나
+public:
+    explicit Stack(std::size_t limit) : limit_(limit) {}
+    void push(std::string name) {
+        if (clean_ != lost && clean_ > at_) clean_ = lost;  // 버릴 가지에 있었다
+        names_.resize(at_);                      // 되돌려 둔 명령은 버린다
+        names_.push_back(std::move(name));
+        ++at_;
+        if (names_.size() > limit_) {            // 한도를 넘으면 맨 앞을 버린다
+            names_.erase(names_.begin());
+            --at_;
+            clean_ = clean_ == 0 || clean_ == lost ? lost : clean_ - 1;
+        }
+    }
+    void undo() { if (at_ > 0) --at_; }
+    void redo() { if (at_ < names_.size()) ++at_; }
+    void mark_saved() { clean_ = at_; }
+    bool modified() const { return clean_ != at_; }
+    void show(const char* what) const {
+        std::string line;
+        for (std::size_t i = 0; i < names_.size(); ++i)
+            line += (i == at_ ? "| " : "") + names_[i] + " ";
+        if (at_ == names_.size()) line += "|";
+        std::println("{:<16} {:<22} {}  취소:{} 다시:{}", what, line,
+                     modified() ? "고침" : "저장됨",
+                     at_ > 0 ? names_[at_ - 1] : "-",
+                     at_ < names_.size() ? names_[at_] : "-");
+    }
+
+private:
+    static constexpr std::size_t lost = static_cast<std::size_t>(-1);
+    std::vector<std::string> names_;
+    std::size_t at_ = 0, clean_ = 0, limit_;     // 이 앞까지 실행됨, 저장한 자리
+};
+
+struct Log {                                     // Emacs 방식: 되돌리기도 덧붙인다
+    std::vector<std::pair<bool, std::string>> log;  // (넣었는가, 낱말)
+    std::vector<std::string> doc;
+    std::size_t next = 0;                        // 다음에 되돌릴 기록
+
+    void apply(bool add, const std::string& word) {
+        if (add) doc.push_back(word);
+        else doc.pop_back();
+    }
+    void edit(const std::string& word) {
+        apply(true, word);
+        log.push_back({true, word});
+        next = log.size();                       // 되돌린 것들도 이제 되돌릴 거리다
+    }
+    void undo() {
+        auto [add, word] = log[--next];
+        apply(!add, word);
+        log.push_back({!add, word});
+    }
+    void show(const char* what) const {
+        std::string line;
+        for (const std::string& w : doc) line += w + " ";
+        std::println("{:<16} {:<10} 기록 {}줄", what, line, log.size());
+    }
+};
+
+int main() {
+    Stack s{3};
+    s.push("굵게"), s.push("색"), s.mark_saved();
+    s.show("둘 하고 저장");
+    s.undo(), s.show("되돌림");
+    s.redo(), s.show("다시 실행");
+    s.undo(), s.push("밑줄"), s.show("되돌리고 밑줄");
+    s.undo(), s.undo(), s.mark_saved(), s.show("둘 되돌려 저장");
+    s.redo(), s.redo(), s.push("크기"), s.push("줄"), s.show("한도 3을 넘김");
+    s.undo(), s.undo(), s.undo(), s.show("끝까지 되돌림");
+
+    std::println("");
+    Log e;
+    e.edit("a"), e.edit("b"), e.edit("c"), e.show("a b c");
+    e.undo(), e.undo(), e.show("둘 되돌림");
+    e.edit("d"), e.show("d를 침");
+    e.undo(), e.show("되돌림 1");
+    e.undo(), e.undo(), e.show("되돌림 2, 3");
+}
+```
+
+```text
+둘 하고 저장     굵게 색 |              저장됨  취소:색 다시:-
+되돌림           굵게 | 색              고침  취소:굵게 다시:색
+다시 실행        굵게 색 |              저장됨  취소:색 다시:-
+되돌리고 밑줄    굵게 밑줄 |            고침  취소:밑줄 다시:-
+둘 되돌려 저장   | 굵게 밑줄            저장됨  취소:- 다시:굵게
+한도 3을 넘김    밑줄 크기 줄 |         고침  취소:줄 다시:-
+끝까지 되돌림    | 밑줄 크기 줄         고침  취소:- 다시:밑줄
+
+a b c            a b c      기록 3줄
+둘 되돌림        a          기록 5줄
+d를 침           a d        기록 6줄
+되돌림 1         a          기록 7줄
+되돌림 2, 3      a b c      기록 9줄
+```
+
+- **자리 하나**: `|`의 앞은 실행된 명령이고 뒤는 되돌려 둔 명령입니다. 실행 취소와 다시 실행은 자리를 옮기는 일이고, 메뉴에 보일 이름은 자리 양옆의 명령입니다
+- **새 명령은 가지를 버린다**: 색을 되돌리고 밑줄을 넣자 색은 기록에서 사라졌습니다
+- **저장한 자리는 번호만으로 모자란다**: 저장한 자리로 돌아오면 다시 "저장됨"입니다. 그런데 넷째 줄의 자리는 저장할 때와 같은 2번인데 내용이 다릅니다. 저장한 자리가 버려진 가지에 있었다면 잃었다고 적어 두고, 다음 저장 때까지 "고침"으로 둡니다
+- **한도는 맨 앞을 버린다**: 버린 명령은 되돌릴 수 없을 뿐이고 문서에는 그 결과가 남습니다. 그래서 마지막 줄처럼 끝까지 되돌려도 저장한 문서와 같지 않습니다. 이때도 저장한 자리를 잃습니다
+- **버리지 않는 길**: 아래쪽 기록은 되돌리기를 자리 옮김이 아니라 반대 변경을 덧붙이는 일로 다룹니다. d를 친 뒤에도 되돌리기를 거듭하면 a b c로 돌아갑니다. 대신 기록이 9줄로 늘었습니다
+
+## 실제 프로그램
+
+| 프로그램 | 되돌린 뒤 새로 고치면 | 한도를 재는 단위 |
+| --- | --- | --- |
+| Cocoa, Qt의 스택 | 다시 실행할 것을 버린다 | 묶음이나 명령의 수 |
+| Emacs | 되돌리기도 기록에 남는다 | 바이트 |
+| Vim | 가지로 남는다 | 변경의 수 |
+
+- **Cocoa**: 새 변경을 등록하면 다시 실행 쪽을 비웁니다. 기록은 기본으로 끝이 없고 `levelsOfUndo`로 묶음의 수를 정하면 오래된 것부터 버립니다. wxWidgets의 처리기도 `maxCommands`로 개수를 정합니다
+- **Emacs**: 되돌리기가 아닌 명령이 끼어들면, 그때까지 한 되돌리기들이 보통 변경처럼 기록에 들어갑니다. 그래서 다시 실행은 되돌리기를 되돌리는 일입니다. 한도는 바이트로 재며, 기본값은 느슨한 한도가 16만, 엄한 한도가 24만이고, 가장 최근 변경은 2400만 바이트를 넘지 않는 한 버리지 않습니다
+- **Vim**: 몇 번 되돌린 뒤 새로 고치면 가지가 생깁니다. `u`와 CTRL-R은 한 줄기만 오가고, `g-`와 `g+`를 거듭하면 모든 상태에 닿습니다. `:earlier 10m`처럼 시간으로도 갑니다. `undofile`을 켜면 기록을 파일에 간직했다가 다시 열 때 되살리는데, 글의 해시가 그때와 다르면 쓰지 않습니다
+- **GIMP**: 기록은 그림마다 따로 있고 XCF 파일에는 저장되지 않습니다. 한도는 두 값입니다. 메모리와 상관없이 지키는 최소 단계 수가 있고, 그 위로는 최대 메모리를 넘을 때 오래된 것부터 지웁니다. 플러그인 필터는 무엇을 바꿨는지 본체가 알 수 없어 앞뒤를 통째로 간직하므로 몇 번 쌓지 못합니다
+
+GIMP의 두 값은 한도를 개수로만 잴 때의 문제를 보여 줍니다. 옮기기 명령은 수십 바이트이고 필터 명령은 수십 메가바이트입니다. 명령이 자기 크기를 알려 주게 하고 그 합을 한도로 삼되, 가장 최근의 것은 크기와 상관없이 남기는 것이 Emacs와 GIMP가 함께 고른 길입니다. 저장한 자리 문제는 문서가 불변이면 사라집니다. 저장한 판과 지금 판의 포인터를 견주면 되기 때문입니다([「불변 모델과 변경 추적」](#/read/cpp-complex-app/doc-immutable)).
+
+<Note>
+기록에는 문서를 고치는 일만 넣습니다. 내보내기나 인쇄처럼 문서 밖에서 벌어진 일은 되돌릴 수 없으니 넣지 않습니다. 문서를 바꾸면서도 되돌릴 수 없는 일이 있습니다. GIMP 설명서는 그림 닫기와 저장본으로 되돌리기를 드는데, 둘 다 기록째 사라지는 일입니다. 이런 일은 하기 전에 물어보는 수밖에 없습니다.
+</Note>
+
+## 정리
+
+- 기록은 명령의 줄과 자리 하나이고, 되돌린 뒤 새 명령이 오면 자리 뒤의 가지를 버리는 것이 흔한 방식이다
+- 저장한 자리는 가지가 버려지거나 한도로 맨 앞이 버려질 때 잃을 수 있고, 그때는 다음 저장까지 고친 것으로 본다
+- 가지를 버리지 않으려면 되돌리기도 기록에 남기거나(Emacs) 기록을 트리로 두며(Vim), 한도는 개수보다 메모리로 재는 편이 맞다
+
+## 참고 문서
+
+- [Apple: Undo Architecture, Undo Manager(두 스택, 묶음, levelsOfUndo)](https://developer.apple.com/library/content/documentation/Cocoa/Conceptual/UndoArchitecture/Articles/UndoManager.html)
+- [wxWidgets: wxCommandProcessor Class Reference(maxCommands, MarkAsSaved와 IsDirty)](https://docs.wxwidgets.org/stable/classwx_command_processor.html)
+- [GNU Emacs 설명서: Undo(되돌리기를 되돌리기, 바이트로 재는 세 한도)](https://www.gnu.org/s/emacs/manual/html_node/emacs/Undo.html)
+- [Vim 도움말: undo.txt(되돌리기 가지, g-와 g+, 기록을 파일에 간직하기)](https://vimhelp.org/undo.txt.html)
+- [GIMP 설명서: 실행 취소하기(두 한도, 되돌릴 수 없는 것들)](https://docs.gimp.org/3.2/ko/gimp-concepts-undo.html)

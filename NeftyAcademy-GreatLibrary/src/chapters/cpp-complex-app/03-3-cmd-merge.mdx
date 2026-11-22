@@ -1,0 +1,206 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '기록의 단위를 사용자의 한 번에 맞추기: 이어 친 글자와 끌기 합치기, 제자리 명령 빼기, 묶음, 끊는 규칙';
+export const terms = ['newGroupDelay', 'mergeWith'];
+
+명령 하나가 사용자가 느끼는 한 번의 일과 꼭 맞지는 않습니다. 글자 하나마다, 마우스가 한 칸 움직일 때마다 명령이 생기는데, 실행 취소 한 번에 글자 하나나 한 칸씩 돌아가면 쓸 수 없습니다. 반대로 "모두 맞추기"는 명령 여럿이 한 단계여야 합니다. 기록의 단위를 맞추는 도구가 합치기와 묶기입니다.
+
+```cpp
+// 명령 합치기와 묶기: 이어 친 글자, 끌기 한 번, 여러 명령을 한 단계로
+#include <format>
+#include <map>
+#include <memory>
+#include <print>
+#include <ranges>
+#include <string>
+#include <vector>
+
+struct Doc {
+    std::string text;
+    std::map<int, int> x;                        // 도형 ID -> 자리
+};
+
+struct Cmd {
+    virtual ~Cmd() = default;
+    virtual void apply(Doc&) = 0;
+    virtual void revert(Doc&) = 0;
+    virtual bool merge(const Cmd&) { return false; }  // 바로 뒤 명령을 삼키면 참
+    virtual bool empty() const { return false; }      // 합쳐 보니 한 일이 없다
+    virtual std::string name() const = 0;
+};
+using List = std::vector<std::unique_ptr<Cmd>>;
+
+struct Type : Cmd {
+    std::size_t pos;
+    std::string s;
+    int ms;                                      // 마지막 글자를 친 시각
+    Type(std::size_t pos, char ch, int ms) : pos(pos), s(1, ch), ms(ms) {}
+    void apply(Doc& d) override { d.text.insert(pos, s); }
+    void revert(Doc& d) override { d.text.erase(pos, s.size()); }
+    bool merge(const Cmd& next) override {
+        auto* t = dynamic_cast<const Type*>(&next);
+        if (!t || t->pos != pos + s.size()) return false;  // 이어 친 것이 아니다
+        if (t->ms - ms > 500) return false;                // 쉬었다가 쳤다
+        if (s.back() == ' ' && t->s != " ") return false;  // 새 낱말이 시작됐다
+        s += t->s;
+        ms = t->ms;
+        return true;
+    }
+    std::string name() const override { return "치기 \"" + s + "\""; }
+};
+
+struct Move : Cmd {
+    int id, from, to, drag;                      // drag: 끌기 한 번마다 다른 번호
+    Move(int id, int from, int to, int drag)
+        : id(id), from(from), to(to), drag(drag) {}
+    void apply(Doc& d) override { d.x[id] = to; }
+    void revert(Doc& d) override { d.x[id] = from; }
+    bool merge(const Cmd& next) override {
+        auto* m = dynamic_cast<const Move*>(&next);
+        if (!m || m->id != id || m->drag != drag) return false;
+        to = m->to;                              // 처음 자리와 마지막 자리만 남긴다
+        return true;
+    }
+    bool empty() const override { return from == to; }
+    std::string name() const override {
+        return std::format("옮기기 {}->{}", from, to);
+    }
+};
+
+struct Group : Cmd {
+    std::string title;
+    List kids;
+    explicit Group(std::string t) : title(std::move(t)) {}
+    void apply(Doc& d) override {
+        for (auto& k : kids) k->apply(d);
+    }
+    void revert(Doc& d) override {               // 거꾸로 되돌린다
+        for (auto& k : kids | std::views::reverse) k->revert(d);
+    }
+    bool empty() const override { return kids.empty(); }
+    std::string name() const override {
+        return std::format("{}({}개)", title, kids.size());
+    }
+};
+
+struct Stack {
+    Doc doc;
+    List done;
+    std::vector<std::unique_ptr<Group>> open;    // 열려 있는 묶음, 안쪽이 뒤
+
+    List& top() { return open.empty() ? done : open.back()->kids; }
+    void push(std::unique_ptr<Cmd> c) {
+        c->apply(doc);
+        List& list = top();
+        if (list.empty() || !list.back()->merge(*c)) list.push_back(std::move(c));
+        else if (list.back()->empty()) list.pop_back();  // 제자리로 돌아왔다
+    }
+    void move(int id, int to, int drag) {
+        push(std::make_unique<Move>(id, doc.x[id], to, drag));
+    }
+    void begin(std::string title) {
+        open.push_back(std::make_unique<Group>(std::move(title)));
+    }
+    void end() {
+        auto g = std::move(open.back());
+        open.pop_back();
+        if (!g->empty()) top().push_back(std::move(g));  // 빈 묶음은 쌓지 않는다
+    }
+    void undo() {
+        done.back()->revert(doc);
+        done.pop_back();
+    }
+    void show(const char* what) {
+        std::print("{}:", what);
+        for (const auto& c : done) std::print(" [{}]", c->name());
+        std::println("\n    글 \"{}\", 1번 {}, 2번 {}", doc.text, doc.x[1],
+                     doc.x[2]);
+    }
+};
+
+int main() {
+    Stack s;
+    s.doc.x = {{1, 3}, {2, 20}};
+    int ms = 0;
+    for (char ch : std::string("hello world")) {
+        ms += ch == 'r' ? 900 : 100;             // "wo"까지 치고 잠깐 쉬었다
+        s.push(std::make_unique<Type>(s.doc.text.size(), ch, ms));
+    }
+    s.show("한 글자씩 11번");
+
+    for (int to = 4; to <= 33; ++to) s.move(1, to, 1);
+    s.show("끌기 한 번, 30걸음");
+    for (int to : {34, 35, 34, 33}) s.move(1, to, 2);
+    s.show("끌다가 제자리에 놓음");
+
+    s.begin("맞추기");
+    s.move(1, 0, 3);
+    s.move(2, 0, 4);
+    s.end();
+    s.show("묶어서 옮김");
+    s.undo(), s.show("되돌림");
+    s.undo(), s.undo(), s.show("두 번 더");
+}
+```
+
+```text
+한 글자씩 11번: [치기 "hello "] [치기 "wo"] [치기 "rld"]
+    글 "hello world", 1번 3, 2번 20
+끌기 한 번, 30걸음: [치기 "hello "] [치기 "wo"] [치기 "rld"] [옮기기 3->33]
+    글 "hello world", 1번 33, 2번 20
+끌다가 제자리에 놓음: [치기 "hello "] [치기 "wo"] [치기 "rld"] [옮기기 3->33]
+    글 "hello world", 1번 33, 2번 20
+묶어서 옮김: [치기 "hello "] [치기 "wo"] [치기 "rld"] [옮기기 3->33] [맞추기(2개)]
+    글 "hello world", 1번 0, 2번 0
+되돌림: [치기 "hello "] [치기 "wo"] [치기 "rld"] [옮기기 3->33]
+    글 "hello world", 1번 33, 2번 20
+두 번 더: [치기 "hello "] [치기 "wo"]
+    글 "hello wo", 1번 3, 2번 20
+```
+
+- **맨 위 명령에게 묻는다**: 새 명령을 실행한 뒤, 기록 맨 위의 명령에게 이것을 삼킬 수 있는지 묻습니다. 삼키면 새 명령은 쌓지 않습니다
+- **이어 친 글자**: 바로 뒤에 이어졌고, 0.5초 넘게 쉬지 않았고, 새 낱말의 시작이 아니면 합칩니다. 11글자가 "hello ", "wo", "rld" 세 단계가 되었습니다
+- **끌기 한 번**: 30걸음이 처음 자리와 마지막 자리만 가진 명령 하나로 남았습니다. 같은 도형이어도 끌기 번호가 다르면 합치지 않습니다. 그러지 않으면 따로 한 두 번의 끌기가 한꺼번에 되돌아갑니다
+- **제자리로 돌아오면 뺀다**: 끌다가 제자리에 놓으면 합친 명령이 한 일이 없습니다. 이런 명령은 기록에서 뺍니다. 아무것도 되돌리지 않는 실행 취소가 생기지 않게 하려는 것입니다
+- **묶음**: `begin`과 `end` 사이의 명령은 묶음의 자식이 되고 기록에는 한 단계로 보입니다. 되돌릴 때는 거꾸로 되돌립니다. 묶음 안에 묶음을 열 수 있고, 빈 묶음은 쌓지 않습니다
+
+## 어디서 끊는가
+
+글자를 얼마나 모을지는 프로그램마다 다르게 정했습니다.
+
+| 프로그램 | 끊는 규칙 |
+| --- | --- |
+| Emacs | 글자 넣기와 지우기는 20번째마다 경계를 넣는다 |
+| ProseMirror | 0.5초 넘게 쉬거나 떨어진 곳을 고치면 새 묶음이다 |
+| Vim | 입력 모드에서 넣은 글이 한 덩어리이고, CTRL-G u로 끊는다 |
+| Cocoa | 이벤트 하나를 처리하는 동안 등록된 것이 한 묶음이다 |
+
+- **Emacs**: 명령마다 경계를 넣되 글자 넣기와 지우기만은 합칩니다. 거꾸로 한 명령을 쪼개기도 합니다. 찾아 바꾸기는 바꿀 때마다 경계를 넣어 하나씩 되돌릴 수 있게 합니다
+- **ProseMirror**: 묶는 시간은 `newGroupDelay`로 정하고 기본은 500밀리초입니다. 다음 변경이 지금 묶음에 붙지 않게 막는 함수도 따로 있습니다
+- **Qt**: `id()`가 같은 명령이 이어지면 `mergeWith`를 부르고, `beginMacro`와 `endMacro`로 묶습니다([「명령과 실행 취소」](#/read/cpp-qt/qarch-undo))
+- **GIMP**: 레이어를 보였다 숨겼다를 여러 번 해도 기록에는 한 점만 남습니다. 글자 도구로 쓴 글은 글자 하나씩이 아니라 통째로 되돌아갑니다
+
+## 조심할 곳
+
+- **저장한 자리의 명령에는 합치지 않는다**: 저장한 뒤에 친 글자가 저장 전의 명령에 합쳐지면, 자리는 그대로인데 문서는 달라집니다. [「실행 취소 스택」](#/read/cpp-complex-app/cmd-stack)의 "저장됨"이 거짓이 됩니다
+- **되돌린 직후에도 합치지 않는다**: 방금 되돌려 맨 위가 된 명령은 사용자가 이미 지나온 단계입니다. 거기에 새 글자를 붙이면 되돌린 일과 새로 한 일이 섞입니다
+- **묶음은 반드시 닫는다**: `begin` 뒤에 예외가 나서 `end`가 불리지 않으면 그 뒤의 모든 명령이 열린 묶음으로 들어갑니다. 생성자에서 열고 소멸자에서 닫는 객체로 감쌉니다([「트랜잭션」](#/read/cpp-complex-app/cmd-transaction))
+- **합친 명령은 하나처럼 굴어야 한다**: 합친 뒤의 이름, 크기, 되돌린 결과가 처음부터 한 명령이었던 것과 같아야 합니다
+
+<Note>
+한글처럼 조합해서 넣는 글자는 조합하는 동안의 중간 글자를 명령으로 만들지 않고, 글자가 확정될 때 명령 하나로 넣습니다. 중간 글자마다 명령을 만들면 "한"을 되돌렸을 때 "하"가 남습니다([「입력기」](#/read/cpp-complex-app/txt-ime)).
+</Note>
+
+## 정리
+
+- 이어지는 작은 명령은 기록 맨 위의 명령이 삼키게 하고, 합친 결과 한 일이 없으면 기록에서 뺀다
+- 여러 명령이 한 단계여야 하면 묶음으로 감싸 거꾸로 되돌리고, 묶음은 예외가 나도 닫히게 만든다
+- 어디서 끊을지는 시간, 개수, 낱말, 이벤트 가운데에서 고르는 설계이고, 저장한 자리와 되돌린 직후에는 합치지 않는다
+
+## 참고 문서
+
+- [GNU Emacs Lisp 설명서: Undo(경계, 합치는 명령, 찾아 바꾸기의 경계)](https://www.gnu.org/software/emacs/manual/html_node/elisp/Undo.html)
+- [prosemirror-history 1.5.0의 형 선언(newGroupDelay, depth, closeHistory)](https://cdn.jsdelivr.net/npm/prosemirror-history@1.5.0/dist/index.d.ts)
+- [Vim 도움말: undo.txt(되돌리기 덩어리와 CTRL-G u)](https://vimhelp.org/undo.txt.html)
+- [Apple: Undo Architecture, Undo Manager(이벤트마다 생기는 묶음)](https://developer.apple.com/library/content/documentation/Cocoa/Conceptual/UndoArchitecture/Articles/UndoManager.html)
+- [GIMP 설명서: 실행 취소하기(한 점으로 줄여 적는 조작, 통째로 되돌아가는 조작)](https://docs.gimp.org/3.2/ko/gimp-concepts-undo.html)

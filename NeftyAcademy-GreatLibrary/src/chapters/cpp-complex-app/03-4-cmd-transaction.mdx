@@ -1,0 +1,186 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '문서가 전 값을 적어 두는 트랜잭션: 커밋하면 한 단계, 아니면 되감기, 커밋에서 검사와 알림, 겹치기';
+export const terms = ['openTransaction', 'abortTransaction', 'AutoTransaction'];
+
+[「커맨드 패턴」](#/read/cpp-complex-app/cmd-pattern)의 명령은 되돌리는 코드를 명령마다 손으로 짰습니다. 명령이 수백 개가 되면 그 가운데 하나는 칸 하나를 빠뜨리고, 도중에 실패한 명령은 반쯤 고친 문서를 남깁니다. **트랜잭션**은 이 일을 문서 쪽으로 옮깁니다. 고치는 길을 하나로 좁히고, 그 길에서 전 값을 적어 둡니다.
+
+```cpp
+// 트랜잭션: 문서가 바뀐 것을 적어 두고, 끝까지 가면 한 단계로, 아니면 되감는다
+#include <map>
+#include <optional>
+#include <print>
+#include <ranges>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+struct Change {                                  // 칸 하나의 전 값과 새 값
+    std::string key;
+    std::optional<int> before, after;            // 값이 없으면 칸이 없다는 뜻
+};
+
+class Doc {
+public:
+    std::optional<int> get(const std::string& k) const {
+        auto it = cells_.find(k);
+        return it == cells_.end() ? std::nullopt : std::optional(it->second);
+    }
+    void set(const std::string& k, std::optional<int> v) {  // 고치는 길은 이것 하나
+        if (depth_ == 0) throw std::logic_error("트랜잭션 밖에서 고쳤다");
+        journal_.push_back({k, get(k), v});
+        put(k, v);
+    }
+    bool undo() {
+        if (undo_.empty()) return false;
+        for (const Change& c : undo_.back() | std::views::reverse)
+            put(c.key, c.before);
+        undo_.pop_back();
+        return true;
+    }
+    void show(const char* what) const {
+        std::print("{:<22}", what);
+        for (const auto& [k, v] : cells_) std::print(" {}={}", k, v);
+        std::println("   (되돌릴 단계 {})", undo_.size());
+    }
+
+private:
+    friend class Transaction;
+    void put(const std::string& k, std::optional<int> v) {
+        if (v) cells_[k] = *v;
+        else cells_.erase(k);
+    }
+    std::map<std::string, int> cells_;
+    std::vector<Change> journal_;                // 열린 트랜잭션이 고친 것
+    std::vector<std::vector<Change>> undo_;      // 끝난 트랜잭션들
+    int depth_ = 0;
+};
+
+class Transaction {
+public:
+    explicit Transaction(Doc& d) : d_(d), mark_(d.journal_.size()) { ++d_.depth_; }
+    void commit() {
+        for (const auto& [k, v] : d_.cells_)     // 지켜야 할 것을 검사한다
+            if (v < 0) throw std::runtime_error(k + " 칸이 음수가 된다");
+        done_ = true;
+        if (d_.depth_ > 1) return;               // 알리고 쌓는 일은 맨 바깥에서만
+        std::println("  알림 1번: 칸 {}개가 바뀜", d_.journal_.size());
+        d_.undo_.push_back(std::move(d_.journal_));
+        d_.journal_.clear();
+    }
+    ~Transaction() {                             // 커밋하지 않고 나가면 되감는다
+        if (!done_) {
+            while (d_.journal_.size() > mark_) {
+                d_.put(d_.journal_.back().key, d_.journal_.back().before);
+                d_.journal_.pop_back();
+            }
+        }
+        --d_.depth_;
+    }
+
+private:
+    Doc& d_;
+    std::size_t mark_;                           // 시작할 때의 저널 길이
+    bool done_ = false;
+};
+
+void move(Doc& d, const std::string& from, const std::string& to, int n) {
+    Transaction t(d);                            // 되돌리는 코드를 쓰지 않는다
+    d.set(to, d.get(to).value_or(0) + n);        // 받는 쪽을 먼저 고친다
+    if (!d.get(from)) throw std::runtime_error(from + " 칸이 없다");
+    d.set(from, *d.get(from) - n);
+    t.commit();
+}
+
+void attempt(Doc& d, const char* what, auto job) {
+    try {
+        job();
+    } catch (const std::exception& e) {
+        std::println("  실패: {}", e.what());
+    }
+    d.show(what);
+}
+
+int main() {
+    Doc d;
+    attempt(d, "처음 채움", [&] {
+        Transaction t(d);
+        d.set("A", 50), d.set("B", 10);
+        t.commit();
+    });
+    attempt(d, "A에서 B로 30", [&] { move(d, "A", "B", 30); });
+    attempt(d, "A에서 C로 100", [&] { move(d, "A", "C", 100); });
+    attempt(d, "없는 Z에서 B로", [&] { move(d, "Z", "B", 1); });
+    attempt(d, "밖에서 고침", [&] { d.set("A", 0); });
+    attempt(d, "둘 가운데 하나만", [&] {
+        Transaction outer(d);
+        move(d, "B", "C", 5);                    // 안쪽: 성공
+        try {
+            move(d, "A", "C", 99);               // 안쪽: 실패, 여기까지만 되감는다
+        } catch (const std::exception&) {}
+        outer.commit();
+    });
+    d.undo(), d.show("되돌림");
+    d.undo(), d.show("한 번 더");
+}
+```
+
+```text
+  알림 1번: 칸 2개가 바뀜
+처음 채움              A=50 B=10   (되돌릴 단계 1)
+  알림 1번: 칸 2개가 바뀜
+A에서 B로 30           A=20 B=40   (되돌릴 단계 2)
+  실패: A 칸이 음수가 된다
+A에서 C로 100          A=20 B=40   (되돌릴 단계 2)
+  실패: Z 칸이 없다
+없는 Z에서 B로         A=20 B=40   (되돌릴 단계 2)
+  실패: 트랜잭션 밖에서 고쳤다
+밖에서 고침            A=20 B=40   (되돌릴 단계 2)
+  알림 1번: 칸 2개가 바뀜
+둘 가운데 하나만       A=20 B=35 C=5   (되돌릴 단계 3)
+되돌림                 A=20 B=40   (되돌릴 단계 2)
+한 번 더               A=50 B=10   (되돌릴 단계 1)
+```
+
+- **명령에 되돌리는 코드가 없다**: `set`이 고칠 때마다 전 값과 새 값을 저널에 적습니다. `move`는 고치기만 합니다
+- **끝까지 가면 한 단계**: 커밋하면 저널이 통째로 되돌릴 한 단계가 됩니다
+- **못 가면 되감는다**: 커밋 없이 범위를 벗어나면 소멸자가 저널을 거꾸로 적용합니다. 예외로 벗어나도 같습니다. 셋째와 넷째 시도는 받는 쪽을 이미 고친 뒤에 실패했지만 문서는 그대로입니다
+- **검사는 커밋에서**: 도중에는 지켜야 할 것이 잠깐 깨져도 됩니다. 커밋할 때 검사해서 어긋나면 커밋이 실패하고, 그러면 되감깁니다
+- **알림은 한 번**: 뷰는 반쯤 고친 문서를 보지 못합니다. 커밋할 때 무엇이 바뀌었는지 한 번에 듣습니다([「불변 모델과 변경 추적」](#/read/cpp-complex-app/doc-immutable))
+- **밖에서는 고칠 수 없다**: 트랜잭션 없이 `set`을 부르면 예외가 납니다. 명령 밖에서 문서를 고치는 코드를 실행 중에 잡아냅니다
+- **겹치기**: 안쪽 트랜잭션은 시작할 때의 저널 길이를 기억해 두고, 실패하면 거기까지만 되감습니다. 마지막 시도에서 바깥은 성공한 옮기기 하나만 가지고 커밋했습니다. 기록에 쌓고 알리는 일은 맨 바깥에서 한 번만 합니다
+
+## 명령 객체와 견주면
+
+| 물음 | 명령이 되돌린다 | 문서가 적어 둔다 |
+| --- | --- | --- |
+| 되돌리는 코드 | 명령마다 짠다 | 없다 |
+| 적어 두는 양 | 명령이 아는 만큼 | 고친 곳 전부의 전 값 |
+| 도중에 실패하면 | 명령이 알아서 수습한다 | 저절로 되감긴다 |
+| 전제 | 명령만 문서를 고친다 | 모든 고침이 한 길을 지난다 |
+
+적어 두는 양이 갈림길입니다. 도형 만 개를 10만큼 옮길 때 명령은 수 하나를 간직하고, 저널은 전 값 만 개를 간직합니다. 큰 프로그램은 둘을 섞습니다. 픽셀처럼 역연산이 없는 큰 데이터는 저널에 맡기고([「그림의 자료 구조: 레이어 트리와 타일」](#/read/cpp-complex-app/doc-layers)의 타일이 그 단위입니다), 가벼운 속성은 명령이 맡습니다.
+
+## 실제 프로그램
+
+- **FreeCAD**: 문서에 `openTransaction`, `commitTransaction`, `abortTransaction`이 있고, 스택에 두는 `AutoTransaction` 객체가 범위를 맡습니다. 이 객체는 겹쳐 있던 것이 모두 사라질 때 커밋합니다. 예제는 반대로 커밋하지 않으면 되감는데, 닫는 일을 소멸자에 맡긴다는 점은 같습니다. 예외가 흔한 코드에서는 예제의 방식이 안전합니다
+- **AutoCAD**: ObjectARX의 트랜잭션은 `abortTransaction`을 AutoCAD의 실행 취소 장치로 구현합니다. 그래서 따로 실행 취소를 하는 명령을 트랜잭션 안에 넣으면 결과를 알 수 없다고 개발 안내서가 경고합니다. 되돌리는 장치가 둘이면 섞이는 곳에서 깨집니다
+- **Krita**: 타일 엔진의 설계 문서는 되돌릴 데이터를 트랜잭션 객체가 살아 있는 동안 간직하고, 객체가 사라지면 놓아준다고 적습니다
+- **데이터베이스**: 같은 모양을 데이터베이스 책의 [「RAII 트랜잭션」](#/read/cpp-database/tx-raii)에서 보았습니다
+
+<Note>
+트랜잭션이 되감을 수 있는 것은 문서뿐입니다. 파일을 썼거나 서버에 보냈거나 사용자에게 창을 띄운 일은 되감기지 않습니다. 트랜잭션 안에서는 문서만 고치고, 밖으로 나가는 일은 커밋한 뒤에 합니다. 끌기처럼 오래 걸리는 조작은 누를 때 열고 놓을 때 커밋하며, Esc를 누르면 되감습니다([「도구 상태 기계」](#/read/cpp-complex-app/tl-state)).
+</Note>
+
+## 정리
+
+- 트랜잭션은 문서를 고치는 길을 하나로 좁혀 전 값을 저널에 적고, 커밋하면 한 단계로 쌓고 아니면 거꾸로 되감는다
+- 지켜야 할 조건의 검사와 뷰에 알리는 일은 커밋으로 미루고, 겹친 트랜잭션은 안쪽의 실패를 안쪽만 되감는다
+- 저널은 되돌리는 코드를 없애는 대신 전 값을 모두 간직하므로, 가벼운 변경은 명령에, 역연산이 없는 큰 변경은 저널에 맡긴다
+
+## 참고 문서
+
+- [FreeCAD 소스 문서: App::Document(openTransaction, commitTransaction, abortTransaction)](https://free-cad.sourceforge.net/SrcDocu/d8/d3e/classApp_1_1Document.html)
+- [FreeCAD 소스(사본): AutoTransaction.h(스택에 두는 트랜잭션 도우미)](https://huggingface.co/AbdulElahGwaith/FreeCAD/blob/main/src/App/AutoTransaction.h)
+- [Autodesk ObjectARX 개발 안내서: Undo and Transactions(abortTransaction의 구현과 주의)](https://help.autodesk.com/cloudhelp/2021/ENU/OARX-DevGuide/files/GUID-924098CD-20F6-4237-B600-896BB676E76B.htm)
+- [KDE 커뮤니티 위키: Krita/Transactions Design(되돌릴 데이터의 수명)](https://community.kde.org/Krita/Transactions_Design)
