@@ -1,14 +1,72 @@
 {
   "families": {
     "c": {
-      "books": ["basics", "c-basic", "c-mid"],
+      "books": [
+        "basics",
+        "c-basic",
+        "c-mid"
+      ],
       "sees": [],
-      "langs": ["c", "objc", "asm", "sh", "bash", "bat", "make", "cmake"]
+      "langs": [
+        "c",
+        "objc",
+        "asm",
+        "sh",
+        "bash",
+        "bat",
+        "make",
+        "cmake"
+      ],
+      "local": [
+        "open",
+        "read",
+        "write",
+        "close",
+        "time",
+        "clock",
+        "signal",
+        "send",
+        "recv",
+        "bind",
+        "listen",
+        "accept",
+        "connect",
+        "poll",
+        "shutdown",
+        "socket"
+      ]
     },
     "cpp": {
-      "books": ["cpp-*"],
-      "sees": ["c"],
-      "langs": ["cpp", "c", "sh", "bash", "cmake"]
+      "books": [
+        "cpp-*"
+      ],
+      "sees": [
+        "c",
+        "qt"
+      ],
+      "langs": [
+        "cpp",
+        "c",
+        "sh",
+        "bash",
+        "cmake"
+      ]
+    },
+    "qt": {
+      "books": [
+        "cpp-qt"
+      ],
+      "sees": [
+        "cpp",
+        "c"
+      ],
+      "langs": [
+        "cpp",
+        "c",
+        "sh",
+        "bash",
+        "cmake"
+      ]
     }
   },
   "pages": {

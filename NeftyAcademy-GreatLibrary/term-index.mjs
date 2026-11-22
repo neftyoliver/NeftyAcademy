@@ -11,18 +11,31 @@
  *   unique_ptr     그대로. 코드 블록과 본문의 `코드` 어디서든, 이 이름이 들어 있으면 걸린다
  *                  (std::unique_ptr<T> 의 std::unique_ptr 도 걸린다). 다른 뜻으로 쓰일 일이 없는 이름에 쓴다.
  *   std::move      이름공간까지. std::move 라고 적힌 곳만 걸린다. move 처럼 변수 이름으로도 흔한 낱말은 이렇게 적는다.
- *   ~move          본문의 `코드` 에서만. 코드 블록에서는 걸리지 않는다. 본문에서 `move` 라고만 적어도 이 쪽이라는 뜻.
+ *   ~move          본문의 `코드` 에서만, 그것도 그 이름을 가리켜 적은 것만. 코드 블록에서는 걸리지 않는다.
+ *                  `move`, `vector<int>`, `vector::size()`, `noexcept(false)`, `[[likely]]` 는 걸리고,
+ *                  `future.cpp` 나 `x = move` 처럼 다른 글 속에 섞인 것은 걸리지 않는다.
  *                  예약어(~constexpr)처럼 코드 블록마다 나와서 다 걸면 어지러운 낱말에도 쓴다.
  *   free()         함수. 코드 블록에서는 free(…) 처럼 부르는 자리만 걸리고(변수 free 나 x.free() 는 걸리지 않는다),
  *                  본문에서는 `free` 나 `free()` 라고만 적은 것도 걸린다. C 함수처럼 이름공간이 없는 흔한 낱말에 쓴다.
  *
- * 걸리지 않는 것: 점이나 화살표 뒤의 이름(v.size(), p->next)은 멤버라서 건너뛴다.
+ * 그 쪽에서만 끄기
+ *   어떤 쪽에서는 같은 낱말이 다른 것을 가리킨다(루아 함수 move, 플러그인 이름 future). 그 쪽의 맨 위에
+ *     export const noterms = ['move'];
+ *   라고 적으면 그 쪽에서는 그 이름에 링크를 걸지 않는다(이름의 끝 마디로 적는다: std::move 도 move).
+ *
+ * 걸리지 않는 것
+ *   - 점이나 화살표 뒤의 이름(v.size(), p->next)은 멤버라서 건너뛴다.
+ *   - 함수 꼴(free())은 선언하는 자리에서는 걸리지 않는다: `void close()`, `virtual int read() = 0`, `char *strcpy(…)`.
+ *     같은 이름의 멤버 함수나 자기 함수를 만드는 코드가 표준 함수 쪽으로 이어지지 않게 하려는 것이다.
  *
  * 갈래(family)
  *   같은 낱말이라도 언어가 다르면 다른 것이다(C의 open 과 파이썬의 open). 그래서 책을 갈래로 묶는다(src/books/terms.json).
  *   한 갈래 안에서 낱말 하나는 한 쪽만 가질 수 있다(둘이 적으면 빌드가 멈춘다).
  *   쪽은 자기 갈래의 낱말을 먼저 찾고, 없으면 갈래가 "본다(sees)"고 적은 갈래를 차례로 찾는다(C++ 는 C 를 본다).
+ *   같은 이름이 갈래마다 다른 쪽을 가리켜도 된다: Qt 책의 connect( 는 시그널과 슬롯 쪽, 다른 책의 connect( 는 소켓 쪽.
  *   갈래에 적히지 않은 책은 혼자서 한 갈래다(자기 책 안에서만 링크가 걸린다).
+ *   갈래의 local 에 적은 이름은 그 갈래의 책에서만 걸린다. read, write, close 처럼 다른 언어에서는
+ *   멤버 함수 이름으로 흔한 낱말을 적는다(C 책의 read( 는 걸리고, C++ 책의 read( 는 걸리지 않는다).
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
@@ -56,21 +69,33 @@ export function termsIn(source) {
 }
 
 const toPath = (at) => (at instanceof URL || String(at).startsWith('file:') ? fileURLToPath(at) : String(at)).replace(/[\\/]+$/, '');
+const NOTERMS = /^export const noterms = \[([\s\S]*?)\];?[ \t]*$/m;
+/** .mdx 글에서 export const noterms = [...] 의 낱말들을 꺼낸다(이 쪽에서는 용어로 보지 않을 이름). 없으면 빈 배열 */
+export function notermsIn(source) {
+  const m = NOTERMS.exec(source);
+  if (!m) return [];
+  return [...m[1].matchAll(STRING)].map((s) => s[1] ?? s[2]);
+}
+
 const glob = (pattern) => new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`);
 
 /**
  * @param {{ chapters: URL | string, config?: URL | string }} options
  *   chapters: src/chapters 폴더. 그 아래 <책 id>/<번호-챕터 id>.mdx 가 쪽이다.
  *   config:   갈래를 적은 JSON(src/books/terms.json). 없으면 책마다 한 갈래.
- *             { families: { 갈래: { books: [책 id, 별표 가능], sees: [더 찾아볼 갈래], langs: [링크를 걸 코드 블록의 언어] } },
+ *             { families: { 갈래: { books: [책 id, 별표 가능], sees: [더 찾아볼 갈래], langs: [링크를 걸 코드 블록의 언어],
+ *                                  local: [이 갈래의 책에서만 걸리는 이름] } },
  *               pages: { '폴더/챕터 id': '책 id/챕터 id' }  ← 폴더와 다른 책에 실린 쪽 }
  */
 export function createTermIndex(options) {
   const chaptersDir = toPath(options.chapters);
   const config = options.config ? JSON.parse(readFileSync(toPath(options.config), 'utf8')) : {};
-  const families = Object.entries(config.families ?? {}).map(([id, f]) => ({ id, books: f.books.map(glob), sees: f.sees ?? [], langs: f.langs ? new Set(f.langs) : null }));
+  const families = Object.entries(config.families ?? {}).map(([id, f]) => ({ id, books: f.books.map(glob), sees: f.sees ?? [], langs: f.langs ? new Set(f.langs) : null, local: new Set(f.local ?? []) }));
   const moved = config.pages ?? {};
-  const familyOfBook = (book) => families.find((f) => f.books.some((re) => re.test(book)))?.id ?? book;
+  // 책 이름을 그대로 적은 갈래가 먼저다. 그래야 'cpp-*' 와 'cpp-qt' 를 함께 적었을 때 cpp-qt 가 제 갈래로 간다
+  const exact = new Map();
+  for (const [id, f] of Object.entries(config.families ?? {})) for (const b of f.books) if (!b.includes('*') && !exact.has(b)) exact.set(b, id);
+  const familyOfBook = (book) => exact.get(book) ?? families.find((f) => f.books.some((re) => re.test(book)))?.id ?? book;
 
   // 경로의 끝이 …/chapters/<책>/<파일>.mdx 인가만 본다(윈도우의 역슬래시와 드라이브 글자 대소문자에 흔들리지 않게)
   const tail = new RegExp(`(?:^|/)${basename(chaptersDir)}/([^/]+)/([^/]+)\\.mdx$`);
@@ -118,8 +143,15 @@ export function createTermIndex(options) {
     let view = views.get(id);
     if (!view) {
       const family = families.find((f) => f.id === id);
-      const order = [id, ...(family?.sees ?? [])];
-      view = { tables: order.map((f) => tables.get(f)).filter(Boolean), langs: family?.langs ?? null };
+      const seen = [];
+      for (const other of family?.sees ?? []) {
+        const table = tables.get(other);
+        if (!table) continue;
+        // 다른 갈래의 표에서는 그 갈래 안에서만 쓰기로 한 이름(local)을 뺀다
+        const local = families.find((f) => f.id === other)?.local;
+        seen.push(local?.size ? new Map([...table].filter(([chain]) => !local.has(chain))) : table);
+      }
+      view = { tables: [tables.get(id), ...seen].filter(Boolean), langs: family?.langs ?? null };
       views.set(id, view);
     }
     return view;
@@ -128,7 +160,10 @@ export function createTermIndex(options) {
   return { keyOf, viewOf, claims, size: claims.length };
 }
 
-function resolve(view, parts, inline, call, exact) {
+/** 본문의 `코드` 가 이름 하나를 가리켜 적은 것일 때, 이름 뒤에 올 수 있는 것: <인자>, ::멤버, (인자), ]] */
+const AFTER_NAME = /^\s*(?:<.*>)?(?:::[A-Za-z_][A-Za-z0-9_:]*)?\s*(?:\(.*\))?\s*(?:\]\])?$/s;
+
+function resolve(view, parts, inline, call, exact, named) {
   const n = parts.length;
   for (const table of view.tables) {
     // 긴 이름부터, 같은 길이면 오른쪽 것부터(std::chrono::steady_clock::now 에서는 now 보다 steady_clock::now 가, std 보다 now 가 먼저)
@@ -137,13 +172,34 @@ function resolve(view, parts, inline, call, exact) {
         const hit = table.get(len === n ? parts.join('::') : parts.slice(start, start + len).join('::'));
         if (!hit) continue;
         if (hit.kind === 'plain') return hit.target;
-        if (hit.kind === 'prose' && inline) return hit.target;
+        // 본문에서만 거는 이름: 그 이름으로 시작하는 `코드` 여야 한다
+        if (hit.kind === 'prose' && named && start === 0) return hit.target;
         // 함수: 이름의 끝이어야 하고, 앞에는 아무것도 없거나 std:: 만. 부르는 자리이거나, 본문에서 그 이름만 적은 것
         if (hit.kind === 'call' && start + len === n && (start === 0 || (start === 1 && parts[0] === 'std')) && (call || exact)) return hit.target;
       }
     }
   }
   return null;
+}
+
+/** 이름 앞에 올 수 있는 낱말 가운데, 타입이 아닌 것(이 뒤의 이름( 는 선언이 아니라 부르는 것이다) */
+const BEFORE_CALL = new Set(['return', 'co_return', 'co_await', 'co_yield', 'throw', 'else', 'do', 'case', 'and', 'or', 'not']);
+
+/**
+ * start 에서 시작하는 이름이 선언되는 자리인가: 앞에 타입으로 보이는 것이 있다.
+ *   void close()   double read() const   char *strcpy(char *dst, …)   int& get()
+ * before = 이름 앞에서 빈칸을 건너뛴 자리.
+ */
+function declared(text, start, before) {
+  if (before < 0) return false;
+  const c = text[before];
+  // 별표와 & 는 이름에 바로 붙어 있을 때만 선언으로 본다(a * rand() 는 곱셈)
+  if ((c === '*' || c === '&') && before === start - 1) return true;
+  if (!/[A-Za-z0-9_>]/.test(c)) return false;
+  if (c === '>') return before !== start - 1; // 템플릿 인자가 끝난 타입 뒤에 띄고 온 이름: vector<int> make()
+  let k = before;
+  while (k >= 0 && /[A-Za-z0-9_]/.test(text[k])) k--;
+  return !BEFORE_CALL.has(text.slice(k + 1, before + 1));
 }
 
 /**
@@ -166,9 +222,12 @@ export function findTerms(text, view, inline) {
     if (i >= 0 && (text[i] === '.' || (text[i] === '>' && text[i - 1] === '-'))) continue;
     let j = end;
     while (j < text.length && (text[j] === ' ' || text[j] === '\t')) j++;
-    const call = text[j] === '(';
+    // 부르는 자리인가. 이름 뒤에 ( 가 오고, 선언이 아니어야 한다
+    const call = text[j] === '(' && !declared(text, start, i);
     const exact = inline && (whole === m[0] || whole === `${m[0]}()`);
-    const target = resolve(view, m[0].split('::'), inline, call, exact);
+    // 이 `코드` 가 이 이름을 가리켜 적은 것인가: 맨 앞에 있고([[ 는 빼고), 뒤에는 인자나 멤버만 온다
+    const named = inline && /^\s*(?:\[\[)?\s*$/.test(text.slice(0, start)) && AFTER_NAME.test(text.slice(end));
+    const target = resolve(view, m[0].split('::'), inline, call, exact, named);
     if (target) out.push({ start, end, target });
   }
   return out;
