@@ -1,0 +1,89 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '처음 켜는 데 필요한 것, 보드별 HDMI 케이블, 카메라 케이블, 케이스 고르기, 3.3V USB-시리얼 어댑터';
+export const terms = [];
+
+보드, 전원, 저장 장치, 식히는 장치를 골랐다면 남은 것은 그 사이를 잇는 것들입니다. 값은 싸지만 하나가 없으면 그날의 작업이 멈춥니다. 이 쪽은 처음 켜는 데 꼭 있어야 하는 것과, 있으면 막혔을 때 훨씬 빨리 풀리는 것을 나눠 봅니다.
+
+## 처음 켜는 데 필요한 것
+
+| 하려는 일 | 필요한 것 |
+| --- | --- |
+| 카드에 OS를 쓴다 | PC에 꽂는 microSD 리더 |
+| 화면 없이 쓴다 | Wi-Fi, 또는 이더넷 케이블 |
+| 화면을 붙여 쓴다 | 보드에 맞는 HDMI 케이블, USB 키보드와 마우스 |
+
+- **microSD 리더**: OS는 PC에서 카드에 씁니다([「Raspberry Pi Imager」](#/read/sbc-start/os-imager)). PC에 슬롯이 없으면 USB에 꽂는 리더를 준비합니다
+- **화면 없이 쓰는 길**: 문서는 모니터, 키보드, 마우스 없이 쓰는 보드에 필요한 것이 Wi-Fi나 이더넷 연결뿐이라고 적습니다. 이 책은 그 길로 갑니다([「모니터 없이 설정하기: Wi-Fi, SSH, 사용자」](#/read/sbc-start/os-headless))
+- **이더넷이 있는 보드**: 5와 4 Model B에는 이더넷 단자가 있습니다. Zero 2 W는 2.4GHz Wi-Fi뿐입니다
+- **Zero의 USB**: Zero 2 W의 USB는 micro USB(OTG) 하나입니다. 키보드나 허브를 꽂으려면 OTG 어댑터가 있어야 합니다
+
+## 화면을 붙일 때
+
+| 보드 | 화면 단자 | 케이블 |
+| --- | --- | --- |
+| 5, 4 Model B | micro HDMI 둘 | micro HDMI와 HDMI를 잇는 것 |
+| Zero 2 W | mini HDMI 하나 | mini HDMI와 HDMI를 잇는 것 |
+| 3 이하 | HDMI 하나 | 보통의 HDMI 케이블 |
+
+- **micro와 mini는 다른 단자**: 이름이 비슷하지만 크기가 달라 서로 맞지 않습니다. 살 때 보드의 이름과 함께 확인합니다
+- **USB-C로는 화면이 나오지 않는다**: 문서는 어떤 라즈베리파이도 USB-C로 모니터를 구동하지 못한다고 적습니다. 5와 4의 USB-C는 전원을 받는 단자입니다
+- **하나만 붙인다면 HDMI0**: 5와 4의 두 단자에는 HDMI0과 HDMI1이라고 적혀 있습니다. 소리는 기본으로 첫 HDMI 장치로 나갑니다. 4는 HDMI0에서만 4K 60Hz를 낼 수 있고 그것도 설정을 켜야 합니다. 5는 두 단자 모두 4K 60Hz입니다
+
+## 카메라의 납작 케이블
+
+카메라와 디스플레이는 납작한 띠 모양의 케이블(FPC)로 잇습니다. 단자가 보드마다 다릅니다.
+
+- **5와 Zero는 22핀**: 폭이 좁은 22핀 단자입니다. 4와 그 앞의 보드는 15핀입니다
+- **딸려 온 케이블이 맞지 않을 수 있다**: 카메라에 든 케이블이 내 보드의 단자와 다르면 따로 삽니다. 공식 카메라 케이블은 5와 Zero의 22핀 단자에 카메라를 잇는 것이고 200mm, 300mm, 500mm가 있습니다
+- **카메라용과 디스플레이용은 다르다**: 모양이 같아 보여도 서로 바꿔 쓰지 않습니다. 단자의 자세한 이야기는 [「카메라와 디스플레이 단자」](#/read/sbc-start/per-csi-dsi)에 있습니다
+
+## 케이스
+
+- **금속 위에 맨 보드를 두지 않는다**: 문서는 케이스가 없어도 안전하게 쓸 수 있지만, 금속 위에 올려 두면 합선될 수 있다고 적습니다. 보드의 아랫면에도 납땜 자리가 드러나 있기 때문입니다
+- **5의 공식 케이스**: 팬이 들어 있고 칩에 붙이는 방열판이 딸려 옵니다([「방열판과 팬」](#/read/sbc-start/prt-cooling))
+- **헤더에 손이 닿는가**: 회로를 붙일 것이라면 뚜껑을 닫은 채로 40핀 헤더에 선을 꽂을 수 있는지, 카메라 케이블이 나올 틈이 있는지를 봅니다
+- **얹을 것과 겹치지 않는가**: SSD를 다는 판이나 HAT을 얹을 계획이면 그 높이가 케이스에 들어가는지 먼저 확인합니다([「HAT과 확장 보드」](#/read/sbc-start/hdr-hats))
+
+## USB-시리얼 어댑터
+
+네트워크가 잡히지 않으면 SSH로 들어갈 수 없습니다. 그때 보드가 켜지며 찍는 글자를 보고 명령을 넣을 수 있는 길이 시리얼 콘솔입니다. 선 세 가닥으로 보드와 PC를 잇는데, PC 쪽에는 USB를 시리얼 신호로 바꾸는 어댑터가 있어야 합니다.
+
+| 보드 | 콘솔이 나오는 곳 | 잇는 것 |
+| --- | --- | --- |
+| 5 | 두 micro HDMI 단자 사이의 3핀 UART 단자 | 3핀 단자에 맞는 케이블 |
+| 4, Zero 2 W | 40핀 헤더의 8번(TX), 10번(RX), 6번(GND) 핀 | 핀에 꽂는 선 셋 |
+
+- **3.3V 어댑터여야 한다**: 문서는 모든 UART가 3.3V 논리로 돌고, 5V 장치에 물리면 보드가 상할 수 있다고 적습니다. 어댑터의 신호 전압이 3.3V인지 확인합니다. RS-232라고 적힌 것은 전압이 훨씬 높아 쓸 수 없습니다
+- **엇갈려 잇는다**: 한쪽이 내보내는 선(TX)이 다른 쪽이 받는 선(RX)에 닿아야 합니다. 어댑터의 TX를 보드의 10번 핀에, 어댑터의 RX를 보드의 8번 핀에, GND는 GND에 잇습니다
+- **전원 선은 잇지 않는다**: 어댑터에 5V나 3.3V를 내는 선이 있어도 꽂지 않습니다. 보드는 제 전원으로 켭니다
+- **Debug Probe**: 라즈베리파이가 파는 어댑터입니다. 신호가 3.3V이고, 3핀 단자끼리 잇는 케이블과 헤더 핀에 꽂는 케이블 두 가지(암, 수)가 들어 있어서 5의 UART 단자에도 다른 보드의 헤더에도 닿습니다
+- **속도는 115200**: 콘솔의 기본 속도입니다. 보드에서 켜는 법과 PC에서 여는 법은 [「시리얼 콘솔」](#/read/sbc-start/rem-serial)에 있습니다
+
+## 회로를 만질 때 쓸 것
+
+- **브레드보드와 점퍼선**: 납땜 없이 회로를 꾸미는 판과 선입니다. 헤더의 핀에 꽂는 쪽은 구멍이 있는 암 단자여야 하므로 암-수 점퍼선을 준비합니다
+- **LED와 저항**: [「첫 프로젝트: LED 하나 켜기까지」](#/read/sbc-start/first-project)에서 씁니다. 저항 값은 그 쪽에서 계산합니다
+- **Zero 2 W의 헤더**: 헤더가 납땜되지 않은 것과 납땜된 것(with headers) 두 가지로 팝니다. 납땜 도구가 없다면 달린 것을 삽니다
+- **멀티미터**: 전압을 재 볼 수 있으면 전원 문제와 배선 실수를 가려내기가 쉬워집니다
+
+<Note>
+보드를 상하게 하는 실수는 대개 두 가지입니다. 5V 신호를 내는 장치를 GPIO에 잇는 것, 그리고 5V 핀에서 나온 선을 3.3V 핀이나 GPIO에 닿게 하는 것입니다. 선을 꽂거나 옮길 때에는 전원을 뽑고, 핀 번호를 한 번 더 셉니다. 이 쪽의 핀 번호는 문서에서 옮긴 것이고 보드에서 이어 보지는 못했습니다.
+</Note>
+
+## 정리
+
+- 처음 켜는 데에는 microSD 리더와 네트워크가 있으면 된다. 화면을 붙이려면 보드에 맞는 HDMI 케이블을 고른다
+- 케이스가 없는 보드는 금속 위에 두지 않고, 케이스는 헤더와 케이블과 얹을 것의 자리를 보고 고른다
+- 3.3V USB-시리얼 어댑터 하나가 있으면 네트워크가 안 될 때에도 보드에 들어갈 수 있다
+
+## 참고 문서
+
+- [Raspberry Pi 문서: Getting started(화면 없이 쓸 때 필요한 것, 보드별 HDMI 케이블, USB-C와 모니터, Zero의 OTG 어댑터)](https://www.raspberrypi.com/documentation/computers/getting-started.html)
+- [Raspberry Pi 문서: Classic single-board computers(금속 위의 맨 보드, 5와 4의 HDMI0과 HDMI1, 5의 UART 단자 자리)](https://www.raspberrypi.com/documentation/computers/sbcs.html)
+- [Raspberry Pi 문서: Configuration(HDMI 단자와 소리의 기본값, 주 UART의 핀, 3.3V 주의)](https://www.raspberrypi.com/documentation/computers/configuration.html)
+- [Raspberry Pi 문서: Raspberry Pi Zero(USB와 헤더)](https://www.raspberrypi.com/documentation/computers/zero.html)
+- [Raspberry Pi Camera Cable(5와 Zero의 22핀 단자용 카메라 케이블)](https://www.raspberrypi.com/products/camera-cable/)
+- [Raspberry Pi Case for Raspberry Pi 5(팬과 방열판)](https://www.raspberrypi.com/products/raspberry-pi-5-case/)
+- [Raspberry Pi 문서: Raspberry Pi Debug Probe(들어 있는 케이블과 잇는 법)](https://raspberrypi.com/documentation/microcontrollers/debug-probe.html)
+- [Raspberry Pi Debug Probe 제품 쪽(USB-UART 케이블로 쓰기, 3.3V)](https://www.raspberrypi.com/products/debug-probe/)
