@@ -120,7 +120,7 @@ MSL (Metal)
 API는 다른 API 위에서 돌기도 합니다. MoltenVK는 벌칸을 Metal 위에, DXVK와 VKD3D-Proton은 Direct3D 9~12를 벌칸 위에 구현해 리눅스와 스팀 덱에서 윈도우 게임을 돌리고, Mesa의 Zink는 OpenGL을 벌칸 위에 구현합니다. 브라우저의 WebGPU도 운영체제에 따라 Direct3D 12, Metal, 벌칸 위에서 돌면서, 그 위에 더 안전하고 단순한 명시적 API를 줍니다.
 
 <Note>
-마이크로소프트는 2024년 9월에, 셰이더 모델 7부터 Direct3D 12가 SPIR-V로 컴파일한 셰이더를 받고 DXIL을 SPIR-V로 바꿔 가겠다고 발표했습니다. HLSL을 SPIR-V로 컴파일하는 DXC의 벌칸 백엔드는 이미 널리 쓰여서, HLSL로 쓴 셰이더를 벌칸에서 돌리는 일도 흔합니다([「HLSL과 Slang에서 오기」](#/read/cpp-vulkan/spv-languages)).
+마이크로소프트는 2024년 9월에, 셰이더 모델 7부터 Direct3D 12가 SPIR-V로 컴파일한 셰이더를 받고 DXIL을 SPIR-V로 바꿔 가겠다고 발표했습니다. HLSL을 SPIR-V로 컴파일하는 DXC의 SPIR-V 뒷단은 이미 널리 쓰여서, HLSL로 쓴 셰이더를 벌칸에서 돌리는 일도 흔합니다([「HLSL과 Slang에서 오기」](#/read/cpp-vulkan/spv-languages)).
 </Note>
 
 ## 정리

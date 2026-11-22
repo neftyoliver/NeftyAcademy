@@ -202,7 +202,7 @@ e         112     96     72
 
 - **std140**: 벌칸 GLSL에서 `uniform` 블록의 기본입니다. `vec3`는 16바이트 경계에 놓이고, 배열 원소와 행렬의 열은 16바이트로 올림해 둡니다. 그래서 `vec2` 배열의 간격이 16(32 → 48)이고 `mat3`는 48바이트를 차지합니다
 - **std430**: `buffer` 블록과 푸시 상수의 기본입니다. 배열 간격을 16으로 올리지 않아 `d[1]`이 40에 오지만, `vec3`는 여전히 16바이트 경계라서 `b`는 16, `mat3`의 열 간격도 16입니다
-- **scalar**: 장치 기능 `scalarBlockLayout`(1.2부터 핵심, `make_device`가 켭니다)과 `GL_EXT_scalar_block_layout`이 있으면 쓸 수 있고, 성분 크기에만 맞춰 C의 구조체처럼 빽빽하게 놓습니다
+- **scalar**: 장치 기능 `scalarBlockLayout`(1.2부터 코어, `make_device`가 켭니다)과 `GL_EXT_scalar_block_layout`이 있으면 쓸 수 있고, 성분 크기에만 맞춰 C의 구조체처럼 빽빽하게 놓습니다
 - **흔한 실수**: C++의 `struct { float a; float b[3]; float c; }`는 `b`를 4에 두지만 std140·std430은 16에 둡니다. `alignas(16)`으로 맞추거나, `vec3` 대신 `vec4`를 쓰거나, scalar 규칙을 씁니다
 
 <Note>

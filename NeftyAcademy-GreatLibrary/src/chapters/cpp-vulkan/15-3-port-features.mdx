@@ -1,6 +1,6 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
-export const summary = '장치 기능에 따라 가르기: 쓸 수 있는 판, 승격된 확장, 기능 비트, 한도의 보장값, 대체 경로, 프로파일';
+export const summary = '장치 기능에 따라 가르기: 쓸 수 있는 판, 코어와 확장, 기능 비트, 한도의 보장값, 대체 경로, 프로파일';
 export const terms = [
   'VkPhysicalDeviceExtendedDynamicState3FeaturesEXT',
   'VkPhysicalDeviceMeshShaderFeaturesEXT', 'VkPhysicalDeviceFeatures', 'apiVersion',
@@ -58,7 +58,7 @@ Caps ask(VkPhysicalDevice gpu, uint32_t written) {   // written: 인스턴스에
     return c;
 }
 
-// 판이 오르며 코어에 들어온 기능: 그 판부터는 코어, 아래에서는 확장으로 찾는다
+// 판이 오르며 코어로 올라온 기능: 그 판부터는 코어, 아래에서는 확장으로 찾는다
 struct Promoted { const char* what; uint32_t since; const char* ext; };
 const Promoted promoted[] = {
     {"동적 렌더링", VK_API_VERSION_1_3, "VK_KHR_dynamic_rendering"},
@@ -200,7 +200,7 @@ int main() {
   동적 상태 3을 물은 대로: VK_SUCCESS
 ```
 
-- **쓸 수 있는 판**: 장치가 1.4여도 인스턴스의 `apiVersion`에 적은 판까지만 씁니다. 판이 오르며 코어가 된 기능은 그 판부터 확장 이름 없이 쓰고, 아래 판에서는 확장으로 찾습니다. 확장으로 쓸 때는 장치를 만들 때 이름을 적고, 함수는 `KHR`이 붙은 원래 이름으로 찾습니다
+- **쓸 수 있는 판**: 장치가 1.4여도 인스턴스의 `apiVersion`에 적은 판까지만 씁니다([「인스턴스와 확장」](#/read/cpp-vulkan/setup-instance)). 판이 오르며 코어가 된 기능은 그 판부터 확장 이름 없이 쓰고, 아래 판에서는 확장으로 찾습니다. 확장으로 쓸 때는 장치를 만들 때 이름을 적고, 함수는 `KHR`이 붙은 원래 이름으로 찾습니다
 - **기능 비트**: 확장을 지원해도 그 확장의 기능을 다 지원하는 것은 아니어서 비트를 따로 묻습니다. 메시 셰이더는 확장과 `meshShader`가 모두 있어야 하고, `VK_EXT_extended_dynamic_state3`은 상태 31개에 비트가 하나씩 있어 lavapipe도 16개만 지원합니다([「동적 상태」](#/read/cpp-vulkan/ps-dynamic)). 코어도 같아서 1.2의 `vkCmdDrawIndirectCount`는 `drawIndirectCount` 비트를 켜야 씁니다
 - **갈림**: `plan`처럼 길을 한 번 정해 두면 장치를 묻는 조건문이 그리는 코드에 흩어지지 않습니다. 개발 기계는 대개 다 지원해서 대체 경로가 돌지 않으므로, 답을 일부러 가려서 돌려 봅니다. 메시 셰이더가 없으면 컴퓨트 셰이더로 컬링하고([「인스턴싱과 간접 그리기」](#/read/cpp-vulkan/tech-instancing)), 포맷은 하나씩 따로 묻습니다([「압축 포맷」](#/read/cpp-vulkan/tex-compressed))
 - **한도**: 명세는 한도마다 보장하는 값을 정해 두었고, 여기서는 셋 다 그보다 큽니다. 200바이트 푸시 상수는 여기서 되지만 128바이트만 주는 장치에서는 안 됩니다. 검증 레이어는 지금 장치의 한도로 검사하므로 이 차이를 알려 주지 않습니다. 보장값 안에서 짜거나 한도를 읽어 나눕니다
@@ -209,7 +209,7 @@ int main() {
 
 ## 프로파일
 
-묻고 가를 것이 많아지면 목표를 묶음으로 정합니다. **벌칸 프로파일**은 판, 확장, 기능, 한도, 포맷의 요구를 이름 붙여 묶은 JSON 정의입니다. 크로노스의 로드맵 프로파일과 구글의 안드로이드 기준 프로파일([「안드로이드」](#/read/cpp-vulkan/port-android))이 있습니다.
+물을 것이 많아지면 목표를 묶음으로 정합니다. **벌칸 프로파일**은 판, 확장, 기능, 한도, 포맷의 요구를 이름 붙여 묶은 JSON 정의입니다. 크로노스의 로드맵 프로파일과 구글의 안드로이드 기준 프로파일([「안드로이드」](#/read/cpp-vulkan/port-android))이 있습니다.
 
 - **라이브러리**: SDK의 `vulkan_profiles.hpp`에서 `vpGetPhysicalDeviceProfileSupport`는 장치가 프로파일을 채우는지 답하고, `vpCreateDevice`는 프로파일의 확장과 기능을 켠 장치를 만듭니다
 - **프로파일 레이어**: `VK_LAYER_KHRONOS_profiles`는 좋은 장치가 프로파일만큼만 지원한다고 답하게 합니다. 넘어선 사용을 막지는 않으므로 검증 레이어와 함께 켭니다
@@ -221,18 +221,18 @@ int main() {
 
 ## 정리
 
-- 쓸 수 있는 판은 인스턴스에 적은 판과 장치의 판 중 낮은 쪽이고, 승격된 기능은 그 아래 판에서 확장으로 찾는다
+- 쓸 수 있는 판은 인스턴스에 적은 판과 장치의 판 중 낮은 쪽이고, 코어로 올라온 기능은 그 아래 판에서 확장으로 찾는다
 - 확장, 기능 비트, 한도, 포맷을 시작할 때 한 번 묻고 갈림을 정하며, 대체 경로는 답을 가려서 시험한다
 - 명세가 보장하는 한도 안에서 짜고, 프로파일과 프로파일 레이어로 목표 장치를 정해 개발 기계에서 확인한다
 
 ## 참고 문서
 
-- [Vulkan Guide: Enabling Extensions(확장과 기능 비트, 승격)](https://docs.vulkan.org/guide/latest/enabling_extensions.html)
+- [Vulkan Guide: Enabling Extensions(확장과 기능 비트, 코어로 올리기)](https://docs.vulkan.org/guide/latest/enabling_extensions.html)
 - [Vulkan Guide: Vulkan Profiles(프로파일에 담기는 것, 종류)](https://docs.vulkan.org/guide/latest/vulkan_profiles.html)
 - [Vulkan 명세: Initialization(적은 판과 장치의 판, 함수 찾기)](https://docs.vulkan.org/spec/latest/chapters/initialization.html)
 - [Vulkan 레퍼런스: Required Limits(보장되는 한도)](https://docs.vulkan.org/refpages/latest/refpages/source/Required_Limits.html)
 - [Vulkan 레퍼런스: vkGetDeviceProcAddr](https://docs.vulkan.org/refpages/latest/refpages/source/vkGetDeviceProcAddr.html)
-- [Vulkan 레퍼런스: VK_KHR_dynamic_rendering(기대는 확장, 1.3으로 승격)](https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_dynamic_rendering.html)
+- [Vulkan 레퍼런스: VK_KHR_dynamic_rendering(기대는 확장, 1.3에서 코어로)](https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_dynamic_rendering.html)
 - [Vulkan 레퍼런스: VkPhysicalDeviceVulkan12Features(기능 비트와 코어 함수)](https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDeviceVulkan12Features.html)
 - [VK_EXT_extended_dynamic_state3 제안서](https://docs.vulkan.org/features/latest/features/proposals/VK_EXT_extended_dynamic_state3.html)
 - [LunarG: Vulkan Profiles API Library(지원 확인, 장치 만들기)](https://vulkan.lunarg.com/doc/view/latest/windows/profiles_api_library.html)

@@ -10,7 +10,7 @@ export const terms = [
   'vmaDestroyBuffer', 'vmaFlushAllocation', 'vmaGetHeapBudgets', 'vkx::check',
 ];
 
-[「렌더 패스와 동적 렌더링」](#/read/cpp-vulkan/tri-renderpass)의 `allocate`는 리소스마다 `vkAllocateMemory`를 한 번씩 불렀습니다. 예제에는 이것으로 충분하지만 실제 프로그램에서는 두 가지가 걸립니다. 동시에 살아 있을 수 있는 할당 수(`maxMemoryAllocationCount`)를 명세는 4096개까지만 보장하고 실제로 4096을 알리는 드라이버도 흔하며, 할당 자체가 CPU에서 비싼 호출입니다. 그래서 큰 블록을 몇 개 받아 오프셋으로 나눠 쓰는데, 이 일을 맡는 대표 라이브러리가 AMD GPUOpen의 **VMA**(Vulkan Memory Allocator)입니다. 헤더 파일 하나로 된 MIT 라이선스 라이브러리이고, 최신판은 2025년 5월에 나온 3.3.0입니다(이 책은 우분투 패키지의 3.1 개발판으로 시험했습니다). 아래 프로그램은 장치의 메모리를 둘러본 뒤 VMA로 버퍼 102개를 만들고, 어느 블록의 어디에 놓였는지 찍습니다.
+[「렌더 패스와 동적 렌더링」](#/read/cpp-vulkan/tri-renderpass)의 `allocate`는 리소스마다 `vkAllocateMemory`를 한 번씩 불렀습니다. 예제에는 이것으로 충분하지만 실제 프로그램에서는 두 가지가 걸립니다. 동시에 살아 있을 수 있는 할당 수(`maxMemoryAllocationCount`)를 명세는 4096개까지만 보장하고 실제로 4096을 알리는 드라이버도 흔하며, 할당 자체가 CPU에서 비싼 호출입니다. 그래서 큰 블록을 몇 개 받아 오프셋으로 나눠 쓰는데, 이 일을 맡는 대표 라이브러리가 AMD GPUOpen의 **VMA**(Vulkan Memory Allocator)입니다. 헤더 파일 하나로 된 MIT 라이선스 라이브러리이고, 최신판은 2025년 5월에 나온 3.3.0입니다(이 책은 우분투 꾸러미의 3.1 개발판으로 시험했습니다). 아래 프로그램은 장치의 메모리를 둘러본 뒤 VMA로 버퍼 102개를 만들고, 어느 블록의 어디에 놓였는지 찍습니다.
 
 ```cpp vk with=vkx_instance.hpp,vkx_device.hpp
 #define VMA_IMPLEMENTATION              // VMA의 구현을 이 파일 하나에 넣는다
@@ -72,7 +72,7 @@ int main() {
     VmaAllocator vma;
     vkx::check(vmaCreateAllocator(&ai, &vma), "vmaCreateAllocator");
 
-    std::vector<Made> small;                     // 1000바이트짜리 저장 버퍼 100개
+    std::vector<Made> small;                   // 1000바이트짜리 스토리지 버퍼 100개
     std::set<VkDeviceMemory> blocks;
     for (int i = 0; i < 100; ++i) {
         small.push_back(make(vma, 1000, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT));

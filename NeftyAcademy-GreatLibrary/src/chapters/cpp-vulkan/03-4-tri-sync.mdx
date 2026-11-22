@@ -18,7 +18,7 @@ export const terms = [
 | 바이너리 세마포어 | GPU가 GPU를 | 제출 사이, 스왑체인 |
 | 타임라인 세마포어 | GPU와 CPU가 서로 | 카운터 하나로 여러 단계 |
 
-타임라인 세마포어는 1.2에서 핵심이 된, 커지기만 하는 64비트 카운터입니다. 제출마다 "카운터가 몇 이상이 되면 시작하고, 끝나면 몇으로 올린다"를 적고, CPU도 값을 올리거나(`vkSignalSemaphore`) 기다릴(`vkWaitSemaphores`) 수 있습니다. 아래 프로그램은 복사 두 개를 먼저 내 두고, CPU가 원본을 채운 뒤에야 1을 알려 GPU를 풀어 줍니다.
+타임라인 세마포어는 1.2에서 코어가 된, 커지기만 하는 64비트 카운터입니다. 제출마다 "카운터가 몇 이상이 되면 시작하고, 끝나면 몇으로 올린다"를 적고, CPU도 값을 올리거나(`vkSignalSemaphore`) 기다릴(`vkWaitSemaphores`) 수 있습니다. 아래 프로그램은 복사 두 개를 먼저 내 두고, CPU가 원본을 채운 뒤에야 1을 알려 GPU를 풀어 줍니다.
 
 ```cpp vk with=vkx_instance.hpp,vkx_device.hpp,vkx_cmd.hpp,vkx_resource.hpp
 #include "vkx_cmd.hpp"
