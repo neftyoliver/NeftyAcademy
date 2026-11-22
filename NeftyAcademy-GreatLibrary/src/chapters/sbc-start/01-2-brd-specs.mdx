@@ -1,0 +1,87 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '사양표 읽는 법: SoC와 코어, 납땜된 램, microSD와 NVMe와 eMMC, 전원 용량과 USB 한도, 표에 없는 것';
+export const terms = ['BCM2712', 'BCM2711', 'RP3A0'];
+
+사양표는 줄마다 숫자가 하나씩 있습니다. 그 숫자가 내 프로젝트에서 무엇을 정하는지 알아야 표를 읽은 것입니다. [「라즈베리파이의 갈래: 5, 4, Zero 2 W, CM, Pico」](#/read/sbc-start/brd-family)의 세 보드를 놓고 SoC, 램, 저장 장치, 전력의 네 줄을 읽어 봅니다.
+
+## SoC: 칩 하나에 든 것
+
+SoC는 CPU 코어, GPU, 영상 회로, 주변 장치 제어기를 칩 하나에 넣은 것입니다([「스마트폰과 ARM」](#/read/basics/modern-arm-mobile)). 라즈베리파이의 SoC는 브로드컴이 만듭니다.
+
+| 칩 | CPU 코어 | GPU | 쓰는 보드 |
+| --- | --- | --- | --- |
+| BCM2712 | Cortex-A76 4개, 2.4GHz | VideoCore VII | 5, 500, 500+, CM5 |
+| BCM2711 | Cortex-A72 4개, 1.8GHz | VideoCore VI | 4 Model B, 400, CM4 |
+| RP3A0 | Cortex-A53 4개, 1GHz | VideoCore IV | Zero 2 W |
+
+- **코어의 세대가 클럭보다 크다**: 세 칩 모두 코어는 넷입니다. 차이는 코어의 설계에서 납니다. A53은 명령을 온 순서대로 처리하는 작은 코어이고, A72와 A76은 순서를 바꿔 가며 처리하는 큰 코어입니다. 제품 소개는 5가 앞 세대보다 두세 배 빠르다고 적습니다
+- **모두 64비트 Arm**: 64비트 OS를 올리면 같은 실행 파일이 세 보드에서 돕니다. PC(x86-64)용 실행 파일은 돌지 않습니다([「어셈블리로 보는 아키텍처의 차이」](#/read/c-basic/asm))
+- **캐시**: BCM2712는 코어마다 L2 512KB에 함께 쓰는 L3 2MB가 있고, BCM2711은 L2 1MB입니다. 큰 데이터를 훑는 프로그램에서 차이가 납니다
+- **GPU**: VideoCore VII는 OpenGL ES 3.1과 Vulkan 1.3을 지원합니다. 화면에 그리는 프로젝트에서 보는 줄입니다
+- **주변 장치가 붙은 자리**: 4까지는 GPIO, I2C, SPI의 제어기가 SoC 안에 있습니다. 5는 이것들을 RP1이라는 다른 칩으로 빼고 SoC와 PCIe로 이었습니다([「라즈베리파이 5의 RP1」](#/read/sbc-start/hdr-rp1))
+
+## 램: 살 때 정해진다
+
+램은 보드에 납땜되어 있어서 나중에 늘릴 수 없습니다. GPU도 따로 램을 갖지 않고 같은 램을 나눠 씁니다. 아래는 고를 때의 어림이고, 실제로 얼마나 쓰는지는 보드에서 `free -h`로 잽니다.
+
+| 하려는 일 | 어림 |
+| --- | --- |
+| 화면 없이 센서를 읽어 보내는 서비스 | 512MB~1GB |
+| 카메라, 데이터베이스, 웹 서버를 함께 | 2~4GB |
+| 데스크톱과 브라우저, 보드 위에서 큰 빌드 | 4~8GB |
+| 큰 모델의 추론, 컨테이너 여러 개 | 8~16GB |
+
+사양표의 LPDDR4X(5), LPDDR4(4), LPDDR2(Zero 2 W)는 램의 세대입니다. 프로그램에서 달라지는 것은 없습니다. 다만 2026년에 값이 오른 것은 LPDDR4 계열이어서, LPDDR2를 쓰는 Zero는 그 영향을 덜 받았습니다.
+
+## 저장 장치: 어디서 부팅하고 어디에 쓰나
+
+| 장치 | 붙는 곳 | 성질 |
+| --- | --- | --- |
+| microSD | 모든 보드의 슬롯 | 싸고 갈아 끼우기 쉽다. 느리고, 많이 쓰면 닳는다 |
+| NVMe SSD | 5의 PCIe 단자에 M.2 HAT으로 | 빠르고 오래 간다. 부품이 더 든다 |
+| USB SSD | 4와 5의 USB 3.0 | 꽂기만 하면 된다. USB 전류 한도를 먹는다 |
+| eMMC | Compute Module에 납땜 | 흔들려도 빠지지 않는다. 갈아 끼울 수 없다 |
+
+- **5의 PCIe**: 2.0 한 레인(5GT/s)입니다. 3.0으로 올리는 설정이 있지만, 문서는 5가 그 속도로 인증받지 않았고 연결이 불안정할 수 있다고 적습니다
+- **5의 microSD**: SDR104라는 고속 모드를 지원합니다. 카드도 그 등급이어야 빨라집니다
+- 고르는 법은 [「microSD와 NVMe」](#/read/sbc-start/prt-storage), 닳고 깨지는 이야기는 [「SD카드가 망가지는 이유」](#/read/sbc-start/care-sd)에 있습니다
+
+## 전력: 전원이 버티는가
+
+| 보드 | 권장 전원 | USB에 줄 수 있는 전류 | 맨 보드의 전류 |
+| --- | --- | --- | --- |
+| 5 | 5V 5A | 1.6A (3A 전원이면 600mA) | 800mA쯤 |
+| 4 Model B | 5V 3A | 1.2A | 600mA쯤 |
+| Zero 2 W | 5V 2A | 전원과 단자가 버티는 만큼 | 350mA쯤 |
+
+- **맨 보드의 전류는 한가할 때의 값**: 문서의 측정에서 4는 부하를 끝까지 걸었을 때 1.25A를 먹었습니다. 권장 전원이 훨씬 큰 것은 이 여유와 주변 장치의 몫 때문입니다
+- **USB 한도는 따로 있다**: 전원이 아무리 커도 USB 포트들이 내줄 수 있는 전류의 합은 정해져 있습니다. 5는 전원이 5A를 낼 수 있다고 알려 올 때에만 1.6A까지 올리고, 그렇지 않으면 600mA입니다. 팬 단자도 이 몫에서 나갑니다
+- **주변 장치의 몫**: 문서의 대표값은 카메라 모듈 250mA, HDMI 50mA, 키보드나 마우스 100mA에서 1A입니다. GPIO 핀은 다 합쳐 50mA까지입니다
+- 전원을 고르는 법은 [「전원: 5V 5A와 USB-PD」](#/read/sbc-start/prt-power), 예산을 짜는 법은 [「USB와 전력 예산」](#/read/sbc-start/per-usb)에서 봅니다
+
+## 표에 없는 것
+
+- **열**: 제품 쪽의 답변은 5가 팬을 달았을 때 성능이 가장 잘 나온다고 합니다([「방열판과 팬」](#/read/sbc-start/prt-cooling))
+- **박자**: 리눅스가 도는 보드는 정해진 시간 안에 반응한다고 약속하지 않습니다([「PC와 무엇이 다른가」](#/read/sbc-start/brd-limits))
+- **OS**: 5에서는 지금의 Raspberry Pi OS(트릭시)와 바로 앞의 북웜이 돌고, 그보다 옛것은 돌지 않습니다
+
+<Note>
+사양표의 숫자는 보드의 개정에 따라 조금씩 다릅니다. BCM2711의 클럭은 1.5GHz인데, 4 Model B의 나중 개정과 400은 `arm_boost`라는 설정으로 1.8GHz까지 올려 씁니다. 내 보드의 값은 보드에서 재는 것이 정확합니다. 클럭은 `vcgencmd measure_clock arm`, 온도는 `vcgencmd measure_temp`로 봅니다.
+</Note>
+
+## 정리
+
+- SoC 줄에서는 코어의 세대를 먼저 보고, 주변 장치가 SoC 안에 있는지 RP1에 있는지를 본다
+- 램은 납땜되어 있어 살 때 정해지고, 저장 장치는 microSD, NVMe, USB, eMMC 가운데 어디서 부팅하고 어디에 쓸지로 고른다
+- 전력 줄에서는 권장 전원과 USB 한도를 따로 읽는다. 맨 보드의 전류는 한가할 때의 값이다
+
+## 참고 문서
+
+- [Raspberry Pi 문서: Processors(BCM2712, BCM2711, RP3A0의 코어, 캐시, GPU)](https://www.raspberrypi.com/documentation/computers/processors.html)
+- [Raspberry Pi 문서: Raspberry Pi computer hardware(전원 표와 측정값, USB 전류 한도, PCIe 단자와 Gen 3.0 경고)](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html)
+- [Raspberry Pi 문서: Classic single-board computers(보드 표의 클럭과 램)](https://www.raspberrypi.com/documentation/computers/sbcs.html)
+- [Raspberry Pi 5 제품 쪽(사양, 앞 세대와의 속도 비교, 냉각과 OS에 대한 답변)](https://www.raspberrypi.com/products/raspberry-pi-5/)
+- [Raspberry Pi 문서: Raspberry Pi OS(vcgencmd의 명령들)](https://www.raspberrypi.com/documentation/computers/os.html)
+- [Raspberry Pi 문서: config.txt(arm_boost)](https://www.raspberrypi.com/documentation/computers/config_txt.html)
+- [Raspberry Pi 소식: A new 3GB Raspberry Pi 4, and more memory-driven price increases(LPDDR4와 LPDDR2)](https://www.raspberrypi.com/news/a-new-3gb-raspberry-pi-4-for-83-75-and-more-memory-driven-price-increases/)

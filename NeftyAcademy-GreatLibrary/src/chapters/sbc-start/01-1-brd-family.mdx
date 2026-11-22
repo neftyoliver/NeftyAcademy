@@ -1,0 +1,145 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '라즈베리파이의 다섯 갈래, 5와 4와 Zero 2 W의 차이, 이름 읽는 법, 개정 코드로 내 보드 알아보기';
+export const terms = [];
+
+라즈베리파이라는 이름으로 파는 보드는 다섯 갈래입니다. 넷은 리눅스가 도는 컴퓨터이고 하나는 마이크로컨트롤러입니다. 둘이 어떻게 다른지는 「컴퓨터의 입문」의 [「마이크로컨트롤러와 라즈베리파이」](#/read/basics/modern-mcu-sbc)에서 봤습니다. 이 쪽은 다섯 갈래를 나누고, 이 서가의 책들이 기준으로 삼는 세 보드를 나란히 놓습니다. 숫자는 2026년 11월의 공식 문서에서 가져왔습니다.
+
+## 다섯 갈래
+
+| 갈래 | 지금의 대표 | 어떤 물건인가 |
+| --- | --- | --- |
+| 클래식 SBC | 5, 4 Model B | 신용카드만 한 기판에 흔한 단자를 다 갖춘 컴퓨터 |
+| Zero | Zero 2 W | 더 작고 싸고 전기를 적게 쓴다. 단자는 꼭 필요한 것만 |
+| 키보드 일체형 | 500, 500+, 400 | 클래식 SBC의 부품을 키보드 안에 넣은 것 |
+| Compute Module | CM5, CM4 | 단자 없이 핵심만 담은 모듈. 내가 만든 기판에 꽂는다 |
+| Pico | Pico 2, Pico 2 W | 마이크로컨트롤러. 리눅스가 돌지 않는다 |
+
+앞의 세 갈래는 거의 모두 microSD 슬롯, USB, 5V 전원, 40핀 GPIO 헤더를 똑같이 갖고 있습니다. 그래서 40핀에 꽂는 확장 보드와 이 서가의 코드가 갈래를 넘어 통합니다.
+
+## 세 보드를 나란히
+
+| 항목 | 5 | 4 Model B | Zero 2 W |
+| --- | --- | --- | --- |
+| 나온 해 | 2023 | 2019 | 2021 |
+| SoC | BCM2712 | BCM2711 | RP3A0 |
+| CPU | Cortex-A76 4개, 2.4GHz | Cortex-A72 4개, 1.8GHz | Cortex-A53 4개, 1GHz |
+| 램 | 1, 2, 4, 8, 16GB | 1, 2, 3, 4, 8GB | 512MB |
+| Wi-Fi | 2.4GHz와 5GHz | 2.4GHz와 5GHz | 2.4GHz |
+| 블루투스 | 5.0 | 5.0 | 4.2 |
+| 유선 랜 | 기가비트 | 기가비트 | 없음 |
+| USB | 3.0 둘, 2.0 둘 | 3.0 둘, 2.0 둘 | micro USB 하나 |
+| 화면 | micro HDMI 둘 | micro HDMI 둘 | mini HDMI 하나 |
+| 저장 | microSD, PCIe 한 레인 | microSD | microSD |
+| 전원 | USB-C, 5V 5A | USB-C, 5V 3A | micro USB, 5V |
+
+- **5에만 있는 것**: 전원 버튼, 실시간 시계, 디버그용 UART 단자, 팬 단자, PCIe입니다. GPIO와 USB와 이더넷은 RP1이라는 별도의 칩이 맡습니다([「라즈베리파이 5의 RP1」](#/read/sbc-start/hdr-rp1))
+- **4에만 있는 것**: 3.5mm 소리와 영상 잭입니다. 4K 화면 둘을 60Hz로 띄우는 것은 5만 됩니다. 4는 하나일 때에만 60Hz입니다
+- **Zero 2 W**: USB 장치를 꽂으려면 OTG 어댑터가 필요하고, 40핀 헤더는 납땜된 것과 안 된 것을 따로 팝니다. 램이 512MB라 보드 위에서 큰 프로그램을 컴파일하기는 버겁습니다. PC에서 빌드해 넘기는 법은 [「교차 컴파일: PC에서 라즈베리파이용으로」](#/read/c-mid/build-cross)에 있습니다
+
+## 이름 읽는 법
+
+| 붙는 말 | 뜻 |
+| --- | --- |
+| Model B | 이더넷과 USB 여러 개를 갖춘 판 |
+| Model A | 이더넷이 없고 USB가 적은, 작고 싼 판 |
+| W | Wi-Fi와 블루투스가 들어 있다 |
+| H, with headers | 40핀 헤더가 납땜되어 있다 |
+| Lite | 저장 장치(eMMC)가 없는 Compute Module |
+
+5는 Model 글자 없이 부릅니다. 다만 아래에서 보듯이 커널이 알려 주는 이름에는 `5-model-b`가 남아 있습니다.
+
+## 내 보드에게 묻기
+
+보드가 손에 있으면 사양표를 찾는 것보다 보드에게 묻는 편이 빠릅니다. 커널은 부팅할 때 받은 디바이스 트리에서 보드의 이름을 읽어 둡니다. 아래 출력은 공식 문서에 실린 라즈베리파이 5의 것입니다.
+
+```sh
+cat /proc/device-tree/compatible | tr '\0' '\n'
+```
+
+```text
+raspberrypi,5-model-b
+brcm,bcm2712
+```
+
+`grep Revision /proc/cpuinfo`는 `c03111` 같은 16진수 **개정 코드**를 보여 줍니다. 이 숫자 안에 보드의 종류, 칩, 램이 비트 단위로 들어 있습니다. 아래는 그 비트를 푸는 프로그램입니다. 코드 다섯 개는 공식 문서의 표에서 골랐고, 프로그램은 PC에서도 그대로 돕니다.
+
+```c
+// 개정 코드 풀기: /proc/cpuinfo 의 Revision 값에서 보드, 칩, 램을 읽는다
+#include <stdio.h>
+#include <stdlib.h>
+
+static const char* board_name(unsigned type) {
+    switch (type) {
+    case 0x11: return "4B";
+    case 0x12: return "Zero 2 W";
+    case 0x13: return "400";
+    case 0x14: return "CM4";
+    case 0x17: return "5";
+    case 0x18: return "CM5";
+    case 0x19: return "500/500+";
+    default:   return "?";
+    }
+}
+
+int main(void) {
+    static const char* chip[] = {"BCM2835", "BCM2836", "BCM2837", "BCM2711",
+                                 "BCM2712"};
+    static const char* ram[] = {"256MB", "512MB", "1GB", "2GB",
+                                "4GB",   "8GB",   "16GB", "?"};
+    const char* codes[] = {"c03111", "902120", "e04171", "b04170", "0010"};
+    for (size_t i = 0; i < sizeof codes / sizeof codes[0]; ++i) {
+        unsigned long code = strtoul(codes[i], nullptr, 16);
+        if (!(code >> 23 & 1)) {             // 23번 비트: 새 방식인지부터 본다
+            printf("%-7s 옛 방식 코드라서 필드로 나눌 수 없다\n", codes[i]);
+            continue;
+        }
+        unsigned soc = code >> 12 & 0xf;     // 12~15번 비트: 프로세서
+        printf("%-7s 보드 %-9s 칩 %-8s 램 %-6s 개정 1.%lu\n", codes[i],
+               board_name(code >> 4 & 0xff), soc < 5 ? chip[soc] : "?",
+               ram[code >> 20 & 7], code & 0xf);
+    }
+}
+```
+
+```text
+c03111  보드 4B        칩 BCM2711  램 4GB    개정 1.1
+902120  보드 Zero 2 W  칩 BCM2837  램 512MB  개정 1.0
+e04171  보드 5         칩 BCM2712  램 16GB   개정 1.1
+b04170  보드 5         칩 BCM2712  램 2GB    개정 1.0
+0010    옛 방식 코드라서 필드로 나눌 수 없다
+```
+
+- **새 방식인지부터 본다**: 23번 비트가 1이어야 나머지 필드가 뜻을 가집니다. 옛 보드의 `0010` 같은 코드는 차례대로 매긴 번호일 뿐입니다
+- **목록과 견주지 않는다**: 아는 코드의 목록과 통째로 견주는 프로그램은 새 개정이 나오면 틀립니다. 공식 문서도 종류나 램 같은 필드만 보라고 합니다. 5인지 알고 싶으면 종류 필드가 `0x17`인지 봅니다
+- **cpuinfo보다 디바이스 트리**: `/proc/cpuinfo`의 모양은 배포판마다 다를 수 있어서, 문서는 위의 `compatible`을 읽는 쪽을 권합니다
+- **Zero 2 W의 칩**: RP3A0은 BCM2837과 같은 실리콘에 램 512MB를 한 패키지로 묶은 것입니다. 그래서 개정 코드의 칩 필드는 BCM2837로 나옵니다
+
+## 무엇을 고를까
+
+- **처음 배우는 보드**: 5나 4입니다. 이 서가의 책들은 이 둘을 기준으로 씁니다. 단자가 다 있어서 모니터와 키보드를 꽂아도 되고, 네트워크 너머에서 터미널로만 다뤄도 됩니다
+- **작게, 전기를 적게**: Zero 2 W입니다. 아무것도 꽂지 않은 보드가 쓰는 전류가 350mA쯤으로, 5(800mA쯤)의 절반이 안 됩니다
+- **제품 안에 넣을 때**: Compute Module입니다. 필요한 단자만 달린 기판을 직접 설계하고, SD카드 대신 납땜된 eMMC를 씁니다
+- **정확한 박자와 건전지**: Pico입니다. 리눅스가 아니어서 이 서가의 범위 밖이지만, 라즈베리파이 옆에 두고 UART나 I2C로 묶어 쓰는 일이 많습니다
+
+<Note>
+값은 적지 않았습니다. 2026년에는 메모리 값이 크게 올라서 램이 큰 모델부터 값이 여러 번 바뀌었고, 그 대신 램을 줄인 4(3GB)가 새로 나왔습니다. 값과 재고는 살 때 공식 판매처에서 확인합니다. 얼마나 오래 팔지도 봅니다. 라즈베리파이는 모델마다 언제까지는 만들겠다는 날짜를 제품 쪽에 밝혀 두는데, 5는 적어도 2036년 1월까지입니다.
+</Note>
+
+## 정리
+
+- 라즈베리파이는 클래식 SBC, Zero, 키보드 일체형, Compute Module, Pico의 다섯 갈래이고, Pico만 리눅스가 돌지 않는 마이크로컨트롤러다
+- 5, 4, Zero 2 W는 칩과 램과 단자가 다르지만 40핀 헤더가 같아서 확장 보드와 코드가 통한다
+- 보드의 정체는 `/proc/device-tree/compatible`과 개정 코드로 묻고, 개정 코드는 목록이 아니라 필드로 읽는다
+
+## 참고 문서
+
+- [Raspberry Pi 문서: Raspberry Pi computer hardware(다섯 갈래, 전원 표, 개정 코드의 비트와 읽는 법)](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html)
+- [Raspberry Pi 문서: Classic single-board computers(5와 4 Model B의 부품과 단자, Model A와 B)](https://www.raspberrypi.com/documentation/computers/sbcs.html)
+- [Raspberry Pi 문서: Zero models(Zero 2 W의 RP3A0, 무선, 단자, 헤더)](https://www.raspberrypi.com/documentation/computers/zero.html)
+- [Raspberry Pi 문서: Keyboard computers(400, 500, 500+)](https://www.raspberrypi.com/documentation/computers/keyboard-computers.html)
+- [Raspberry Pi 문서: Compute Module hardware(CM5와 CM4, Lite, IO 보드)](https://www.raspberrypi.com/documentation/computers/compute-module.html)
+- [Raspberry Pi 문서: Pico-series Microcontrollers(RP2040과 RP2350)](https://www.raspberrypi.com/documentation/microcontrollers/pico-series.html)
+- [Raspberry Pi 문서: Processors(BCM2712, BCM2711, RP3A0)](https://www.raspberrypi.com/documentation/computers/processors.html)
+- [Raspberry Pi 소식: A new 3GB Raspberry Pi 4, and more memory-driven price increases(2026년 4월 1일)](https://www.raspberrypi.com/news/a-new-3gb-raspberry-pi-4-for-83-75-and-more-memory-driven-price-increases/)
+- [Raspberry Pi 5 제품 쪽(사양과 생산 기한)](https://www.raspberrypi.com/products/raspberry-pi-5/)
