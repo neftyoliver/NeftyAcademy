@@ -89,7 +89,7 @@ int main(void) {
 
 - **Active Cooler**: 알루미늄 방열판에 송풍 팬을 얹은 것입니다. 열을 옮기는 패드가 붙어 있고, 스프링이 든 누름 핀으로 보드에 고정합니다. 한번 달면 떼지 않습니다. 제품 쪽은 떼어 내면 핀과 패드가 상한다고 적습니다
 - **SSD를 함께 달 때**: M.2 HAT+는 Active Cooler 위에 올라갑니다. 그렇게 얹고 잰 값은 한가할 때 49도쯤, 부하에서 64도쯤입니다. 공식 케이스 안에는 M.2 HAT+ Compact가 들어갑니다([「microSD와 NVMe」](#/read/sbc-start/prt-storage))
-- **4의 Case Fan**: 공식 케이스의 뚜껑에 끼우고 선 셋을 40핀 헤더에 꽂습니다. 데스크톱의 Raspberry Pi Configuration에서 Performance 탭의 Fan을 켜고, 핀(기본 14)과 켜질 온도(기본 80도)를 정합니다. 설정하기 전에는 보드가 켜져 있는 내내 돕니다
+- **4의 Case Fan**: 공식 케이스의 뚜껑에 끼우고 선 셋을 40핀 헤더에 꽂습니다. `sudo raspi-config`의 Performance Options에서 Fan을 켜고, 핀(기본 14)과 켜질 온도(기본 80도)를 정합니다([「raspi-config」](#/read/sbc-start/cfg-raspi-config)). 데스크톱에서는 Control Centre의 Performance 탭에 같은 칸이 있습니다. 설정하기 전에는 보드가 켜져 있는 내내 돕니다
 - **GPIO 14는 시리얼 콘솔의 핀**: 이 핀은 시리얼 콘솔이 글자를 내보내는 핀이기도 합니다. 둘을 함께 쓰려면 팬의 신호선을 다른 GPIO로 옮기고 설정의 핀 번호를 맞춥니다([「시리얼 콘솔」](#/read/sbc-start/rem-serial))
 - **세워 두기**: 문서는 보드를 세워 두면 바람이 잘 통해 열이 조금 더 빠진다고 적습니다
 
@@ -118,6 +118,7 @@ vcgencmd get_throttled    # 0x4 비트가 서 있으면 지금 스로틀링 중�
 - [Raspberry Pi 소식: Heating and cooling Raspberry Pi 5(식히지 않을 때, 케이스의 팬, Active Cooler의 측정값)](https://www.raspberrypi.com/news/heating-and-cooling-raspberry-pi-5/)
 - [Raspberry Pi Active Cooler(구성, 고정하는 법, 떼지 말라는 주의)](https://www.raspberrypi.com/products/active-cooler/)
 - [Raspberry Pi 4 Case Fan(다는 법과 Fan 설정의 기본값)](https://www.raspberrypi.com/products/raspberry-pi-4-case-fan/)
+- [Raspberry Pi 문서: Configuration(raspi-config의 Performance Options와 Control Centre에 있는 Fan 설정)](https://www.raspberrypi.com/documentation/computers/configuration.html)
 - [Raspberry Pi 문서: M.2 HAT+(Active Cooler, 공식 케이스와 함께 쓰기)](https://www.raspberrypi.com/documentation/accessories/m2-hat-plus.html)
 - [Raspberry Pi 문서: Raspberry Pi OS(vcgencmd의 measure_temp와 get_throttled)](https://www.raspberrypi.com/documentation/computers/os.html)
 - [Raspberry Pi 문서: config.txt(enable_uart와 GPIO 14, 15)](https://www.raspberrypi.com/documentation/computers/config_txt.html)
