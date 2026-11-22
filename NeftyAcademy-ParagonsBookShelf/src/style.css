@@ -172,7 +172,7 @@ a { color: inherit; }
    지도 좌표로 그린 뒤 묶음의 변환으로 옮기므로, 굵기와 점선이 확대를 타지 않게 한다 */
 .bf-web-links path { fill: none; stroke-linejoin: round; stroke: var(--bf-accent, #c0842b); stroke-width: 1.2; stroke-dasharray: 5 4; vector-effect: non-scaling-stroke; pointer-events: none; }
 .bf-web-links { opacity: 0.42; transition: opacity 0.2s ease; }
-.bf-web-links.has-focus { opacity: 0.14; }
+.bf-web-links.has-focus { opacity: 0.26; }
 /* 고른 챕터의 화살표. 들어오는 것(이 챕터를 참조하는 쪽에서)은 주황, 나가는 것(이 챕터가 참조하는 쪽으로)은 파랑 */
 .bf-web-flows { --bf-flow: #d1791f; pointer-events: none; }
 .bf-web-flows.is-out { --bf-flow: #2f7fc2; }
@@ -188,6 +188,7 @@ a { color: inherit; }
 .bf-web-refs { position: absolute; left: 12px; bottom: 12px; z-index: 2; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; width: min(300px, calc(100% - 24px)); pointer-events: none; }
 .bf-web-refs > * { pointer-events: auto; }
 .bf-web-mode { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px 4px 6px; border: 1px solid var(--bf-line); border-radius: 8px; background: color-mix(in srgb, var(--bf-paper) 90%, transparent); color: var(--bf-muted); font: inherit; font-size: 12.5px; cursor: pointer; }
+.bf-web-keys { display: flex; flex-wrap: wrap; gap: 6px; }
 .bf-web-mode:hover { color: var(--bf-ink); }
 .bf-web-mode[aria-pressed='true'] { border-color: #2f7fc2; color: var(--bf-ink); }
 .bf-web-mode kbd { font-family: var(--bf-mono); font-size: 11px; line-height: 1.5; padding: 0 5px; border: 1px solid var(--bf-line); border-bottom-width: 2px; border-radius: 4px; background: var(--bf-paper); color: var(--bf-ink); }

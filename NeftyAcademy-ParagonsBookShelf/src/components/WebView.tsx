@@ -30,7 +30,7 @@ const NUM_FONT = 0.25;
 const TITLE_FONTS = [0.31, 0.28, 0.25];
 const TITLE_LEADING = 1.16; // 줄 사이 = 글자 크기의 몇 배
 const ZOOM_MAX = 8;
-const HOVER_WAIT = 110; // 마우스가 노드에 이만큼(ms) 머물러야 그 노드의 화살표로 바꾼다. 지나가다 스친 노드로 바뀌지 않게
+const HOVER_WAIT = 160; // 마우스가 노드에 이만큼(ms) 머물러야 그 노드를 고른다. 지나가다 스친 노드의 줄까지 그려져 남지 않게
 const FLOW_SPEED = 46; // 화살표가 흐르는 빠르기(화면 단위/초)
 const FLOW_GAP = 64; // 흐르는 화살표 사이의 거리
 const PORTAL_R = 13; // 지도 밖의 책으로 이어지는 화이트홀의 반지름
@@ -154,12 +154,20 @@ const pathOf = (line: Line): string => line.map((p, i) => `${i ? 'L' : 'M'}${p.x
 const lengthOf = (line: Line): number => line.reduce((sum, p, i) => (i ? sum + Math.hypot(p.x - line[i - 1]!.x, p.y - line[i - 1]!.y) : 0), 0);
 
 /**
- * 모든 참조 줄의 바탕 그림. 줄이 수천 개여도 끌거나 확대할 때마다 다시 계산하지 않도록,
+ * 남겨 둔 참조 줄의 바탕 그림(지금까지 고른 챕터들의 줄). 줄이 많아도 끌거나 확대할 때마다 다시 계산하지 않도록,
  * 지도 좌표로 한 번 그려 두고 이것을 감싼 묶음(g)의 변환만 바꾼다. 줄의 굵기는 변환을 타지 않는다(CSS 의 vector-effect).
+ * routed 는 길을 더 찾을 때마다 올라가는 수로, 새로 찾은 길을 그리게 하려는 것이다.
  */
-const LinkLayer = memo(function LinkLayer({ links, routed }: { links: CrossLink[]; routed: number }) {
-  return <>{links.slice(0, routed).map((l) => (l.d ? <path key={l.key} d={l.d} /> : null))}</>;
+const LinkLayer = memo(function LinkLayer({ links, kept }: { links: CrossLink[]; kept: ReadonlySet<string>; routed: number }) {
+  return <>{links.map((l) => (l.d && kept.has(l.key) ? <path key={l.key} d={l.d} /> : null))}</>;
 });
+
+/**
+ * 지도마다 남겨 둔 줄. 쪽을 읽고 돌아와도(지도가 다시 그려져도) 남아 있도록 컴포넌트 밖에 둔다.
+ * 열쇠는 그 지도에 놓인 책들이고, 화면을 새로 열면 비어 있다.
+ */
+const KEPT = new Map<string, ReadonlySet<string>>();
+const NONE: ReadonlySet<string> = new Set();
 
 /** 화살촉. 오른쪽(+x)을 향한다 */
 const HEAD = 'M-5 -4.2 L4.5 0 L-5 4.2 L-2.4 0 Z';
@@ -207,9 +215,11 @@ function Flow({ pts, r, still }: { pts: Point[]; r: number; still: boolean }) {
  * 휠을 굴리거나 단추를 누르거나 두 손가락을 벌리면 확대된다. 확대하면 간격이 벌어지면서 노드와 글자도 함께 커지고,
  * 충분히 커진 노드에는 제목이 들어간다. 끌어서 옮긴다.
  *
- * 참조 줄: 챕터의 links(본문에서 가리킨 다른 챕터)마다 옅은 점선이 그어진다. 같은 두 챕터 사이에는 한 줄뿐이다.
- * 챕터에 올리면(손가락으로는 한 번 누르면) 그 챕터가 "고른 챕터"가 되고, 그 챕터를 가리키는 쪽에서 화살표가 흘러온다.
+ * 참조 줄: 챕터의 links(본문에서 가리킨 다른 챕터)가 줄이 된다. 같은 두 챕터 사이에는 한 줄뿐이다.
+ * 처음에는 아무 줄도 긋지 않는다(수천 개를 다 그으면 지도가 늦게 뜬다). 챕터에 올리면(손가락으로는 한 번 누르면)
+ * 그 챕터가 "고른 챕터"가 되고, 그 챕터를 가리키는 쪽에서 화살표가 흘러온다.
  * R 키나 왼쪽 아래 단추로 방향을 뒤집으면, 고른 챕터가 가리키는 쪽으로 화살표가 흘러간다(들어오던 화살표는 가려진다).
+ * 한 번 그린 줄은 다른 챕터를 골라도 옅은 점선으로 남는다. 「참조관계 지우기」 단추가 남은 줄을 모두 지운다.
  * 가리키는 쪽이 이 지도에 없는 책이면, 그 책(또는 그 책을 담은 서가)이 책 노드로라도 놓여 있을 때는 그 노드로 잇고,
  * 아예 없을 때는 챕터 옆에 화이트홀을 그려 지도 밖으로 이어짐을 보인다.
  */
@@ -220,6 +230,8 @@ export function WebView({ books }: { books: Book[] }) {
   const [mode, setMode] = useState<'in' | 'out'>('in');
   const [view, setView] = useState({ k: 1, dx: 0, dy: 0 });
   const [routed, setRouted] = useState(0);
+  const mapKey = useMemo(() => books.map((b) => b.id).join('|'), [books]);
+  const [kept, setKept] = useState<ReadonlySet<string>>(() => KEPT.get(mapKey) ?? NONE);
   const [fit, setFit] = useState<number | null>(null);
   const svg = useRef<SVGSVGElement>(null);
   const drag = useRef<{ x: number; y: number; moved: boolean } | null>(null);
@@ -356,27 +368,59 @@ export function WebView({ books }: { books: Book[] }) {
     return { placed, links: [...links.values()], routeLink, spots, spotOf, rotate, hub, box: { x: minX - pad, y: minY - pad, w: maxX - minX + pad * 2, h: maxY - minY + pad * 2 } };
   }, [books, refs, bookPath]);
 
-  // 참조 줄의 길은 조금씩 나눠서 찾는다. 수백, 수천 개를 한꺼번에 찾으면 지도가 늦게 뜬다
+  // 지도가 바뀌면(카테고리를 바꾸거나 다른 서가로 가면) 고른 챕터를 풀고, 그 지도에 남겨 둔 줄을 꺼낸다
   useEffect(() => {
+    setFocus(null);
+    armed.current = '';
+    setKept(KEPT.get(mapKey) ?? NONE);
+  }, [links, mapKey]);
+
+  // 고른 챕터의 줄(지금 방향). 지도에 놓인 쪽끼리의 줄만이다
+  const focusLinks = useMemo(() => {
+    const at = focus ? spots.get(focus) : undefined;
+    if (!at) return [];
+    return links.filter((l) => (mode === 'in' ? (l.b === at && l.ab) || (l.a === at && l.ba) : (l.a === at && l.ab) || (l.b === at && l.ba)));
+  }, [focus, mode, links, spots]);
+
+  // 고른 챕터의 줄은 남겨 둔다
+  useEffect(() => {
+    if (focusLinks.length === 0) return;
+    setKept((old) => {
+      if (focusLinks.every((l) => old.has(l.key))) return old;
+      const next = new Set(old);
+      for (const l of focusLinks) next.add(l.key);
+      KEPT.set(mapKey, next);
+      return next;
+    });
+  }, [focusLinks, mapKey]);
+
+  // 줄의 길은 그릴 것만, 조금씩 나눠서 찾는다. 줄이 수백 개 걸린 챕터를 골라도 화면이 멈추지 않는다
+  useEffect(() => {
+    const seen = new Set<string>();
+    const todo = [...focusLinks, ...links.filter((l) => kept.has(l.key))].filter((l) => !l.line && !seen.has(l.key) && seen.add(l.key));
+    if (todo.length === 0) return;
     let alive = true;
     let done = 0;
     let timer = 0;
-    setRouted(0);
-    setFocus(null);
-    armed.current = '';
+    let shown = performance.now();
     const step = (): void => {
       if (!alive) return;
-      const until = performance.now() + 7;
-      while (done < links.length && performance.now() < until) routeLink(links[done++]!);
-      setRouted(done);
-      if (done < links.length) timer = window.setTimeout(step, 12);
+      const until = performance.now() + 9;
+      while (done < todo.length && performance.now() < until) routeLink(todo[done++]!);
+      // 다 찾았거나 조금 모였을 때만 그린다. 길 하나 찾을 때마다 그리면 그리는 데 시간이 더 든다
+      const now = performance.now();
+      if (done >= todo.length || now - shown >= 70) {
+        shown = now;
+        setRouted((n) => n + 1);
+      }
+      if (done < todo.length) timer = window.setTimeout(step, 3);
     };
     timer = window.setTimeout(step, 0);
     return () => {
       alive = false;
       window.clearTimeout(timer);
     };
-  }, [links, routeLink]);
+  }, [focusLinks, kept, links, routeLink]);
 
   // 화면의 가운데(지도 좌표). 확대는 이 점을 중심으로 좌표를 늘리고, viewBox 는 그대로 둔다.
   const cx = box.x + box.w / 2;
@@ -605,10 +649,10 @@ export function WebView({ books }: { books: Book[] }) {
   const focusPage = focus ? refs.at.get(focus) : undefined;
   const radiusOf = (s: Spot): number => (s.sub ? radii.sub : radii.chapter);
   const flows = focusSpot
-    ? links
-        .filter((l) => (mode === 'in' ? (l.b === focusSpot && l.ab) || (l.a === focusSpot && l.ba) : (l.a === focusSpot && l.ab) || (l.b === focusSpot && l.ba)))
+    ? focusLinks
+        .filter((l) => l.line)
         .map((l) => {
-          const line = routeLink(l);
+          const line = l.line!;
           // a 에서 b 로 흐르는가. 들어오는 화살표는 고른 챕터가 끝이고, 나가는 화살표는 고른 챕터가 처음이다
           const forward = mode === 'in' ? l.b === focusSpot : l.a === focusSpot;
           return { key: l.key, pts: (forward ? line : [...line].reverse()).map(T), r: radiusOf(forward ? l.b : l.a) };
@@ -639,6 +683,13 @@ export function WebView({ books }: { books: Book[] }) {
     portal = mode === 'in' ? { at: hole, r, pts: [hole, node], end: radiusOf(focusSpot) } : { at: hole, r, pts: [node, hole], end: r };
   }
   const flip = (): void => setMode((m) => (m === 'in' ? 'out' : 'in'));
+  /** 남겨 둔 줄을 모두 지우고, 고른 챕터도 푼다 */
+  const wipe = (): void => {
+    armed.current = '';
+    setFocus(null);
+    setKept(NONE);
+    KEPT.delete(mapKey);
+  };
 
   return (
     <div className="bf-web">
@@ -689,9 +740,9 @@ export function WebView({ books }: { books: Book[] }) {
           )}
         </g>
 
-        {/* 모든 참조 줄(옅게). 챕터를 고르면 더 옅어지고, 그 챕터의 화살표만 또렷해진다 */}
+        {/* 지금까지 고른 챕터들의 참조 줄(옅게). 챕터를 고르고 있으면 더 옅어지고, 그 챕터의 화살표만 또렷해진다 */}
         <g className={`bf-web-links${focusSpot ? ' has-focus' : ''}`} transform={`matrix(${k} 0 0 ${k} ${(cx - (cx + view.dx) * k).toFixed(2)} ${(cy - (cy + view.dy) * k).toFixed(2)})`}>
-          <LinkLayer links={links} routed={routed} />
+          <LinkLayer links={links} kept={kept} routed={routed} />
         </g>
 
         <g className={`bf-web-flows is-${mode}`}>
@@ -831,10 +882,17 @@ export function WebView({ books }: { books: Book[] }) {
             ) : null}
           </div>
         ) : null}
-        <button type="button" className="bf-web-mode" onClick={flip} aria-pressed={mode === 'out'} title="화살표의 방향을 뒤집습니다">
-          <kbd>R</kbd>
-          {mode === 'in' ? '챕터가 참조하는 쪽 보기' : '챕터를 참조하는 쪽 보기'}
-        </button>
+        <div className="bf-web-keys">
+          <button type="button" className="bf-web-mode" onClick={flip} aria-pressed={mode === 'out'} title="화살표의 방향을 뒤집습니다">
+            <kbd>R</kbd>
+            {mode === 'in' ? '챕터가 참조하는 쪽 보기' : '챕터를 참조하는 쪽 보기'}
+          </button>
+          {kept.size > 0 ? (
+            <button type="button" className="bf-web-mode bf-web-wipe" onClick={wipe} title="지금까지 그린 참조 줄을 모두 지웁니다">
+              참조관계 지우기
+            </button>
+          ) : null}
+        </div>
       </div>
     </div>
   );
