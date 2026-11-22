@@ -23,22 +23,94 @@ export function chapterNumber(book: Book, index: number): string {
   return String((book.firstNumber ?? 1) + index);
 }
 
-/** 원 안에 넣을 제목을 띄어쓰기 기준으로 줄당 max 글자 안쪽으로 나눈다(최대 3줄). */
-export function wrapTitle(title: string, max = 6): string[] {
-  const words = title.split(/\s+/).filter(Boolean);
-  const lines: string[] = [];
+/** 글자의 폭을 한글 한 자 = 1 로 어림한다. 로마자와 숫자는 그 절반 남짓이다 */
+function glyph(ch: string): number {
+  const c = ch.codePointAt(0) ?? 0;
+  if (c >= 0x1100) return 1; // 한글, 한자, 전각 기호
+  if (ch === ' ') return 0.3;
+  if (/[A-Z@%&#MW]/.test(ch)) return 0.7;
+  if (/[.,:;'`|!ilIjt()[\]]/.test(ch)) return 0.32;
+  return 0.56;
+}
+export const textWidth = (text: string): number => Array.from(text).reduce((w, ch) => w + glyph(ch), 0);
+
+/** 폭 max 를 넘는 글을 넘지 않을 만큼 자르고 줄임표를 붙인다 */
+function clip(text: string, max: number): string {
+  if (textWidth(text) <= max) return text;
+  let out = '';
+  for (const ch of Array.from(text)) {
+    if (textWidth(out + ch) > max - 0.6) break;
+    out += ch;
+  }
+  return `${out}…`;
+}
+
+/** 낱말을 더 잘게: 띄어쓰기로 나누고, 긴 식별자는 `_`와 `::` 뒤에서도 끊을 수 있게 한다 */
+function pieces(title: string): { text: string; glue: boolean }[] {
+  const out: { text: string; glue: boolean }[] = [];
+  for (const word of title.split(/\s+/).filter(Boolean)) {
+    const parts = word.split(/(?<=_|::)/).filter(Boolean);
+    parts.forEach((text, i) => out.push({ text, glue: i > 0 }));
+  }
+  return out;
+}
+
+/**
+ * 반지름 r 인 원 안에 넣을 제목을 줄로 나눈다(최대 lines 줄). 글자 크기 font, 줄 사이 leading.
+ * 줄마다 그 높이에서의 원의 폭(현의 길이)을 넘지 않게 채우고, 끝내 넘치면 마지막 줄을 줄임표로 자른다(clipped).
+ * shift = 줄 묶음의 가운데가 원의 가운데에서 아래로 내려간 거리(위에 번호가 있을 때).
+ * 돌려주는 줄은 i번째 줄을 가운데에서 shift + (i - (줄 수 - 1) / 2) * leading 만큼 내려 그린다고 보고 나눈 것이다.
+ * 뒤쪽 줄이 비어 있을 수 있다(그 자리를 비워 두어야 앞의 줄들이 원 안에 들어간다).
+ */
+export function wrapInCircle(title: string, r: number, font: number, leading: number, lines = 3, shift = 0): { lines: string[]; clipped: boolean } {
+  const words = pieces(title);
+  const room = (i: number, n: number): number => {
+    const y = Math.abs(shift + (i - (n - 1) / 2) * leading) + font * 0.45;
+    return (2 * Math.sqrt(Math.max(0, (r * 0.94) ** 2 - y * y))) / font;
+  };
+  for (let n = 1; n <= lines; n++) {
+    const out: string[] = [];
+    let cur = '';
+    let fits = true;
+    for (const w of words) {
+      const next = cur ? (w.glue ? cur + w.text : `${cur} ${w.text}`) : w.text;
+      if (textWidth(next) <= room(out.length, n)) cur = next;
+      else if (!cur) {
+        fits = false;
+        break;
+      } else {
+        out.push(cur);
+        cur = w.text;
+        if (out.length >= n || textWidth(cur) > room(out.length, n)) {
+          fits = false;
+          break;
+        }
+      }
+    }
+    if (fits) return { lines: Array.from({ length: n }, (_, i) => [...out, cur][i] ?? ''), clipped: false };
+  }
+  // 다 들어가지 않는다: 줄 수를 다 쓰고, 마지막 줄에 남은 것을 모두 붙인 뒤 넘치는 줄은 자른다
+  const out: string[] = [];
+  const push = (text: string): void => void out.push(clip(text, room(out.length, lines)));
   let cur = '';
   for (const w of words) {
-    if (!cur) cur = w;
-    else if (cur.length + 1 + w.length <= max) cur += ` ${w}`;
+    const next = cur ? (w.glue ? cur + w.text : `${cur} ${w.text}`) : w.text;
+    if (!cur || out.length === lines - 1 || textWidth(next) <= room(out.length, lines)) cur = next;
     else {
-      lines.push(cur);
-      cur = w;
+      push(cur);
+      cur = w.text;
     }
   }
-  if (cur) lines.push(cur);
-  if (lines.length > 3) return [...lines.slice(0, 2), `${lines.slice(2).join(' ').slice(0, max - 1)}…`];
-  return lines;
+  if (cur) push(cur);
+  return { lines: out, clipped: true };
+}
+
+/** 이 책(서가면 안쪽 책까지)에서 읽을 수 있는 쪽들의 '책id/챕터id'. 본문이 있는 챕터만 센다 */
+export function readablePages(book: Book): string[] {
+  const own = flatChapters(book)
+    .filter((f) => f.chapter.Content && !f.chapter.draft)
+    .map((f) => `${book.id}/${f.chapter.id}`);
+  return [...own, ...(book.books ?? []).flatMap(readablePages)];
 }
 
 /** 책과 그 안의 모든 책(서가)을 한 줄로 편다. */

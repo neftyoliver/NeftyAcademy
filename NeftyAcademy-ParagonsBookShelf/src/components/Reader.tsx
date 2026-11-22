@@ -28,6 +28,20 @@ const Body = memo(function Body({ Content }: { Content: ComponentType }) {
   return <Content />;
 });
 
+/**
+ * 바깥(http, https)으로 나가는 링크는 새 탭에서 열고 bf-ext 를 붙인다. 본문이 MDX 든 TSX 든 그린 뒤에 한 번 훑는다.
+ * 바깥 링크라는 표시(↗)는 CSS 가 붙인다. 본문의 글자를 바꾸면 줄치기의 자리가 어긋나기 때문이다.
+ */
+function markExternalLinks(root: HTMLElement): void {
+  for (const a of root.querySelectorAll<HTMLAnchorElement>('a[href]')) {
+    if (a.classList.contains('bf-ext') || !/^(?:https?:)?\/\//i.test(a.getAttribute('href') ?? '')) continue;
+    a.classList.add('bf-ext');
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    if (!a.title) a.title = '바깥 링크 (새 탭에서 열립니다)';
+  }
+}
+
 interface Placed {
   id: string;
   start: number;
@@ -36,9 +50,15 @@ interface Placed {
 }
 
 export function Reader({ bookId, chapterId, section }: { bookId: string; chapterId: string; section?: number }) {
-  const { library, findChapter, marks, addMark, removeMark, bookmarks, toggleBookmark } = useBook();
+  const { library, findChapter, marks, addMark, removeMark, bookmarks, toggleBookmark, refs, record } = useBook();
   const found = findChapter(bookId, chapterId);
   const article = useRef<HTMLDivElement>(null);
+  const endMark = useRef<HTMLDivElement>(null);
+  const pageKey = `${bookId}/${chapterId}`;
+  const readable = Boolean(found?.chapter.Content && !found.chapter.draft);
+  const recording = record.status === 'ready';
+  const pageRecord = record.pages[pageKey];
+  const finished = pageRecord?.done !== undefined;
   const [sections, setSections] = useState<RailSection[]>([]);
   const [current, setCurrent] = useState(-1);
   const [pending, setPending] = useState<{ start: number; end: number; x: number; y: number } | null>(null);
@@ -52,6 +72,7 @@ export function Reader({ bookId, chapterId, section }: { bookId: string; chapter
   const scan = useCallback(() => {
     const root = article.current;
     if (!root) return;
+    markExternalLinks(root);
     const hs = Array.from(root.querySelectorAll('h2'));
     setSections(
       hs.map((h, i) => {
@@ -73,6 +94,28 @@ export function Reader({ bookId, chapterId, section }: { bookId: string; chapter
     if (target) target.scrollIntoView({ block: 'start' });
     else window.scrollTo(0, 0);
   }, [bookId, chapterId, section]);
+
+  // ---------- 열람 기록: 연 횟수, 끝까지 읽었는가 ----------
+  const { countView, markDone } = record;
+  useEffect(() => {
+    if (readable && recording) countView(pageKey);
+  }, [pageKey, readable, recording, countView]);
+
+  useEffect(() => {
+    const el = endMark.current;
+    if (!el || !readable || !recording || finished) return;
+    // 본문의 끝이 화면에 들어와 잠깐 머물면 끝까지 읽은 것으로 친다
+    let timer = 0;
+    const io = new IntersectionObserver(([entry]) => {
+      window.clearTimeout(timer);
+      if (entry?.isIntersecting) timer = window.setTimeout(() => markDone(pageKey), 1200);
+    });
+    io.observe(el);
+    return () => {
+      io.disconnect();
+      window.clearTimeout(timer);
+    };
+  }, [pageKey, readable, recording, finished, markDone]);
 
   // ---------- 지금 읽는 단락 ----------
   useEffect(() => {
@@ -193,6 +236,9 @@ export function Reader({ bookId, chapterId, section }: { bookId: string; chapter
   const curSection = current;
   const bookmarked = bookmarks.some((b) => b.bookId === bookId && b.chapterId === chapterId && b.section === curSection);
   const chapterBookmarks = bookmarks.filter((b) => b.bookId === bookId && b.chapterId === chapterId).map((b) => b.section);
+  // 같이 보기: 이 쪽을 참조하는 문서들. 같은 책의 것이 먼저 온다
+  const referrers = refs.into.get(pageKey) ?? [];
+  const seeAlso = [...referrers.filter((k) => refs.at.get(k)?.book.id === bookId), ...referrers.filter((k) => refs.at.get(k)?.book.id !== bookId)];
 
   return (
     <div className="bf-reader" style={{ ['--node' as string]: bookColor(library, book) }}>
@@ -206,6 +252,11 @@ export function Reader({ bookId, chapterId, section }: { bookId: string; chapter
             <span className="bf-chapter-title">{breakable(chapter.title)}</span>
           </h1>
           {chapter.summary ? <p className="bf-lead">{chapter.summary}</p> : null}
+          {recording && readable && pageRecord ? (
+            <p className="bf-read-note">
+              열람 {pageRecord.views}번{finished ? ' · 끝까지 읽음' : ''}
+            </p>
+          ) : null}
         </header>
 
         <div ref={article} className="bf-prose" onMouseUp={onSelectEnd} onKeyUp={onSelectEnd} onClick={onArticleClick}>
@@ -234,6 +285,29 @@ export function Reader({ bookId, chapterId, section }: { bookId: string; chapter
             <Body key={`${bookId}/${chapterId}`} Content={chapter.Content} />
           )}
         </div>
+
+        <div ref={endMark} className="bf-end-mark" aria-hidden="true" />
+
+        {seeAlso.length > 0 ? (
+          <section className="bf-seealso" aria-labelledby="bf-seealso-title">
+            <h2 id="bf-seealso-title">같이 보기</h2>
+            <p>이 쪽을 참조하는 문서 {seeAlso.length}</p>
+            <ul>
+              {seeAlso.map((k) => {
+                const t = refs.at.get(k)!;
+                return (
+                  <li key={k}>
+                    <a href={href({ name: 'read', bookId: t.book.id, chapterId: t.chapter.id })}>
+                      <span className="bf-num">{t.label}</span>
+                      <span>{breakable(t.chapter.title)}</span>
+                      {t.book.id !== bookId ? <small>{t.book.title}</small> : null}
+                    </a>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        ) : null}
 
         <nav className="bf-pager" aria-label="챕터 넘기기">
           {prev ? (

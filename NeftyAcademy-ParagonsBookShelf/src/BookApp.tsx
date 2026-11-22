@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useState } from 'react';
 import { BookPage } from './components/BookPage';
 import { CategoryPicker, FrontPage } from './components/FrontPage';
 import { Reader } from './components/Reader';
+import { RecordChip } from './components/RecordPanel';
 import { SideMenu } from './components/SideMenu';
 import { TopBar } from './components/TopBar';
 import { BookProvider, useBook } from './context';
@@ -64,7 +65,17 @@ function Screens() {
 
   return (
     <div className="bf-root">
-      <TopBar onMenu={() => setMenuOpen((v) => !v)} menuOpen={menuOpen} trail={trail} right={route.name === 'front' ? <CategoryPicker /> : null} />
+      <TopBar
+        onMenu={() => setMenuOpen((v) => !v)}
+        menuOpen={menuOpen}
+        trail={trail}
+        right={
+          <>
+            <RecordChip onMenu={() => setMenuOpen(true)} />
+            {route.name === 'front' ? <CategoryPicker /> : null}
+          </>
+        }
+      />
       <SideMenu open={menuOpen} onClose={closeMenu} current={current} />
       {route.name === 'front' && <FrontPage />}
       {route.name === 'book' && <BookPage bookId={route.bookId} />}

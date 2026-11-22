@@ -79,12 +79,13 @@ a { color: inherit; }
   cursor: pointer;
 }
 .bf-icon-btn:hover { background: color-mix(in srgb, var(--bf-ink) 8%, transparent); }
-.bf-brand { font-weight: 700; text-decoration: none; white-space: nowrap; }
+/* 좁은 화면에서 오른쪽의 단추들에 밀리면 제목이 줄임표로 줄어든다(상단바가 화면 밖으로 넘치지 않게) */
+.bf-brand { font-weight: 700; text-decoration: none; white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .bf-trail { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--bf-muted); font-size: 14px; }
 .bf-trail > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bf-trail a { text-decoration: none; }
 .bf-trail a:hover { color: var(--bf-ink); }
-.bf-topbar-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.bf-topbar-right { margin-left: auto; display: flex; align-items: center; gap: 8px; flex: none; }
 .bf-select select {
   padding: 6px 28px 6px 10px;
   border: 1px solid var(--bf-line);
@@ -150,7 +151,8 @@ a { color: inherit; }
 /* 거미줄 */
 .bf-web { background: var(--bf-paper); border: 1px solid var(--bf-line); border-radius: var(--bf-radius); padding: 8px; overflow-x: auto; }
 .bf-web { position: relative; }
-.bf-web svg { display: block; width: 100%; height: auto; max-height: 82vh; overflow: hidden; cursor: grab; touch-action: none; user-select: none; }
+/* 높이는 지도가 처음에 화면 안에 다 들어오게 WebView 가 재서 넣는다(max-height). 손가락 동작(touch-action)도 배율에 따라 WebView 가 정한다 */
+.bf-web svg { display: block; width: 100%; height: auto; max-height: 82vh; overflow: hidden; cursor: grab; user-select: none; -webkit-user-select: none; }
 .bf-web svg:active { cursor: grabbing; }
 .bf-web-tools { position: absolute; top: 12px; right: 12px; z-index: 2; display: flex; gap: 4px; }
 .bf-web-tools button { min-width: 34px; height: 32px; padding: 0 8px; border: 1px solid var(--bf-line); border-radius: 8px; background: var(--bf-paper); color: var(--bf-ink); font: inherit; font-size: 14px; cursor: pointer; }
@@ -166,9 +168,40 @@ a { color: inherit; }
 .bf-web-order .is-sub path.bf-web-arrow { fill: #ecb6b6; stroke: none; }
 /* 책 한 권의 영역: 그 책 색의 점선 테두리와 옅은 바탕 */
 .bf-web-regions path { fill: color-mix(in srgb, var(--node) 6%, transparent); stroke: color-mix(in srgb, var(--node) 65%, transparent); stroke-width: 1.4; stroke-dasharray: 7 6; stroke-linejoin: round; pointer-events: none; }
-/* 상호 참조 줄: 본문에서 서로 링크한 챕터끼리 잇는다 */
-.bf-web-links path { fill: none; stroke-linejoin: round; stroke: var(--bf-accent, #c0842b); stroke-width: 1.3; stroke-dasharray: 5 4; opacity: 0.55; pointer-events: none; transition: opacity 0.15s ease, stroke-width 0.15s ease; }
-.bf-web-links path.is-on { opacity: 1; stroke-width: 2.4; stroke-dasharray: none; }
+/* 참조 줄: 본문에서 가리킨 챕터와 잇는다. 평소에는 모두 옅은 점선이고, 챕터를 고르면 더 옅어진다.
+   지도 좌표로 그린 뒤 묶음의 변환으로 옮기므로, 굵기와 점선이 확대를 타지 않게 한다 */
+.bf-web-links path { fill: none; stroke-linejoin: round; stroke: var(--bf-accent, #c0842b); stroke-width: 1.2; stroke-dasharray: 5 4; vector-effect: non-scaling-stroke; pointer-events: none; }
+.bf-web-links { opacity: 0.42; transition: opacity 0.2s ease; }
+.bf-web-links.has-focus { opacity: 0.14; }
+/* 고른 챕터의 화살표. 들어오는 것(이 챕터를 참조하는 쪽에서)은 주황, 나가는 것(이 챕터가 참조하는 쪽으로)은 파랑 */
+.bf-web-flows { --bf-flow: #d1791f; pointer-events: none; }
+.bf-web-flows.is-out { --bf-flow: #2f7fc2; }
+.bf-flow-line { fill: none; stroke: var(--bf-flow); stroke-width: 2.1; stroke-linejoin: round; stroke-linecap: round; opacity: 0.85; }
+.bf-flow-head { fill: var(--bf-flow); stroke: var(--bf-paper); stroke-width: 0.7; stroke-linejoin: round; }
+/* 지도 밖의 책으로 이어지는 자리: 화이트홀 */
+.bf-portal-ring { fill: none; stroke: #5b8fd6; stroke-width: 1.2; stroke-dasharray: 3 3; opacity: 0.85; transform-box: fill-box; transform-origin: center; animation: bf-spin 9s linear infinite; }
+.bf-portal-ring.is-inner { stroke-dasharray: 2 3; opacity: 0.6; animation-duration: 6s; animation-direction: reverse; }
+.bf-portal-core { fill: #fff; stroke: #9cc4f5; stroke-width: 0.8; }
+.bf-web-portal text { text-anchor: middle; fill: var(--bf-muted); font-weight: 600; paint-order: stroke; stroke: var(--bf-paper); stroke-linejoin: round; }
+@keyframes bf-spin { to { transform: rotate(360deg); } }
+/* 왼쪽 아래: 화살표 방향을 뒤집는 단추(단축키 R)와, 고른 챕터와 이어진 쪽들의 목록 */
+.bf-web-refs { position: absolute; left: 12px; bottom: 12px; z-index: 2; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; width: min(300px, calc(100% - 24px)); pointer-events: none; }
+.bf-web-refs > * { pointer-events: auto; }
+.bf-web-mode { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px 4px 6px; border: 1px solid var(--bf-line); border-radius: 8px; background: color-mix(in srgb, var(--bf-paper) 90%, transparent); color: var(--bf-muted); font: inherit; font-size: 12.5px; cursor: pointer; }
+.bf-web-mode:hover { color: var(--bf-ink); }
+.bf-web-mode[aria-pressed='true'] { border-color: #2f7fc2; color: var(--bf-ink); }
+.bf-web-mode kbd { font-family: var(--bf-mono); font-size: 11px; line-height: 1.5; padding: 0 5px; border: 1px solid var(--bf-line); border-bottom-width: 2px; border-radius: 4px; background: var(--bf-paper); color: var(--bf-ink); }
+.bf-web-reflist { width: 100%; max-height: min(36vh, 280px); overflow-y: auto; padding: 8px 10px; border: 1px solid var(--bf-line); border-radius: 10px; background: color-mix(in srgb, var(--bf-paper) 94%, transparent); font-size: 13px; line-height: 1.45; box-shadow: 0 4px 16px rgb(0 0 0 / 0.08); }
+.bf-web-refhead { display: flex; align-items: flex-start; gap: 6px; margin: 0; font-weight: 700; }
+.bf-web-refhead a { flex: 1; min-width: 0; text-decoration: none; overflow-wrap: anywhere; }
+.bf-web-refhead a:hover { text-decoration: underline; }
+.bf-web-refhead .bf-x { padding: 0 4px; }
+.bf-web-refdir { margin: 2px 0 4px; color: var(--bf-muted); font-size: 12px; }
+.bf-web-reflist ul { list-style: none; margin: 0; padding: 0; }
+.bf-web-reflist li a { display: block; padding: 3px 4px; border-radius: 6px; text-decoration: none; overflow-wrap: anywhere; }
+.bf-web-reflist li a:hover { background: color-mix(in srgb, var(--bf-ink) 7%, transparent); }
+.bf-web-reflist li small { display: block; padding-left: 1.8em; color: var(--bf-muted); font-size: 11.5px; }
+.bf-web-reflist li.is-outside small::before { content: '◎ 다른 책 · '; color: #2f7fc2; }
 .bf-web-hub circle { fill: var(--bf-bg); stroke: var(--bf-line); stroke-width: 1.5; }
 .bf-web-hub text { fill: var(--bf-muted); font-size: 13px; text-anchor: middle; }
 .bf-node { cursor: pointer; outline: none; }
@@ -189,6 +222,15 @@ a { color: inherit; }
 }
 .bf-node-book:hover text, .bf-node-book:focus-visible text { transform: scale(1.08); }
 .bf-web-tip text { font-size: 13px; fill: var(--bf-ink); paint-order: stroke; stroke: var(--bf-paper); stroke-width: 5px; stroke-linejoin: round; font-weight: 600; }
+/* 고른 챕터 */
+.bf-node.is-focus circle { stroke-width: 3.2; filter: drop-shadow(0 0 5px var(--node)); }
+/* 열람 기록: 끝까지 읽은 쪽은 책 색을 옅게 채우고, 다 읽은 책은 빛난다 */
+.bf-node-chapter.is-read circle, .bf-node-sub.is-read circle { fill: color-mix(in srgb, var(--node) 28%, var(--bf-paper)); }
+.bf-node-book.is-complete circle, .bf-node-chapter.is-complete circle { stroke: #f2c94c; stroke-width: 2.6; animation: bf-shine 2.6s ease-in-out infinite; }
+@keyframes bf-shine {
+  0%, 100% { filter: drop-shadow(0 0 3px #f6d365) drop-shadow(0 0 8px rgb(246 211 101 / 0.5)); }
+  50% { filter: drop-shadow(0 0 8px #ffe08a) drop-shadow(0 0 22px rgb(255 224 138 / 0.9)); }
+}
 
 /* 목록 */
 .bf-list { display: flex; flex-direction: column; gap: 10px; }
@@ -425,11 +467,14 @@ a { color: inherit; }
   .bf-bookmark-btn { right: 30px; }
   .bf-trail { display: none; }
   .bf-front h1 { font-size: 24px; }
-  /* 좁은 화면에서는 지도를 줄이지 않고 옆으로 밀어 보게 한다(노드를 손가락으로 누를 수 있게) */
-  .bf-web svg { min-width: 560px; }
+  /* 좁은 화면에서도 지도는 화면 폭에 맞춘다. 작게 보이면 두 손가락으로 벌려 확대한다.
+     고른 챕터의 목록은 지도를 가리지 않게 지도 아래에 놓는다 */
+  .bf-select select { max-width: 40vw; }
+  .bf-web-refs { position: static; width: 100%; margin-top: 8px; }
+  .bf-web-reflist { max-height: 30vh; box-shadow: none; }
 }
 @media (prefers-reduced-motion: reduce) {
-  * { transition: none !important; }
+  * { transition: none !important; animation: none !important; }
 }
 
 /* 하위 챕터 (목록·차례·메뉴) */
@@ -459,3 +504,60 @@ a { color: inherit; }
 /* 지도에서 서가 안의 책: 챕터와 같은 자리에 놓이되 색을 채워 책임을 알린다 */
 .bf-node-chapter.is-book circle { fill: color-mix(in srgb, var(--node) 55%, var(--bf-paper)); stroke-width: 2.5; }
 .bf-node-chapter.is-book text { fill: #fff; }
+
+/* ---------- 위키식 링크 ---------- */
+/* 바깥 링크: 새 탭에서 열리고, 끝에 ↗ 가 붙는다(글자는 CSS 가 그려서 본문의 글에는 들어가지 않는다) */
+.bf-prose a.bf-ext, .bf-prose a[href^='http://'], .bf-prose a[href^='https://'] { text-decoration: underline; text-decoration-style: dashed; text-underline-offset: 3px; }
+.bf-prose a.bf-ext::after, .bf-prose a[href^='http://']::after, .bf-prose a[href^='https://']::after { content: '↗'; display: inline-block; margin-left: 2px; font-size: 0.8em; color: var(--bf-muted); text-decoration: none; }
+/* 개념 링크: 코드 속의 이름을 누르면 그 개념을 다루는 쪽으로 간다. 코드가 어지럽지 않게 올렸을 때만 드러난다 */
+.bf-prose a.bf-ref { color: inherit; text-decoration: underline dotted color-mix(in srgb, var(--node, var(--bf-accent)) 55%, transparent); text-underline-offset: 3px; }
+.bf-prose pre a.bf-ref { text-decoration-color: color-mix(in srgb, var(--node, var(--bf-accent)) 32%, transparent); }
+.bf-prose a.bf-ref:hover, .bf-prose a.bf-ref:focus-visible { color: var(--node, var(--bf-accent)); text-decoration: underline solid; outline: none; }
+/* 같이 보기: 이 쪽을 참조하는 문서 */
+.bf-end-mark { height: 1px; }
+.bf-seealso { margin-top: 48px; padding-top: 18px; border-top: 1px solid var(--bf-line); }
+.bf-seealso h2 { margin: 0; font-size: 19px; letter-spacing: -0.01em; }
+.bf-seealso > p { margin: 2px 0 10px; color: var(--bf-muted); font-size: 13px; }
+.bf-seealso ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 4px 14px; }
+.bf-seealso li a { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 6px; padding: 5px 8px; border-radius: 8px; text-decoration: none; font-size: 15px; line-height: 1.45; overflow-wrap: anywhere; }
+.bf-seealso li a:hover { background: color-mix(in srgb, var(--node, var(--bf-accent)) 11%, transparent); }
+.bf-seealso li small { flex-basis: 100%; padding-left: calc(1.8em + 6px); color: var(--bf-muted); font-size: 12px; }
+.bf-seealso + .bf-pager { margin-top: 32px; }
+
+/* ---------- 열람 기록 ---------- */
+.bf-record { font-size: 13.5px; line-height: 1.55; padding: 2px 4px 6px; }
+.bf-record p { margin: 4px 0 8px; }
+.bf-record-error { color: var(--bf-danger); }
+.bf-record-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.bf-record-actions button, .bf-record-actions a { padding: 4px 11px; border: 1px solid var(--bf-line); border-radius: 8px; background: var(--bf-paper); color: var(--bf-ink); font: inherit; font-size: 13px; text-decoration: none; cursor: pointer; }
+.bf-record-actions button:hover, .bf-record-actions a:hover { border-color: var(--bf-accent); }
+.bf-record-actions .is-main { background: var(--bf-accent); border-color: var(--bf-accent); color: #fff; font-weight: 600; }
+.bf-record-chip { padding: 4px 11px; border: 1px solid #d08a1e; border-radius: 99px; background: color-mix(in srgb, #d08a1e 12%, var(--bf-paper)); color: var(--bf-ink); font: inherit; font-size: 13px; white-space: nowrap; cursor: pointer; }
+.bf-read-note { margin: 6px 0 0; color: var(--bf-muted); font-size: 13px; }
+.bf-readmark { margin-left: auto; padding-left: 8px; color: var(--bf-muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.bf-readmark.is-read { color: var(--node, var(--bf-accent)); font-weight: 600; }
+.bf-badge + .bf-readmark { margin-left: 6px; }
+.bf-badge.is-read { background: color-mix(in srgb, var(--bf-accent) 16%, var(--bf-paper)); color: var(--bf-ink); }
+.bf-badge.is-complete { margin-left: 8px; background: #f6d365; color: #4a3800; font-weight: 700; }
+/* 다 읽은 책의 카드는 빛난다 */
+.bf-card.is-complete { border-color: #f2c94c; animation: bf-card-shine 2.6s ease-in-out infinite; }
+.bf-card .bf-badge.is-complete { align-self: flex-start; margin: 6px 0 0; }
+@keyframes bf-card-shine {
+  0%, 100% { box-shadow: 0 0 0 1px #f2c94c, 0 0 10px rgb(246 211 101 / 0.35); }
+  50% { box-shadow: 0 0 0 1px #f2c94c, 0 0 26px rgb(255 224 138 / 0.8); }
+}
+/* 자주 본 쪽 */
+.bf-top-empty { max-width: 560px; padding: 16px 18px; background: var(--bf-paper); border: 1px solid var(--bf-line); border-radius: var(--bf-radius); }
+.bf-top-empty > p { margin: 0 0 6px; }
+.bf-top { list-style: none; margin: 0; padding: 4px 8px; background: var(--bf-paper); border: 1px solid var(--bf-line); border-radius: var(--bf-radius); }
+.bf-top li + li { border-top: 1px solid var(--bf-line); }
+.bf-top a { display: flex; align-items: center; gap: 12px; padding: 9px 6px; text-decoration: none; border-radius: 8px; }
+.bf-top a:hover { background: color-mix(in srgb, var(--bf-accent) 9%, transparent); }
+.bf-top-rank { flex: none; width: 2em; color: var(--bf-muted); font-size: 14px; text-align: right; font-variant-numeric: tabular-nums; }
+.bf-top-title { display: flex; flex-direction: column; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.bf-top-title small { color: var(--bf-muted); font-size: 12.5px; }
+.bf-top-when { flex: none; color: var(--bf-muted); font-size: 12.5px; }
+.bf-top-count { flex: none; min-width: 3.2em; text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
+@media (max-width: 640px) {
+  .bf-top-when { display: none; }
+}

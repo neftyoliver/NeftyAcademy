@@ -21,8 +21,9 @@ export interface Chapter {
   draft?: boolean;
   Content?: ComponentType;
   /**
-   * 이 챕터가 본문에서 가리키는 다른 챕터들. '책id/챕터id', 같은 책이면 '챕터id'만 적어도 된다.
-   * 지도에서 두 챕터 사이에 줄이 생긴다. 방향은 없다(어느 쪽에 적어도 같은 줄).
+   * 이 챕터가 본문에서 가리키는(참조하는) 다른 챕터들. '책id/챕터id', 같은 책이면 '챕터id'만 적어도 된다.
+   * 다른 책, 지금 지도에 보이지 않는 책의 챕터도 된다. 같은 챕터를 여러 번 적어도 한 번으로 친다.
+   * 지도에서는 가리키는 쪽에서 가리킨 쪽으로 화살표가 흐르고, 가리킨 쪽의 본문 아래 "같이 보기"에 이 챕터가 나온다.
    */
   links?: string[];
   /** 하위 챕터. 번호는 3.1, 3.2처럼 붙고, 지도에서는 챕터 노드 바깥의 작은 점으로 보인다. id는 책 안에서 겹치지 않게. */
@@ -54,13 +55,35 @@ export interface Library {
   subtitle?: string;
   categories: Category[];
   books: Book[];
-  /** localStorage 이름표. 같은 도메인에 책이 여러 권 있으면 반드시 다르게. */
+  /** localStorage 이름표. 같은 도메인에 책이 여러 권 있으면 반드시 다르게. 열람 기록 세이브 파일의 이름(<storageKey>.save.json)에도 쓰인다. */
   storageKey: string;
   /** 앞표지 맨 아래 문구(라이선스 등). */
   footer?: ReactNode;
 }
 
-export type FrontView = 'web' | 'list' | 'gallery';
+export type FrontView = 'web' | 'list' | 'gallery' | 'top';
+
+/** 열람 기록에서 쪽 하나의 기록. 세이브 파일(JSON)에 그대로 적힌다. */
+export interface PageRecord {
+  /** 이 쪽을 연 횟수 */
+  views: number;
+  /** 마지막으로 연 때(1970년부터의 밀리초) */
+  last: number;
+  /** 끝까지 읽은 때. 아직 끝까지 읽지 않았으면 없다 */
+  done?: number;
+}
+
+/** 열람 기록 세이브 파일의 내용 */
+export interface SaveData {
+  app: 'paragons-bookshelf';
+  version: 1;
+  /** Library.storageKey. 다른 도서관의 세이브 파일을 잘못 고르지 않게 */
+  library: string;
+  /** 마지막으로 적은 때(ISO 8601) */
+  updated: string;
+  /** '책id/챕터id' → 기록 */
+  pages: Record<string, PageRecord>;
+}
 
 export interface Bookmark {
   bookId: string;

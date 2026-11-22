@@ -1,16 +1,23 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { bookColor, useBook } from '../context';
 import { href } from '../router';
 import type { Book } from '../types';
 import { allBooks, flatChapters } from './common';
+import { RecordPanel } from './RecordPanel';
 
 /**
  * 왼쪽에서 내려오는 메뉴. 상단바와 다른 빛깔의 반투명 판.
  * 차례 / 북마크 / 줄친 곳 세 묶음이 접혔다 펴진다.
  */
 export function SideMenu({ open, onClose, current }: { open: boolean; onClose: () => void; current?: { bookId: string; chapterId?: string } }) {
-  const { library, bookmarks, marks, removeMark, findChapter } = useBook();
+  const { library, bookmarks, marks, removeMark, findChapter, record } = useBook();
   const panel = useRef<HTMLElement>(null);
+  // 열람 기록 묶음: 손볼 것이 있으면(세이브 파일을 정해야 하거나 다시 이어야 하면) 펴 두고, 그 밖에는 사용자가 편 대로 둔다
+  const needsCare = record.status === 'pick' || record.status === 'locked' || record.status === 'error';
+  const [recordOpen, setRecordOpen] = useState(needsCare);
+  useEffect(() => {
+    if (needsCare) setRecordOpen(true);
+  }, [needsCare]);
 
   useEffect(() => {
     if (!open) return;
@@ -58,6 +65,13 @@ export function SideMenu({ open, onClose, current }: { open: boolean; onClose: (
                 })}
             </ul>
           )}
+        </details>
+
+        <details open={recordOpen} onToggle={(e) => setRecordOpen(e.currentTarget.open)}>
+          <summary>
+            열람 기록 <span className="bf-count">{record.status === 'ready' ? '켜짐' : record.status === 'off' || record.status === 'unsupported' ? '꺼짐' : '이어야 함'}</span>
+          </summary>
+          <RecordPanel />
         </details>
 
         <details open={marks.length > 0}>

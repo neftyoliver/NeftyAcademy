@@ -2,12 +2,14 @@ import { useBook } from '../context';
 import type { Book, FrontView } from '../types';
 import { GalleryView } from './GalleryView';
 import { ListView } from './ListView';
+import { TopView } from './TopView';
 import { WebView } from './WebView';
 
 const VIEWS: { id: FrontView; label: string }[] = [
   { id: 'web', label: '지도' },
   { id: 'list', label: '목록' },
   { id: 'gallery', label: '갤러리' },
+  { id: 'top', label: '자주 본 쪽' },
 ];
 
 /** 카테고리 고르기. 어느 보기에서든 늘 보이도록 상단바 오른쪽에 들어간다. */
@@ -35,7 +37,7 @@ export function Shelf({ books, tabs }: { books: Book[]; tabs?: boolean }) {
     <>
       {tabs ? <ViewTabs /> : null}
       <section className="bf-front-view" role="tabpanel">
-        {view === 'web' ? <WebView books={books} /> : view === 'list' ? <ListView books={books} /> : <GalleryView books={books} />}
+        {view === 'web' ? <WebView books={books} /> : view === 'list' ? <ListView books={books} /> : view === 'top' ? <TopView books={books} /> : <GalleryView books={books} />}
       </section>
     </>
   );

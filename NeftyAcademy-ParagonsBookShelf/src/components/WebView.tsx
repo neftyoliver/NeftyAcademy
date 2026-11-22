@@ -1,16 +1,16 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as RPointerEvent } from 'react';
+import { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as RMouseEvent, type PointerEvent as RPointerEvent } from 'react';
 import { bookColor, useBook } from '../context';
 import { HexGrid } from '../hexroute';
 import { hexRingsFor, hexSpiral, type Point } from '../layout';
 import { layoutOnion } from '../onion';
 import { href } from '../router';
 import type { Book, Chapter } from '../types';
-import { chapterNumber, wrapTitle } from './common';
+import { chapterNumber, wrapInCircle } from './common';
 
 // 노드의 반지름과 글자 크기는 배율 1(전체 보기)에서의 값이다. 확대하면 함께 커진다(radiiAt)
 const BOOK_R = 48;
-const BOOK_FONT = 14; // 책 제목의 글자 크기. 줄 사이는 BOOK_LEADING
-const BOOK_LEADING = 17;
+const BOOK_FONT = 15.5; // 책 제목의 글자 크기. 줄 사이는 BOOK_LEADING
+const BOOK_LEADING = 18.5;
 const CHAPTER_R = 15;
 const CHAPTER_FONT = 0.8; // 번호만 보일 때 번호의 글자 크기(챕터 반지름의 몇 배인가)
 const SUB_R = 7;
@@ -25,8 +25,15 @@ const TIP_FONT = 13; // 노드 위에 뜨는 이름표. 배율의 제곱근만�
 // 노드 속에 제목까지 넣기 시작하는 반지름
 const CHAPTER_TITLED_R = 30;
 const SUB_TITLED_R = 22;
+// 노드 속 글자의 크기(노드 반지름의 몇 배인가). 제목은 큰 것부터 대 보고 줄임표 없이 들어가는 첫 크기를 쓴다
+const NUM_FONT = 0.25;
+const TITLE_FONTS = [0.31, 0.28, 0.25];
+const TITLE_LEADING = 1.16; // 줄 사이 = 글자 크기의 몇 배
 const ZOOM_MAX = 8;
-const MANY_LINKS = 40; // 상호 참조 줄이 이보다 많으면 평소에는 그리지 않고, 챕터에 올렸을 때 그 챕터의 줄만 그린다
+const HOVER_WAIT = 110; // 마우스가 노드에 이만큼(ms) 머물러야 그 노드의 화살표로 바꾼다. 지나가다 스친 노드로 바뀌지 않게
+const FLOW_SPEED = 46; // 화살표가 흐르는 빠르기(화면 단위/초)
+const FLOW_GAP = 64; // 흐르는 화살표 사이의 거리
+const PORTAL_R = 13; // 지도 밖의 책으로 이어지는 화이트홀의 반지름
 // 줄이 노드의 가운데에 이보다 가까이 오지 못하는 거리. 확대해서 노드가 커져도 줄이 노드에 닿지 않는 값이다
 const CLEAR = { book: BOOK_R + 2, hub: HUB_R + 2, chapter: 23, sub: 11.5 };
 
@@ -58,14 +65,27 @@ interface PlacedBook {
   /** 가운데 표시에서 이 책으로 오는 줄 */
   fromHub?: Line;
 }
+/** 지도에 놓인 챕터(또는 하위 챕터) 하나 */
+interface Spot {
+  /** '책id/챕터id' */
+  key: string;
+  node: number;
+  at: Point;
+  book: number;
+  sub: boolean;
+}
+/** 참조 줄 하나. 두 챕터가 서로 가리켜도, 한 챕터가 다른 챕터를 여러 번 가리켜도 줄은 하나다 */
 interface CrossLink {
   key: string;
-  from: string;
-  to: string;
-  a: { node: number; at: Point; book: number };
-  b: { node: number; at: Point; book: number };
-  /** 길을 찾은 뒤에 채워진다. 참조가 많은 지도에서는 그 챕터에 올렸을 때에야 찾는다 */
+  a: Spot;
+  b: Spot;
+  /** a 가 b 를 가리키는가, b 가 a 를 가리키는가 */
+  ab: boolean;
+  ba: boolean;
+  /** a 에서 b 로 가는 길. 길을 찾은 뒤에 채워진다 */
   line?: Line;
+  /** 그 길의 path 글(지도 좌표) */
+  d?: string;
 }
 
 const polar = (c: Point, r: number, deg: number): Point => {
@@ -129,6 +149,52 @@ function chaptersAt(book: Book, spots: Point[], rotate: number): PlacedChapter[]
   });
 }
 
+/** 꺾은선의 path 글 */
+const pathOf = (line: Line): string => line.map((p, i) => `${i ? 'L' : 'M'}${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ');
+const lengthOf = (line: Line): number => line.reduce((sum, p, i) => (i ? sum + Math.hypot(p.x - line[i - 1]!.x, p.y - line[i - 1]!.y) : 0), 0);
+
+/**
+ * 모든 참조 줄의 바탕 그림. 줄이 수천 개여도 끌거나 확대할 때마다 다시 계산하지 않도록,
+ * 지도 좌표로 한 번 그려 두고 이것을 감싼 묶음(g)의 변환만 바꾼다. 줄의 굵기는 변환을 타지 않는다(CSS 의 vector-effect).
+ */
+const LinkLayer = memo(function LinkLayer({ links, routed }: { links: CrossLink[]; routed: number }) {
+  return <>{links.slice(0, routed).map((l) => (l.d ? <path key={l.key} d={l.d} /> : null))}</>;
+});
+
+/** 화살촉. 오른쪽(+x)을 향한다 */
+const HEAD = 'M-5 -4.2 L4.5 0 L-5 4.2 L-2.4 0 Z';
+
+/**
+ * 흐르는 화살표 한 줄. pts = 가리키는 쪽에서 가리킨 쪽으로 가는 길(화면 좌표), r = 도착하는 노드의 반지름.
+ * 화살촉들이 길을 따라 흘러가고, 도착하는 노드 바로 앞에는 화살촉 하나가 서 있다.
+ * still 이면(움직임을 줄이라는 설정) 흐르지 않고 서 있는 화살촉만 그린다.
+ */
+function Flow({ pts, r, still }: { pts: Point[]; r: number; still: boolean }) {
+  const d = pathOf(pts);
+  const len = lengthOf(pts);
+  const n = clamp(Math.round(len / FLOW_GAP), 1, 8);
+  const dur = Math.max(1.2, len / FLOW_SPEED);
+  const end = pts[pts.length - 1]!;
+  const before = pts[pts.length - 2] ?? end;
+  const seg = Math.hypot(end.x - before.x, end.y - before.y) || 1;
+  const ux = (end.x - before.x) / seg;
+  const uy = (end.y - before.y) / seg;
+  const turn = (Math.atan2(uy, ux) * 180) / Math.PI;
+  return (
+    <g>
+      <path className="bf-flow-line" d={d} />
+      {still
+        ? null
+        : Array.from({ length: n }, (_, i) => (
+            <path key={i} className="bf-flow-head" d={HEAD}>
+              <animateMotion dur={`${dur.toFixed(2)}s`} begin={`${(-(dur * i) / n).toFixed(2)}s`} repeatCount="indefinite" rotate="auto" path={d} />
+            </path>
+          ))}
+      <path className="bf-flow-head is-end" d={HEAD} transform={`translate(${(end.x - ux * (r + 3)).toFixed(1)} ${(end.y - uy * (r + 3)).toFixed(1)}) rotate(${turn.toFixed(1)})`} />
+    </g>
+  );
+}
+
 /**
  * 지도 보기. 책은 큰 노드, 챕터는 번호 붙은 노드, 하위 챕터는 챕터 둘레의 작은 육각형.
  * 연한 빨강 화살표 줄은 읽는 순서(목록 보기와 같은 순서)다. 책마다 자기 색의 점선 테두리가 영역을 표시한다.
@@ -138,18 +204,36 @@ function chaptersAt(book: Book, spots: Point[], rotate: number): PlacedChapter[]
  * 책이 한 권이면 그 책을 가운데에 두고 챕터를 육각형으로 둘러 놓는다(layout.ts 의 hexSpiral).
  *
  * 줄은 모두 육각형 결(60도 간격의 세 방향)을 따라 꺾이는 꺾은선이고, 노드를 뚫지 않는다(hexroute.ts).
- * 휠을 굴리거나 단추를 누르면 확대·축소된다. 확대하면 노드는 그대로 두고 간격만 벌어지며,
- * 충분히 벌어진 노드에는 제목이 들어간다. 끌어서 옮긴다.
- * 챕터의 links 에 적힌 다른 챕터와는 점선으로 이어진다.
+ * 휠을 굴리거나 단추를 누르거나 두 손가락을 벌리면 확대된다. 확대하면 간격이 벌어지면서 노드와 글자도 함께 커지고,
+ * 충분히 커진 노드에는 제목이 들어간다. 끌어서 옮긴다.
+ *
+ * 참조 줄: 챕터의 links(본문에서 가리킨 다른 챕터)마다 옅은 점선이 그어진다. 같은 두 챕터 사이에는 한 줄뿐이다.
+ * 챕터에 올리면(손가락으로는 한 번 누르면) 그 챕터가 "고른 챕터"가 되고, 그 챕터를 가리키는 쪽에서 화살표가 흘러온다.
+ * R 키나 왼쪽 아래 단추로 방향을 뒤집으면, 고른 챕터가 가리키는 쪽으로 화살표가 흘러간다(들어오던 화살표는 가려진다).
+ * 가리키는 쪽이 이 지도에 없는 책이면, 그 책(또는 그 책을 담은 서가)이 책 노드로라도 놓여 있을 때는 그 노드로 잇고,
+ * 아예 없을 때는 챕터 옆에 화이트홀을 그려 지도 밖으로 이어짐을 보인다.
  */
 export function WebView({ books }: { books: Book[] }) {
-  const { library } = useBook();
+  const { library, refs, record, readOf, bookPath } = useBook();
   const [hover, setHover] = useState<{ label: string; at: Point; sub: boolean; key: string } | null>(null);
+  const [focus, setFocus] = useState<string | null>(null);
+  const [mode, setMode] = useState<'in' | 'out'>('in');
   const [view, setView] = useState({ k: 1, dx: 0, dy: 0 });
+  const [routed, setRouted] = useState(0);
+  const [fit, setFit] = useState<number | null>(null);
   const svg = useRef<SVGSVGElement>(null);
   const drag = useRef<{ x: number; y: number; moved: boolean } | null>(null);
+  const touches = useRef(new Map<number, { x: number; y: number }>());
+  /** 두 손가락 사이의 거리. 0 = 벌리는 중이 아님 */
+  const pinch = useRef(0);
+  const pointerKind = useRef('mouse');
+  /** 손가락으로 한 번 눌러 고른 챕터. 한 번 더 누르면 그 챕터를 연다 */
+  const armed = useRef('');
+  const waiting = useRef(0);
+  const gradient = `bfp${useId().replace(/[^a-zA-Z0-9]/g, '')}`;
+  const still = useMemo(() => typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches, []);
 
-  const { placed, box, hub, links, dense, routeLink } = useMemo(() => {
+  const { placed, box, hub, links, routeLink, spots, spotOf, rotate } = useMemo(() => {
     const n = books.length;
     const sizes = books.map(measure);
     let rotate: number;
@@ -190,12 +274,16 @@ export function WebView({ books }: { books: Book[] }) {
     const grid = new HexGrid(rotate, [...outline, { x: 0, y: 0 }]);
     const hubNode = hub ? grid.addNode(hub, CLEAR.hub) : -1;
     const bookNode = placed.map((p) => grid.addNode(p.at, CLEAR.book));
-    /** '책/챕터' → 노드. 묶음 챕터와 하위 챕터 모두 찾을 수 있다. */
-    const where = new Map<string, { node: number; book: number; at: Point }>();
+    /** '책/챕터' → 지도의 자리. 묶음 챕터, 하위 챕터, 서가 안의 책(챕터 자리에 놓인 것) 모두 찾을 수 있다. */
+    const spots = new Map<string, Spot>();
     placed.forEach((p, i) => {
       for (const c of p.chapters) {
-        where.set(`${p.book.id}/${c.chapter.id}`, { node: grid.addNode(c.at, CLEAR.chapter), book: i, at: c.at });
-        for (const s of c.subs) where.set(`${p.book.id}/${s.sub.id}`, { node: grid.addNode(s.at, CLEAR.sub), book: i, at: s.at });
+        const key = `${p.book.id}/${c.chapter.id}`;
+        spots.set(key, { key, node: grid.addNode(c.at, CLEAR.chapter), book: i, at: c.at, sub: false });
+        for (const s of c.subs) {
+          const subKey = `${p.book.id}/${s.sub.id}`;
+          spots.set(subKey, { key: subKey, node: grid.addNode(s.at, CLEAR.sub), book: i, at: s.at, sub: true });
+        }
       }
       for (const loop of p.region) grid.addRegion(i, loop);
     });
@@ -205,11 +293,11 @@ export function WebView({ books }: { books: Book[] }) {
     placed.forEach((p, i) => {
       let prev = { node: bookNode[i]!, at: p.at };
       for (const c of p.chapters) {
-        const next = where.get(`${p.book.id}/${c.chapter.id}`)!;
+        const next = spots.get(`${p.book.id}/${c.chapter.id}`)!;
         p.order.push({ line: between(prev, next, [i]), sub: false });
         prev = next;
         for (const s of c.subs) {
-          const sub = where.get(`${p.book.id}/${s.sub.id}`)!;
+          const sub = spots.get(`${p.book.id}/${s.sub.id}`)!;
           p.order.push({ line: between(prev, sub, [i]), sub: true });
           prev = sub;
         }
@@ -217,26 +305,45 @@ export function WebView({ books }: { books: Book[] }) {
     });
     // 가운데 표시에서 책으로
     if (hub) placed.forEach((p, i) => (p.fromHub = between({ node: hubNode, at: hub }, { node: bookNode[i]!, at: p.at }, [i])));
-    // 상호 참조
-    const links = new Map<string, CrossLink>();
-    const collect = (bookId: string, ch: Chapter): void => {
-      const from = `${bookId}/${ch.id}`;
-      for (const raw of ch.links ?? []) {
-        const to = raw.includes('/') ? raw : `${bookId}/${raw}`;
-        const a = where.get(from);
-        const b = where.get(to);
-        if (!a || !b || from === to) continue; // 지금 보이지 않는 책이거나 없는 챕터
-        const key = [from, to].sort().join(' ');
-        if (!links.has(key)) links.set(key, { key, from, to, a, b });
+
+    // 참조. 지도에 없는 쪽은, 그 쪽이 든 책이나 그 책을 담은 서가가 이 지도에 책 노드(챕터 자리의 책)로 놓여 있으면 그 노드로 친다
+    const viaBook = new Map<string, Spot | undefined>();
+    const spotOf = (key: string): Spot | undefined => {
+      const hit = spots.get(key);
+      if (hit) return hit;
+      const target = refs.at.get(key);
+      if (!target) return undefined;
+      const id = target.book.id;
+      if (!viaBook.has(id)) {
+        const path = bookPath(id); // 바깥 서가 → … → 이 책
+        let found: Spot | undefined;
+        for (let i = path.length - 1; i > 0 && !found; i--) found = spots.get(`${path[i - 1]!.id}/${path[i]!.id}`);
+        viaBook.set(id, found);
       }
-      ch.children?.forEach((sub) => collect(bookId, sub));
+      return viaBook.get(id);
     };
-    for (const p of placed) p.book.chapters.forEach((ch) => collect(p.book.id, ch));
-    // 참조가 많으면(MANY_LINKS) 줄을 미리 긋지 않는다. 수백 개의 길을 한꺼번에 찾으면 지도가 늦게 뜨고, 그려 봐야 그물이 된다.
-    // 그런 지도에서는 챕터에 올렸을 때 그 챕터의 줄만 그때 찾아 그린다
-    const routeLink = (l: CrossLink): Line => (l.line ??= between(l.a, l.b, [l.a.book, l.b.book]));
-    const dense = links.size > MANY_LINKS;
-    if (!dense) for (const l of links.values()) routeLink(l);
+    const links = new Map<string, CrossLink>();
+    for (const [from, targets] of refs.out) {
+      const a = spotOf(from);
+      if (!a) continue;
+      for (const to of targets) {
+        const b = spotOf(to);
+        if (!b || a === b) continue;
+        const lo: Spot = a.key < b.key ? a : b;
+        const hi: Spot = lo === a ? b : a;
+        const key = `${lo.key} ${hi.key}`;
+        const link = links.get(key) ?? links.set(key, { key, a: lo, b: hi, ab: false, ba: false }).get(key)!;
+        if (a === lo) link.ab = true;
+        else link.ba = true;
+      }
+    }
+    const routeLink = (l: CrossLink): Line => {
+      if (!l.line) {
+        l.line = between(l.a, l.b, [l.a.book, l.b.book]);
+        l.d = pathOf(l.line);
+      }
+      return l.line;
+    };
 
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const v of outline) {
@@ -246,45 +353,100 @@ export function WebView({ books }: { books: Book[] }) {
       maxY = Math.max(maxY, v.y);
     }
     const pad = 16;
-    return { placed, links: [...links.values()], dense, routeLink, hub, box: { x: minX - pad, y: minY - pad, w: maxX - minX + pad * 2, h: maxY - minY + pad * 2 } };
-  }, [books]);
+    return { placed, links: [...links.values()], routeLink, spots, spotOf, rotate, hub, box: { x: minX - pad, y: minY - pad, w: maxX - minX + pad * 2, h: maxY - minY + pad * 2 } };
+  }, [books, refs, bookPath]);
 
-  // 화면의 가운데(지도 좌표). 확대는 이 점을 중심으로 좌표만 늘리고, viewBox 는 그대로 둔다.
+  // 참조 줄의 길은 조금씩 나눠서 찾는다. 수백, 수천 개를 한꺼번에 찾으면 지도가 늦게 뜬다
+  useEffect(() => {
+    let alive = true;
+    let done = 0;
+    let timer = 0;
+    setRouted(0);
+    setFocus(null);
+    armed.current = '';
+    const step = (): void => {
+      if (!alive) return;
+      const until = performance.now() + 7;
+      while (done < links.length && performance.now() < until) routeLink(links[done++]!);
+      setRouted(done);
+      if (done < links.length) timer = window.setTimeout(step, 12);
+    };
+    timer = window.setTimeout(step, 0);
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+    };
+  }, [links, routeLink]);
+
+  // 화면의 가운데(지도 좌표). 확대는 이 점을 중심으로 좌표를 늘리고, viewBox 는 그대로 둔다.
   const cx = box.x + box.w / 2;
   const cy = box.y + box.h / 2;
   const center = useRef({ cx, cy });
   center.current = { cx, cy };
 
-  // 휠로 확대·축소. 마우스가 가리키는 곳이 제자리에 있도록 한다.
+  /** 화면의 한 점(마우스, 두 손가락의 가운데)이 제자리에 있도록 f 배로 확대한다 */
+  const zoomAt = useRef((_x: number, _y: number, _f: number): void => {});
+  zoomAt.current = (x, y, f) => {
+    const m = svg.current?.getScreenCTM();
+    if (!m) return;
+    const q = new DOMPoint(x, y).matrixTransform(m.inverse());
+    const c = center.current;
+    setView((v) => {
+      const k = clamp(v.k * f, 1, ZOOM_MAX);
+      if (k === v.k) return v;
+      if (k === 1) return { k: 1, dx: 0, dy: 0 };
+      // 그 점 아래의 지도 좌표 p 가 확대 뒤에도 화면의 같은 자리 q 에 오도록 옮긴다
+      const px = (q.x - c.cx) / v.k + c.cx + v.dx;
+      const py = (q.y - c.cy) / v.k + c.cy + v.dy;
+      return { k, dx: px - c.cx - (q.x - c.cx) / k, dy: py - c.cy - (q.y - c.cy) / k };
+    });
+  };
+
+  // 휠로 확대·축소
   useEffect(() => {
     const el = svg.current;
     if (!el) return;
     const onWheel = (e: WheelEvent): void => {
-      const m = el.getScreenCTM();
-      if (!m) return;
       e.preventDefault();
-      const q = new DOMPoint(e.clientX, e.clientY).matrixTransform(m.inverse());
-      const c = center.current;
-      setView((v) => {
-        const k = clamp(v.k * Math.exp(-e.deltaY * 0.0015), 1, ZOOM_MAX);
-        if (k === v.k) return v;
-        if (k === 1) return { k: 1, dx: 0, dy: 0 };
-        // 마우스 아래의 지도 좌표 p 가 확대 뒤에도 화면의 같은 자리 q 에 오도록 옮긴다
-        const px = (q.x - c.cx) / v.k + c.cx + v.dx;
-        const py = (q.y - c.cy) / v.k + c.cy + v.dy;
-        return { k, dx: px - c.cx - (q.x - c.cx) / k, dy: py - c.cy - (q.y - c.cy) / k };
-      });
+      zoomAt.current(e.clientX, e.clientY, Math.exp(-e.deltaY * 0.0015));
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
   }, [books.length === 0]);
 
+  // 지도가 처음에 화면 안에 다 들어오게 높이를 맞춘다: 지도의 위쪽에서 화면의 아래쪽까지
+  useLayoutEffect(() => {
+    const measureFit = (): void => {
+      const el = svg.current;
+      if (el) setFit(Math.max(260, window.innerHeight - (el.getBoundingClientRect().top + window.scrollY) - 20));
+    };
+    measureFit();
+    window.addEventListener('resize', measureFit);
+    return () => window.removeEventListener('resize', measureFit);
+  }, [placed]);
+
+  // R: 화살표의 방향 뒤집기, Esc: 고른 챕터 풀기
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;
+      if (e.code === 'KeyR') setMode((m) => (m === 'in' ? 'out' : 'in'));
+      else if (e.key === 'Escape') {
+        armed.current = '';
+        setFocus(null);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   if (books.length === 0) return <p className="bf-empty">이 카테고리에는 아직 책이 없습니다.</p>;
 
   const { k } = view;
-  /** 지도 좌표 → 화면(viewBox) 좌표. 노드의 크기는 여기에 들어가지 않으므로 확대해도 그대로다. */
+  /** 지도 좌표 → 화면(viewBox) 좌표 */
   const T = (p: Point): Point => ({ x: (p.x - cx - view.dx) * k + cx, y: (p.y - cy - view.dy) * k + cy });
-  const path = (line: Line): string => line.map((p, i) => `${i ? 'L' : 'M'}${T(p).x.toFixed(1)} ${T(p).y.toFixed(1)}`).join(' ');
+  const path = (line: Line): string => pathOf(line.map(T));
   /** 꺾은선에서 가장 긴 토막의 가운데에 놓는 화살표 */
   const arrow = (line: Line, size: number): string => {
     let best = 0;
@@ -314,25 +476,58 @@ export function WebView({ books }: { books: Book[] }) {
       return next === 1 ? { k: 1, dx: 0, dy: 0 } : { ...v, k: next };
     });
 
+  // ---------- 끌기와 두 손가락 벌리기 ----------
   const onPointerDown = (e: RPointerEvent<SVGSVGElement>): void => {
-    if (e.button !== 0) return;
-    drag.current = { x: e.clientX, y: e.clientY, moved: false };
+    pointerKind.current = e.pointerType;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    const at = touches.current;
+    at.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (at.size === 2) {
+      const [p, q] = [...at.values()] as [{ x: number; y: number }, { x: number; y: number }];
+      pinch.current = Math.hypot(p.x - q.x, p.y - q.y);
+      // 두 손가락의 가운데를 끌기의 기준으로 삼는다. 손을 뗀 뒤의 클릭(링크 이동)은 막는다
+      drag.current = { x: (p.x + q.x) / 2, y: (p.y + q.y) / 2, moved: true };
+    } else if (at.size === 1) drag.current = { x: e.clientX, y: e.clientY, moved: false };
   };
   const onPointerMove = (e: RPointerEvent<SVGSVGElement>): void => {
+    const at = touches.current;
+    const mine = at.get(e.pointerId);
     const d = drag.current;
     const el = svg.current;
-    if (!d || !el) return;
-    const px = e.clientX - d.x;
-    const py = e.clientY - d.y;
+    if (!mine || !d || !el) return;
+    mine.x = e.clientX;
+    mine.y = e.clientY;
+    let x = e.clientX;
+    let y = e.clientY;
+    if (at.size >= 2) {
+      const [p, q] = [...at.values()] as [{ x: number; y: number }, { x: number; y: number }];
+      x = (p.x + q.x) / 2;
+      y = (p.y + q.y) / 2;
+      const apart = Math.hypot(p.x - q.x, p.y - q.y);
+      if (pinch.current > 0 && apart > 0) zoomAt.current(x, y, apart / pinch.current);
+      pinch.current = apart;
+    }
+    const px = x - d.x;
+    const py = y - d.y;
     if (!d.moved && Math.hypot(px, py) < 5) return;
     if (!d.moved) el.setPointerCapture(e.pointerId);
     d.moved = true;
-    d.x = e.clientX;
-    d.y = e.clientY;
+    d.x = x;
+    d.y = y;
     const scale = 1 / (el.getScreenCTM()?.a || 1); // 화면 1px = viewBox 몇 단위
     setView((v) => ({ ...v, dx: v.dx - (px * scale) / v.k, dy: v.dy - (py * scale) / v.k }));
   };
-  const onPointerUp = (): void => {
+  const onPointerUp = (e: RPointerEvent<SVGSVGElement>): void => {
+    const at = touches.current;
+    const wasPinch = at.size >= 2;
+    at.delete(e.pointerId);
+    pinch.current = 0;
+    if (wasPinch && at.size === 1) {
+      // 한 손가락이 남았다: 그 손가락으로 끌기를 이어 간다
+      const [p] = [...at.values()] as [{ x: number; y: number }];
+      drag.current = { x: p.x, y: p.y, moved: true };
+      return;
+    }
     // 끌었으면 이어지는 클릭(링크 이동)을 한 번 막는다
     if (drag.current?.moved) {
       const stop = (ev: MouseEvent): void => {
@@ -342,31 +537,108 @@ export function WebView({ books }: { books: Book[] }) {
       window.addEventListener('click', stop, { capture: true, once: true });
       setTimeout(() => window.removeEventListener('click', stop, { capture: true }), 0);
     }
-    drag.current = null;
+    if (at.size === 0) drag.current = null;
+  };
+  const onBackground = (e: RMouseEvent<SVGSVGElement>): void => {
+    if (e.target !== e.currentTarget) return;
+    armed.current = '';
+    setFocus(null);
   };
 
+  // ---------- 올리기, 고르기 ----------
   const tip = (label: string, at: Point, sub: boolean, key: string) => ({
-    onPointerEnter: () => setHover({ label, at, sub, key }),
-    onPointerLeave: () => setHover(null),
-    onFocus: () => setHover({ label, at, sub, key }),
+    onPointerEnter: (e: RPointerEvent) => {
+      setHover({ label, at, sub, key });
+      if (e.pointerType !== 'mouse') return;
+      window.clearTimeout(waiting.current);
+      waiting.current = window.setTimeout(() => setFocus(key), HOVER_WAIT);
+    },
+    onPointerLeave: () => {
+      setHover(null);
+      window.clearTimeout(waiting.current);
+    },
+    onFocus: () => {
+      setHover({ label, at, sub, key });
+      setFocus(key);
+    },
     onBlur: () => setHover(null),
+    // 손가락으로는 처음 누르면 고르기만 하고, 고른 것을 한 번 더 누르면 연다
+    onClick: (e: RMouseEvent) => {
+      if (pointerKind.current === 'mouse' || armed.current === key) return;
+      e.preventDefault();
+      armed.current = key;
+      setFocus(key);
+      setHover({ label, at, sub, key });
+    },
   });
   /** 노드 안에 넣는 번호와 제목. r = 노드의 반지름 */
   const titled = (at: Point, r: number, label: string, title: string) => {
-    const lines = wrapTitle(title);
+    const shift = r * 0.14;
+    let font = 0;
+    let leading = 0;
+    let lines: string[] = [];
+    for (const f of TITLE_FONTS) {
+      font = r * f;
+      leading = font * TITLE_LEADING;
+      const fitted = wrapInCircle(title, r, font, leading, 3, shift);
+      lines = fitted.lines;
+      if (!fitted.clipped) break;
+    }
     return (
       <>
-        <text x={at.x} y={at.y - r * 0.56} dy="0.35em" className="bf-node-num" style={{ fontSize: r * 0.22 }}>
+        <text x={at.x} y={at.y - r * 0.62} dy="0.35em" className="bf-node-num" style={{ fontSize: r * NUM_FONT }}>
           {label}
         </text>
-        {lines.map((line, i) => (
-          <text key={i} x={at.x} y={at.y + r * 0.1 + (i - (lines.length - 1) / 2) * r * 0.3} dy="0.35em" style={{ fontSize: r * 0.25 }}>
-            {line}
-          </text>
-        ))}
+        {lines.map((line, i) =>
+          line ? (
+            <text key={i} x={at.x} y={at.y + shift + (i - (lines.length - 1) / 2) * leading} dy="0.35em" style={{ fontSize: font }}>
+              {line}
+            </text>
+          ) : null,
+        )}
       </>
     );
   };
+
+  // ---------- 고른 챕터의 화살표 ----------
+  const focusSpot = focus ? spots.get(focus) : undefined;
+  const focusPage = focus ? refs.at.get(focus) : undefined;
+  const radiusOf = (s: Spot): number => (s.sub ? radii.sub : radii.chapter);
+  const flows = focusSpot
+    ? links
+        .filter((l) => (mode === 'in' ? (l.b === focusSpot && l.ab) || (l.a === focusSpot && l.ba) : (l.a === focusSpot && l.ab) || (l.b === focusSpot && l.ba)))
+        .map((l) => {
+          const line = routeLink(l);
+          // a 에서 b 로 흐르는가. 들어오는 화살표는 고른 챕터가 끝이고, 나가는 화살표는 고른 챕터가 처음이다
+          const forward = mode === 'in' ? l.b === focusSpot : l.a === focusSpot;
+          return { key: l.key, pts: (forward ? line : [...line].reverse()).map(T), r: radiusOf(forward ? l.b : l.a) };
+        })
+    : [];
+  /** 고른 챕터와 이어진 쪽들(지금 방향). 지도에 없는 쪽도 들어 있다 */
+  const listed = focus && focusPage ? ((mode === 'in' ? refs.into : refs.out).get(focus) ?? []) : [];
+  const outside = listed.filter((key) => !spotOf(key));
+  let portal: { at: Point; r: number; pts: Point[]; end: number } | null = null;
+  if (focusSpot && outside.length > 0) {
+    // 화이트홀은 챕터 둘레의 여섯 방향 가운데 다른 노드에서 가장 먼 쪽에 둔다
+    const reach = (focusSpot.sub ? CLEAR.sub : CLEAR.chapter) + 34;
+    let best = focusSpot.at;
+    let room = -Infinity;
+    for (let i = 0; i < 6; i++) {
+      const c = polar(focusSpot.at, reach, rotate + 30 + 60 * i);
+      let gap = Infinity;
+      for (const s of spots.values()) if (s !== focusSpot) gap = Math.min(gap, Math.hypot(s.at.x - c.x, s.at.y - c.y) - (s.sub ? SUB_R : CHAPTER_R));
+      for (const p of placed) gap = Math.min(gap, Math.hypot(p.at.x - c.x, p.at.y - c.y) - BOOK_R);
+      if (gap > room) {
+        room = gap;
+        best = c;
+      }
+    }
+    const r = PORTAL_R * Math.sqrt(k);
+    const hole = T(best);
+    const node = T(focusSpot.at);
+    portal = mode === 'in' ? { at: hole, r, pts: [hole, node], end: radiusOf(focusSpot) } : { at: hole, r, pts: [node, hole], end: r };
+  }
+  const flip = (): void => setMode((m) => (m === 'in' ? 'out' : 'in'));
 
   return (
     <div className="bf-web">
@@ -380,11 +652,24 @@ export function WebView({ books }: { books: Book[] }) {
         viewBox={`${box.x} ${box.y} ${box.w} ${box.h}`}
         role="img"
         aria-label="책과 챕터 지도"
+        // 전체 보기에서는 한 손가락으로 쪽을 위아래로 넘길 수 있게 두고, 확대한 뒤에는 한 손가락이 지도를 끈다
+        style={{ maxHeight: fit ?? undefined, touchAction: k > 1 ? 'none' : 'pan-y' }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
+        onClick={onBackground}
       >
+        <defs>
+          {/* 화이트홀의 빛: 가운데는 희고, 바깥으로 푸르게 번지다 사라진다(밝은 바탕에서도 보이게) */}
+          <radialGradient id={gradient}>
+            <stop offset="0" stopColor="#fff" stopOpacity="1" />
+            <stop offset="0.3" stopColor="#d6ecff" stopOpacity="0.95" />
+            <stop offset="0.62" stopColor="#7fb8ff" stopOpacity="0.4" />
+            <stop offset="1" stopColor="#7fb8ff" stopOpacity="0" />
+          </radialGradient>
+        </defs>
+
         <g className="bf-web-regions">
           {placed.map((p) => (
             <path key={p.book.id} d={p.region.map((loop) => `${path(loop)} Z`).join(' ')} style={{ ['--node' as string]: bookColor(library, p.book) }} />
@@ -404,11 +689,16 @@ export function WebView({ books }: { books: Book[] }) {
           )}
         </g>
 
-        {/* 참조가 많은 지도에서는 올린 챕터의 줄만 그린다 */}
-        <g className="bf-web-links">
-          {(dense ? (hover ? links.filter((l) => l.from === hover.key || l.to === hover.key) : []) : links).map((l) => (
-            <path key={l.key} d={path(routeLink(l))} className={hover && (hover.key === l.from || hover.key === l.to) ? 'is-on' : undefined} />
+        {/* 모든 참조 줄(옅게). 챕터를 고르면 더 옅어지고, 그 챕터의 화살표만 또렷해진다 */}
+        <g className={`bf-web-links${focusSpot ? ' has-focus' : ''}`} transform={`matrix(${k} 0 0 ${k} ${(cx - (cx + view.dx) * k).toFixed(2)} ${(cy - (cy + view.dy) * k).toFixed(2)})`}>
+          <LinkLayer links={links} routed={routed} />
+        </g>
+
+        <g className={`bf-web-flows is-${mode}`}>
+          {flows.map((f) => (
+            <Flow key={f.key} pts={f.pts} r={f.r} still={still} />
           ))}
+          {portal ? <Flow pts={portal.pts} r={portal.end} still={still} /> : null}
         </g>
 
         {hub && (
@@ -423,21 +713,26 @@ export function WebView({ books }: { books: Book[] }) {
         {placed.map((p) => {
           const color = bookColor(library, p.book);
           const bookAt = T(p.at);
+          const reading = record.status === 'ready';
           return (
             <g key={p.book.id} style={{ ['--node' as string]: color }}>
               {p.chapters.map((c) => {
                 const at = T(c.at);
+                const key = `${p.book.id}/${c.chapter.id}`;
+                const inner = c.innerBook ? p.book.books?.find((b) => b.id === c.innerBook) : undefined;
+                const read = reading && (inner ? readOf(inner).complete : record.pages[key]?.done !== undefined);
                 return (
                   <g key={c.chapter.id}>
                     {c.subs.map((s) => {
                       const subAt = T(s.at);
+                      const subKey = `${p.book.id}/${s.sub.id}`;
                       return (
                         <a
                           key={s.sub.id}
                           href={href({ name: 'read', bookId: p.book.id, chapterId: s.sub.id })}
-                          className={`bf-node bf-node-sub${subTitled ? ' is-titled' : ''}${s.sub.draft ? ' is-draft' : ''}`}
+                          className={`bf-node bf-node-sub${subTitled ? ' is-titled' : ''}${s.sub.draft ? ' is-draft' : ''}${focus === subKey ? ' is-focus' : ''}${reading && record.pages[subKey]?.done !== undefined ? ' is-read' : ''}`}
                           aria-label={`${p.book.title} ${s.label} ${s.sub.title}${s.sub.draft ? ' (준비 중)' : ''}`}
-                          {...tip(`${s.label} ${s.sub.title}${s.sub.draft ? ' · 준비 중' : ''}`, s.at, true, `${p.book.id}/${s.sub.id}`)}
+                          {...tip(`${s.label} ${s.sub.title}${s.sub.draft ? ' · 준비 중' : ''}`, s.at, true, subKey)}
                         >
                           <circle cx={subAt.x} cy={subAt.y} r={radii.sub} />
                           {subTitled && titled(subAt, radii.sub, s.label, s.sub.title)}
@@ -446,9 +741,9 @@ export function WebView({ books }: { books: Book[] }) {
                     })}
                     <a
                       href={c.innerBook ? href({ name: 'book', bookId: c.innerBook }) : href({ name: 'read', bookId: p.book.id, chapterId: c.chapter.id })}
-                      className={`bf-node bf-node-chapter${chapterTitled ? ' is-titled' : ''}${c.innerBook ? ' is-book' : ''}${c.chapter.draft ? ' is-draft' : ''}`}
+                      className={`bf-node bf-node-chapter${chapterTitled ? ' is-titled' : ''}${c.innerBook ? ' is-book' : ''}${c.chapter.draft ? ' is-draft' : ''}${focus === key ? ' is-focus' : ''}${read ? (inner ? ' is-complete' : ' is-read') : ''}`}
                       aria-label={`${p.book.title} ${c.label}. ${c.chapter.title}${c.chapter.draft ? ' (준비 중)' : ''}`}
-                      {...tip(`${c.label}. ${c.chapter.title}${c.chapter.draft ? ' · 준비 중' : ''}`, c.at, false, `${p.book.id}/${c.chapter.id}`)}
+                      {...tip(`${c.label}. ${c.chapter.title}${c.chapter.draft ? ' · 준비 중' : ''}`, c.at, false, key)}
                     >
                       <circle cx={at.x} cy={at.y} r={radii.chapter} />
                       {chapterTitled ? (
@@ -462,17 +757,31 @@ export function WebView({ books }: { books: Book[] }) {
                   </g>
                 );
               })}
-              <a href={href({ name: 'book', bookId: p.book.id })} className="bf-node bf-node-book" aria-label={p.book.title}>
+              <a href={href({ name: 'book', bookId: p.book.id })} className={`bf-node bf-node-book${reading && readOf(p.book).complete ? ' is-complete' : ''}`} aria-label={p.book.title}>
                 <circle cx={bookAt.x} cy={bookAt.y} r={radii.book} />
-                {wrapTitle(p.book.title).map((line, i, all) => (
-                  <text key={i} x={bookAt.x} y={bookAt.y + (i - (all.length - 1) / 2) * BOOK_LEADING * k} dy="0.35em" style={{ fontSize: BOOK_FONT * k }}>
-                    {line}
-                  </text>
-                ))}
+                {wrapInCircle(p.book.title, BOOK_R, BOOK_FONT, BOOK_LEADING).lines.map((line, i, all) =>
+                  line ? (
+                    <text key={i} x={bookAt.x} y={bookAt.y + (i - (all.length - 1) / 2) * BOOK_LEADING * k} dy="0.35em" style={{ fontSize: BOOK_FONT * k }}>
+                      {line}
+                    </text>
+                  ) : null,
+                )}
               </a>
             </g>
           );
         })}
+
+        {portal && (
+          <g className="bf-web-portal" transform={`translate(${portal.at.x.toFixed(1)} ${portal.at.y.toFixed(1)})`} pointerEvents="none">
+            <circle r={portal.r * 2.1} fill={`url(#${gradient})`} />
+            <circle className="bf-portal-ring" r={portal.r} />
+            <circle className="bf-portal-ring is-inner" r={portal.r * 0.56} />
+            <circle className="bf-portal-core" r={portal.r * 0.22} />
+            <text y={portal.r * 2.1 + 6 * Math.sqrt(k)} dy="0.35em" style={{ fontSize: 11 * Math.sqrt(k), strokeWidth: 4 * Math.sqrt(k) }}>
+              다른 책 {outside.length}쪽
+            </text>
+          </g>
+        )}
 
         {hover && (
           <g className="bf-web-tip" transform={`translate(${T(hover.at).x} ${T(hover.at).y - (hover.sub ? radii.sub : radii.chapter) - 10 * Math.sqrt(k)})`} pointerEvents="none">
@@ -482,6 +791,51 @@ export function WebView({ books }: { books: Book[] }) {
           </g>
         )}
       </svg>
+
+      <div className="bf-web-refs">
+        {focus && focusPage ? (
+          <div className="bf-web-reflist">
+            <p className="bf-web-refhead">
+              <a href={href({ name: 'read', bookId: focusPage.book.id, chapterId: focusPage.chapter.id })}>
+                <span className="bf-num">{focusPage.label}</span>
+                {focusPage.chapter.title}
+              </a>
+              <button
+                type="button"
+                className="bf-x"
+                aria-label="고른 챕터 풀기"
+                onClick={() => {
+                  armed.current = '';
+                  setFocus(null);
+                }}
+              >
+                ×
+              </button>
+            </p>
+            <p className="bf-web-refdir">{mode === 'in' ? `← 이 챕터를 참조하는 쪽 ${listed.length}` : `→ 이 챕터가 참조하는 쪽 ${listed.length}`}</p>
+            {listed.length > 0 ? (
+              <ul>
+                {listed.map((key) => {
+                  const t = refs.at.get(key)!;
+                  return (
+                    <li key={key} className={spotOf(key) ? undefined : 'is-outside'}>
+                      <a href={href({ name: 'read', bookId: t.book.id, chapterId: t.chapter.id })}>
+                        <span className="bf-num">{t.label}</span>
+                        {t.chapter.title}
+                        <small>{t.book.title}</small>
+                      </a>
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : null}
+          </div>
+        ) : null}
+        <button type="button" className="bf-web-mode" onClick={flip} aria-pressed={mode === 'out'} title="화살표의 방향을 뒤집습니다">
+          <kbd>R</kbd>
+          {mode === 'in' ? '챕터가 참조하는 쪽 보기' : '챕터를 참조하는 쪽 보기'}
+        </button>
+      </div>
     </div>
   );
 }

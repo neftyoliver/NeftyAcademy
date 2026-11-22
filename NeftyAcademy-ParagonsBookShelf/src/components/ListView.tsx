@@ -1,6 +1,6 @@
 import { bookColor, useBook } from '../context';
 import { href } from '../router';
-import type { Book } from '../types';
+import type { Book, PageRecord } from '../types';
 import { flatChapters, progressOf } from './common';
 
 /** 목록 보기: 카테고리 → 책 → 챕터를 접었다 펴는 드롭다운으로. */
@@ -30,16 +30,22 @@ export function ListView({ books }: { books: Book[] }) {
 
 /** 목록의 책 한 줄. 서가면 안쪽 책들이 같은 모양으로 한 단 들어가서 나온다. */
 function BookItem({ book }: { book: Book }) {
-  const { library } = useBook();
+  const { library, record, readOf } = useBook();
   const inner = book.books ?? [];
   const chapters = flatChapters(book);
+  const reading = record.status === 'ready';
+  const read = readOf(book);
   return (
     <details className={`bf-list-book${inner.length ? ' is-shelf' : ''}`} style={{ ['--node' as string]: bookColor(library, book) }}>
       <summary>
         <span className="bf-dot" />
         <span className="bf-list-title">{book.title}</span>
         {book.subtitle ? <span className="bf-list-sub">{book.subtitle}</span> : null}
-        <span className="bf-count">{inner.length ? `${inner.length}권 · ${progressOf(book).total}챕터` : `${chapters.length}챕터`}</span>
+        {reading && read.complete ? <span className="bf-badge is-complete">완독</span> : null}
+        <span className="bf-count">
+          {inner.length ? `${inner.length}권 · ${progressOf(book).total}챕터` : `${chapters.length}챕터`}
+          {reading && read.total > 0 ? ` · 읽음 ${read.done}/${read.total}` : ''}
+        </span>
         <a className="bf-list-open" href={href({ name: 'book', bookId: book.id })} onClick={(e) => e.stopPropagation()}>
           열기
         </a>
@@ -55,6 +61,7 @@ function BookItem({ book }: { book: Book }) {
                   {ch.summary ? <small>{ch.summary}</small> : null}
                 </span>
                 {ch.draft ? <span className="bf-badge">준비 중</span> : null}
+                {reading && record.pages[`${book.id}/${ch.id}`] ? <ReadMark record={record.pages[`${book.id}/${ch.id}`]!} /> : null}
               </a>
             </li>
           ))}
@@ -68,5 +75,15 @@ function BookItem({ book }: { book: Book }) {
         </div>
       ) : null}
     </details>
+  );
+}
+
+/** 쪽 옆의 작은 표시: 몇 번 열었는지, 끝까지 읽었는지 */
+export function ReadMark({ record }: { record: PageRecord }) {
+  return (
+    <span className={`bf-readmark${record.done !== undefined ? ' is-read' : ''}`} title={record.done !== undefined ? '끝까지 읽은 쪽' : '아직 끝까지 읽지 않은 쪽'}>
+      {record.done !== undefined ? '✓ ' : ''}
+      {record.views}번
+    </span>
   );
 }
