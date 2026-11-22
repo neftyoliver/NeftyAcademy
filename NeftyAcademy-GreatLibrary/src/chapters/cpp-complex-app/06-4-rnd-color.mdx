@@ -1,0 +1,150 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '원색과 흰색과 곡선이 정하는 색 공간, 선형 값으로 섞기, 화면에 맞춰 바꾸기, 프로파일과 의도';
+export const terms = ['lcms2', 'OCIO'];
+
+(255, 0, 0)이라는 세 수는 그것만으로는 색이 아닙니다. 어떤 빨강을 원색으로 삼았는지, 수와 빛의 양이 어떤 곡선으로 이어지는지가 정해져야 색이 됩니다. 그 약속이 색 공간입니다. 색 관리는 문서의 약속과 화면의 약속이 다를 때 수를 바꿔서 같은 색이 나오게 하는 일입니다.
+
+```cpp
+// 색 관리: 선형 값으로 섞기, 원색과 흰색에서 변환 행렬 만들기, 색 공간 바꾸기
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <print>
+#include <set>
+
+using Vec = std::array<double, 3>;
+using Mat = std::array<Vec, 3>;
+
+double decode(double v) {                        // 적힌 값 -> 빛의 양에 비례하는 값
+    double a = std::abs(v);
+    a = a <= 0.04045 ? a / 12.92 : std::pow((a + 0.055) / 1.055, 2.4);
+    return std::copysign(a, v);
+}
+double encode(double v) {                        // 선형 값 -> 적는 값
+    double a = std::abs(v);
+    a = a <= 0.0031308 ? a * 12.92 : 1.055 * std::pow(a, 1 / 2.4) - 0.055;
+    return std::copysign(a, v);
+}
+Vec decode(Vec c) { return {decode(c[0]), decode(c[1]), decode(c[2])}; }
+Vec encode(Vec c) { return {encode(c[0]), encode(c[1]), encode(c[2])}; }
+long byte(double v) { return std::lround(std::clamp(v, 0.0, 1.0) * 255); }
+
+Vec operator*(const Mat& m, Vec v) {
+    Vec r{};
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) r[i] += m[i][j] * v[j];
+    return r;
+}
+Mat operator*(const Mat& a, const Mat& b) {
+    Mat r{};
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            for (int k = 0; k < 3; ++k) r[i][j] += a[i][k] * b[k][j];
+    return r;
+}
+Mat inverse(const Mat& m) {
+    auto minor = [&](int i, int j) {             // 행과 열을 돌려 고른 2x2 행렬식
+        int a = (i + 1) % 3, b = (i + 2) % 3, c = (j + 1) % 3, d = (j + 2) % 3;
+        return m[a][c] * m[b][d] - m[a][d] * m[b][c];
+    };
+    double det = 0;
+    for (int j = 0; j < 3; ++j) det += m[0][j] * minor(0, j);
+    Mat r;
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) r[j][i] = minor(i, j) / det;
+    return r;
+}
+
+// 원색 셋과 흰색의 색도 좌표 (x, y)에서 "선형 RGB -> XYZ" 행렬을 만든다
+Mat to_xyz(Vec xs, Vec ys, double xw, double yw) {
+    Mat p;                                       // 열마다 원색 하나(Y = 1로 둔 것)
+    for (int i = 0; i < 3; ++i)
+        p[0][i] = xs[i] / ys[i], p[1][i] = 1, p[2][i] = (1 - xs[i] - ys[i]) / ys[i];
+    Vec white{xw / yw, 1, (1 - xw - yw) / yw};
+    Vec s = inverse(p) * white;                  // 셋을 더해 흰색이 되게 하는 곱
+    for (Vec& row : p)
+        for (int i = 0; i < 3; ++i) row[i] *= s[i];
+    return p;
+}
+
+int main() {
+    const Mat srgb = to_xyz({0.64, 0.30, 0.15}, {0.33, 0.60, 0.06}, 0.3127, 0.3290);
+    const Mat p3 = to_xyz({0.68, 0.265, 0.15}, {0.32, 0.69, 0.06}, 0.3127, 0.3290);
+    std::println("sRGB의 밝기 Y = {:.4f} R + {:.4f} G + {:.4f} B (선형 값으로)",
+                 srgb[1][0], srgb[1][1], srgb[1][2]);
+
+    auto light = [&](Vec c) { return (srgb * decode(c))[1]; };
+    Vec red{1, 0, 0}, green{0, 1, 0};
+    Vec naive{0.5, 0.5, 0};                      // 적힌 값을 그대로 평균
+    double half = encode((decode(1.0) + decode(0.0)) / 2);
+    Vec linear{half, half, 0};                   // 선형 값으로 평균한 뒤 다시 적기
+    std::println("빨강과 초록을 반씩 섞으면 밝기는 {:.2f}이어야 한다",
+                 (light(red) + light(green)) / 2);
+    std::println("  적힌 값의 평균: ({}, {}, 0), 밝기 {:.2f}", byte(naive[0]),
+                 byte(naive[1]), light(naive));
+    std::println("  선형 값의 평균: ({}, {}, 0), 밝기 {:.2f}", byte(linear[0]),
+                 byte(linear[1]), light(linear));
+
+    auto show = [](const char* what, const Mat& from, const Mat& to) {
+        Vec c = encode(inverse(to) * from * decode(Vec{1, 0, 0}));
+        std::println("{}: ({:.3f}, {:.3f}, {:.3f}) -> ({}, {}, {})", what, c[0],
+                     c[1], c[2], byte(c[0]), byte(c[1]), byte(c[2]));
+    };
+    show("sRGB의 빨강을 P3 화면에 맞추면", srgb, p3);
+    show("P3의 빨강을 sRGB 화면에 맞추면", p3, srgb);
+
+    std::set<long> in8, in16;                    // 어두운 51단계를 선형 정수로
+    for (int code = 0; code <= 50; ++code) {
+        in8.insert(std::lround(decode(code / 255.0) * 255));
+        in16.insert(std::lround(decode(code / 255.0) * 65535));
+    }
+    std::println("적힌 값 0~50의 51단계: 선형 8비트로 {}단계, 선형 16비트로 {}단계",
+                 in8.size(), in16.size());
+}
+```
+
+```text
+sRGB의 밝기 Y = 0.2126 R + 0.7152 G + 0.0722 B (선형 값으로)
+빨강과 초록을 반씩 섞으면 밝기는 0.46이어야 한다
+  적힌 값의 평균: (128, 128, 0), 밝기 0.20
+  선형 값의 평균: (188, 188, 0), 밝기 0.46
+sRGB의 빨강을 P3 화면에 맞추면: (0.917, 0.200, 0.139) -> (234, 51, 35)
+P3의 빨강을 sRGB 화면에 맞추면: (1.093, -0.227, -0.150) -> (255, 0, 0)
+적힌 값 0~50의 51단계: 선형 8비트로 9단계, 선형 16비트로 51단계
+```
+
+- **원색, 흰색, 곡선**: `to_xyz`는 원색 셋과 흰색의 색도 좌표만으로 선형 RGB를 XYZ로 옮기는 행렬을 만듭니다. XYZ는 장치에 매이지 않은 좌표입니다. sRGB로 만든 행렬의 가운데 줄은 널리 쓰는 밝기 식의 계수 그대로입니다
+- **적힌 값은 빛의 양이 아니다**: 파일과 프레임 버퍼의 값은 어두운 쪽에 단계를 더 주려고 곡선을 거친 값입니다. `decode`가 그 곡선을 풉니다. 128은 절반이 아니라 22%쯤의 빛입니다
+- **섞기는 선형 값으로**: 빨강과 초록을 반씩 섞으면 밝기가 0.46이어야 하는데, 적힌 값을 평균하면 0.20입니다. 색이 만나는 자리에 어두운 띠가 생기는 까닭입니다. 반투명 합성, 붓의 부드러운 가장자리, 흐림, 그림 줄이기가 모두 섞기입니다
+- **같은 수, 다른 색**: P3 화면의 빨강은 sRGB의 빨강보다 진합니다. sRGB 문서의 (255, 0, 0)을 그대로 보내면 문서보다 진한 빨강이 나옵니다. 같은 색을 내려면 (234, 51, 35)를 보내야 합니다
+- **범위 밖의 색**: 거꾸로 P3의 빨강을 sRGB로 옮기면 음수가 나옵니다. 그 화면이 낼 수 없는 색입니다. 잘라 버리면 서로 다른 진한 빨강들이 모두 (255, 0, 0)이 됩니다
+- **선형 값은 비트를 더 쓴다**: 어두운 51단계가 8비트 선형에서는 9단계로 뭉칩니다. 선형 값으로 일하는 버퍼는 16비트나 부동소수로 듭니다
+
+GPU로 그릴 때는 `_SRGB` 포맷이 이 곡선을 대신 풀고 입혀 줍니다([「표면과 스왑체인」](#/read/cpp-vulkan/setup-swapchain)). 밝기가 1을 넘는 선형 값을 다루는 경우는 [「후처리」](#/read/cpp-game-engine/rend-post)에 있습니다.
+
+## 프로파일과 변환 경로
+
+문서의 값은 문서의 프로파일로 장치에 매이지 않은 좌표가 되고, 거기서 화면의 프로파일로 화면에 보낼 값이 됩니다.
+
+- **프로파일 연결 공간**: ICC 프로파일은 장치의 값과 이 가운데 좌표(PCS) 사이를 잇습니다. 덕분에 입력, 표시, 출력 장치의 프로파일을 따로 만들어 두고 실행할 때 짝지을 수 있습니다. PCS는 CIE XYZ에 바탕을 두고 기준 광원은 D50입니다
+- **렌더링 의도**: 범위 밖의 색을 어떻게 옮길지를 넷 가운데서 고릅니다. 지각적 의도는 사진 같은 그림을 보기 좋게 옮기고, 매체 상대 색도는 매체의 흰색을 기준 흰색에 맞추고 범위 안의 색을 그 기준으로 옮깁니다. 채도는 도표처럼 선명함이 중요한 것에, ICC 절대 색도는 별색이나 한 매체를 다른 매체에서 흉내 내는 교정에 씁니다
+- **Krita**: ICC 프로파일 일은 `lcms2`가, LUT로 하는 색 관리는 `OCIO`가 맡습니다. 스캐너나 카메라의 값을 작업 공간으로 옮겨 편집하고 출력 공간으로 내보내는데, 화면은 늘 있는 출력이라 작업 공간과 화면 사이는 그릴 때마다 바꿉니다. 설명서는 선형 공간에서 섞은 색이 더 밝고 부드러우며, sRGB에서 흐리면 어두운 테두리가 생긴다고 그림으로 보여 줍니다
+- **웹**: CSS는 색 공간이 적히지 않은 색과 이미지를 sRGB로 다루라고 정합니다. `display-p3`는 원색만 다르고 흰색과 곡선은 sRGB와 같습니다. 예제의 두 행렬이 원색 좌표만 다른 것과 같습니다
+
+<Note>
+색 관리의 버그는 변환을 한 번도 안 하거나 두 번 하는 것입니다. 안 하면 넓은 색역의 화면에서 모든 색이 진해지고, 두 번 하면 물이 빠집니다. 막는 방법은 픽셀 버퍼마다 색 공간을 꼬리표로 붙여 다니는 것입니다. 타일, 레이어 텍스처, 붙여 넣은 그림이 어느 공간의 값인지 적혀 있으면, 변환은 화면에 내는 마지막 자리에서 한 번만 하면 됩니다. 화면의 프로파일은 모니터마다 다르므로 창이 다른 모니터로 가면 변환해 둔 캐시도 버립니다([「고해상도」](#/read/cpp-complex-app/rnd-hidpi)의 배율과 같습니다).
+</Note>
+
+## 정리
+
+- 색은 세 수와 색 공간(원색, 흰색, 곡선)이 함께 있어야 정해진다. 색 관리는 문서의 색 공간에서 화면의 색 공간으로 수를 바꾸는 일이다
+- 섞고 흐리고 줄이는 계산은 선형 값으로 해야 빛의 양이 맞고, 선형 값은 16비트나 부동소수로 든다
+- 프로파일은 장치에 매이지 않은 좌표를 사이에 두고 이어지며, 범위 밖의 색을 어떻게 옮길지는 렌더링 의도가 정한다
+
+## 참고 문서
+
+- [W3C: CSS Color Module Level 4(sRGB와 display-p3의 원색, 흰색, 곡선, 표시 없는 색의 처리)](https://www.w3.org/TR/css-color-4/)
+- [ICC: Profile(프로파일 연결 공간과 네 가지 렌더링 의도)](https://www.color.org/profile.html)
+- [Krita 설명서: Color Managed Workflow(lcms2와 OCIO, 작업 공간과 화면)](https://docs.krita.org/en/general_concepts/colors/color_managed_workflow.html)
+- [Krita 설명서: Gamma and Linear(선형 공간에서 섞기, 비트 깊이와 띠)](https://docs.krita.org/en/general_concepts/colors/linear_and_gamma.html)

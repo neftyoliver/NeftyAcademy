@@ -1,0 +1,148 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '배율을 받는 곳, 선을 픽셀에 맞추기와 두께, 비트맵 고르기, 배율이 바뀔 때의 창과 캐시';
+export const terms = ['WM_DPICHANGED', 'backingScaleFactor', 'preferred_scale'];
+
+[「고해상도 화면」](#/read/cpp-qt/paint-hidpi)은 프레임워크를 쓰는 쪽의 이야기였습니다. 좌표를 논리 단위로 쓰면 Qt가 배율을 곱해 줍니다. 이 쪽은 그 일을 해 주는 쪽의 이야기입니다. 배율을 어디서 받는지, 논리 좌표를 물리 픽셀에 어떻게 맞추는지, 배율이 바뀌면 무엇을 버려야 하는지를 봅니다.
+
+```cpp
+// 고해상도: 논리 좌표를 물리 픽셀로 옮길 때 선, 그림, 창, 캐시에 생기는 일
+#include <algorithm>
+#include <cmath>
+#include <print>
+#include <set>
+#include <string>
+#include <vector>
+
+std::string coverage(double a, double b) {       // [a, b)가 픽셀마다 덮는 비율
+    std::string s;
+    for (int px = static_cast<int>(std::floor(a)); px < b; ++px) {
+        double part = std::min(b, px + 1.0) - std::max(a, double(px));
+        s += std::format(" {:3.0f}%", part * 100);
+    }
+    return s;
+}
+
+int snap_width(double logical, double scale) {   // 1픽셀보다 얇으면 1, 아니면 내림
+    double w = logical * scale;
+    return w < 1 ? 1 : static_cast<int>(std::floor(w));
+}
+
+int pick(const std::vector<int>& variants, double scale) {
+    for (int v : variants)                       // 줄여서 쓸 수 있는 가장 작은 것
+        if (v >= scale) return v;
+    return variants.back();                      // 없으면 가장 큰 것을 늘린다
+}
+
+struct RasterCache {                             // 그려 둔 글리프와 아이콘
+    std::set<std::pair<std::string, long>> made; // 열쇠에 물리 크기가 들어간다
+    int draw(const std::vector<std::string>& items, double logical, double scale) {
+        int fresh = 0;
+        for (const std::string& item : items)
+            fresh += made.insert({item, std::lround(logical * scale)}).second;
+        return fresh;                            // 새로 그린 개수
+    }
+};
+
+int main() {
+    std::println("논리 x = 10에 그은 두께 1의 선이 물리 픽셀을 덮는 비율");
+    for (double scale : {1.0, 1.25, 1.5, 1.75, 2.0}) {
+        double a = 10 * scale, b = 11 * scale;
+        double x = std::round(a), w = snap_width(1, scale);
+        std::println("  {:4.2f}배: 그대로{:<15} 맞추면{}", scale, coverage(a, b),
+                     coverage(x, x + w));
+    }
+
+    std::println("11칸마다 그은 선 다섯의 두께(물리 픽셀)");
+    for (double scale : {1.25, 1.5, 1.75}) {
+        std::string each, snapped;
+        for (int x = 10; x < 60; x += 11) {
+            long x0 = std::lround(x * scale), x1 = std::lround((x + 1) * scale);
+            each += std::format(" {}", x1 - x0);            // 양 끝을 따로 반올림
+            snapped += std::format(" {}", snap_width(1, scale));  // 두께부터 정한다
+        }
+        std::println("  {:4.2f}배: 양 끝을 따로{} | 두께를 먼저{}", scale, each,
+                     snapped);
+    }
+
+    std::println("16칸 아이콘: 가진 것은 1배, 2배, 3배짜리");
+    for (double scale : {1.0, 1.25, 1.5, 2.0, 2.5, 4.0}) {
+        int v = pick({1, 2, 3}, scale);
+        std::println("  {:4.2f}배 화면 {:2.0f}픽셀: {}배짜리({}픽셀)를 {:5.1f}%로",
+                     scale, 16 * scale, v, 16 * v, scale / v * 100);
+    }
+
+    RasterCache cache;
+    std::vector<std::string> icons = {"열기", "저장", "되돌리기"};
+    std::println("창을 100% 모니터에서 150% 모니터로 옮겼다가 돌아온다");
+    for (double scale : {1.0, 1.5, 1.0}) {
+        long w = std::lround(800 * scale), h = std::lround(600 * scale);
+        std::println("  {:.0f}%: 창 800x600은 물리 {}x{}, 새로 그린 것 {}개",
+                     scale * 100, w, h, cache.draw(icons, 16, scale));
+    }
+    double scale = 1.5;                          // 입력은 물리 픽셀로 온다
+    std::println("  마우스 물리 (300, 150) -> 논리 ({:.0f}, {:.0f})", 300 / scale,
+                 150 / scale);
+}
+```
+
+```text
+논리 x = 10에 그은 두께 1의 선이 물리 픽셀을 덮는 비율
+  1.00배: 그대로 100%           맞추면 100%
+  1.25배: 그대로  50%  75%      맞추면 100%
+  1.50배: 그대로 100%  50%      맞추면 100%
+  1.75배: 그대로  50% 100%  25% 맞추면 100%
+  2.00배: 그대로 100% 100%      맞추면 100% 100%
+11칸마다 그은 선 다섯의 두께(물리 픽셀)
+  1.25배: 양 끝을 따로 1 2 1 1 1 | 두께를 먼저 1 1 1 1 1
+  1.50배: 양 끝을 따로 2 1 2 1 2 | 두께를 먼저 1 1 1 1 1
+  1.75배: 양 끝을 따로 1 2 2 2 1 | 두께를 먼저 1 1 1 1 1
+16칸 아이콘: 가진 것은 1배, 2배, 3배짜리
+  1.00배 화면 16픽셀: 1배짜리(16픽셀)를 100.0%로
+  1.25배 화면 20픽셀: 2배짜리(32픽셀)를  62.5%로
+  1.50배 화면 24픽셀: 2배짜리(32픽셀)를  75.0%로
+  2.00배 화면 32픽셀: 2배짜리(32픽셀)를 100.0%로
+  2.50배 화면 40픽셀: 3배짜리(48픽셀)를  83.3%로
+  4.00배 화면 64픽셀: 3배짜리(48픽셀)를 133.3%로
+창을 100% 모니터에서 150% 모니터로 옮겼다가 돌아온다
+  100%: 창 800x600은 물리 800x600, 새로 그린 것 3개
+  150%: 창 800x600은 물리 1200x900, 새로 그린 것 3개
+  100%: 창 800x600은 물리 800x600, 새로 그린 것 0개
+  마우스 물리 (300, 150) -> 논리 (200, 100)
+```
+
+- **선이 흐려지는 까닭**: 1.25배에서 두께 1의 선은 물리 12.5에서 13.75까지입니다. 다 덮이는 픽셀이 하나도 없어 50%와 75%로 번진 회색 선이 됩니다. 시작 자리를 물리 픽셀에 맞추고 두께를 정수로 만들면 어느 배율에서나 또렷합니다
+- **두께는 내리되 1보다 얇지 않게**: `snap_width`는 CSS가 테두리 두께를 장치 픽셀에 맞출 때 쓰는 규칙입니다. 1.75배에서도 1픽셀이고 2배가 되어야 2픽셀입니다. 반올림하면 1.5배에서 선이 갑자기 두 배로 굵어집니다
+- **양 끝을 따로 반올림하면**: 같은 두께로 그은 선이 놓인 자리에 따라 1픽셀도 되고 2픽셀도 됩니다. 1.5배에서 2 1 2 1 2입니다. 두께를 먼저 정하고 시작 자리만 반올림합니다. 상자의 가장자리를 맞추던 방법([「제약과 박스 모델」](#/read/cpp-complex-app/lay-box))에, 선은 두께가 같아야 한다는 조건이 더해진 것입니다
+- **그림은 줄여 쓰는 쪽으로**: 화면 배율보다 크거나 같은 것 가운데 가장 작은 것을 고릅니다. 1.25배 화면은 2배짜리를 62.5%로 줄여 씁니다. 늘리는 것은 4배 화면처럼 더 큰 것이 없을 때뿐입니다
+- **캐시의 열쇠에 물리 크기를**: 창이 150% 모니터로 넘어가자 그려 둔 아이콘 셋이 모두 쓸모없어졌습니다. 열쇠에 물리 크기를 넣어 뒀기 때문에 틀린 크기의 그림이 나오지 않았고, 돌아왔을 때는 새로 그리지 않았습니다. 글리프 아틀라스, 타일, 레이어 텍스처가 모두 같은 처지입니다
+- **창과 입력**: 창의 논리 크기는 그대로인데 물리 크기가 1.5배가 됩니다. 마우스 자리는 물리 픽셀로 오므로 배율로 나눠 논리 좌표로 바꾼 뒤에 위젯에 넘깁니다
+
+## 배율은 어디서 오는가
+
+| 체계 | 배율 | 범위 |
+| --- | --- | --- |
+| Windows | DPI를 96으로 나눈 값. 125%, 150% 같은 소수가 흔하다 | 모니터마다 |
+| macOS | 점의 한 변에 픽셀이 몇 개 놓이는가. 1.0 아니면 2.0 | 창, 뷰, 레이어마다 |
+| Wayland | 분모가 120인 분수의 분자. 150이면 1.25배 | 표면마다 |
+
+- **Windows**: 프로그램이 배율을 스스로 다룬다고 알리지 않으면 96 DPI로 그리게 하고 그 그림을 늘려 보여 줍니다. 그래서 흐립니다. 모니터마다 다루겠다고 알린 프로그램(Per-Monitor V2)에는 늘리는 대신 `WM_DPICHANGED`를 보냅니다. 이 메시지에는 새 창 사각형이 제안으로 들어 있습니다. 받은 쪽은 그 사각형으로 창을 바꾸고, 배치를 다시 하고, 비트맵을 다시 읽거나 그리고, DPI에 묶어 캐시해 둔 값을 다시 셈합니다
+- **macOS**: 좌표의 단위는 점입니다. 점과 픽셀의 비는 화면 전체의 값이 아니라 창의 속성(`backingScaleFactor`)입니다. 창을 다른 모니터로 끌면 내용의 절반 넘게 넘어간 때에 그쪽 것으로 바뀝니다. 이미지는 대상보다 픽셀이 많은 표현 가운데 가장 작은 것을 고르는데, 예제의 `pick`과 같은 규칙입니다. 고해상도를 지원한다고 밝히지 않은 앱은 1배로 그린 것을 늘려 보여 줍니다
+- **Wayland**: 컴포지터가 표면마다 바라는 배율을 `preferred_scale`로 알립니다. 클라이언트는 논리 크기에 배율을 곱해 반올림한 크기로 버퍼를 그리고, 뷰포트에는 논리 크기를 적습니다
+
+<Note>
+소수 배율에서는 모든 것을 한꺼번에 만족시킬 수 없습니다. 논리 1칸이 물리 1.5픽셀이면 선의 두께, 사이 간격, 전체 길이 가운데 어느 하나는 논리 값과 어긋납니다. 이 쪽의 방법은 배치를 논리 단위로 끝내고 그릴 때 픽셀에 맞추는 것이어서, 간격이 한 픽셀씩 달라지는 것을 받아들입니다. 배율을 정수로 올려 그린 뒤 통째로 줄이는 방법도 있습니다. 간격은 고르게 남지만 줄이는 만큼 또렷함을 내줍니다.
+</Note>
+
+## 정리
+
+- 좌표와 크기는 논리 단위로 들고, 운영체제가 알려 주는 배율을 곱해 물리 픽셀로 그린다. 배율은 모니터마다 다르고 소수일 수 있다
+- 선은 시작 자리를 픽셀에 맞추고 두께를 정수로 만들어야 또렷하고 고르다. 비트맵은 배율 이상인 것 가운데 가장 작은 것을 줄여 쓴다
+- 배율이 바뀌면 창의 물리 크기와 배율에 묶인 캐시가 모두 바뀐다. 캐시의 열쇠에는 물리 크기를 넣는다
+
+## 참고 문서
+
+- [Microsoft Learn: High DPI Desktop Application Development on Windows(DPI 인식 모드, WM_DPICHANGED에서 할 일)](https://learn.microsoft.com/en-us/windows/win32/hidpi/high-dpi-desktop-application-development-on-windows)
+- [Apple: High Resolution Explained, Features and Benefits(점과 픽셀, 창마다의 배율, 이미지 표현 고르기)](https://developer.apple.com/library/archive/documentation/GraphicsAnimation/Conceptual/HighResolutionOSX/Explained/Explained.html)
+- [Wayland: fractional-scale-v1(분모가 120인 배율, 뷰포트와 버퍼 크기)](https://wayland.app/protocols/fractional-scale-v1)
+- [W3C: CSS Values and Units Module Level 4(테두리 두께를 장치 픽셀에 맞추는 규칙)](https://www.w3.org/TR/css-values-4/)
