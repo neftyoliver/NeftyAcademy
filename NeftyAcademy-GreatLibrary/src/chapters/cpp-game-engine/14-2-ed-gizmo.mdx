@@ -66,8 +66,8 @@ int main() {
                 best_t = *t;
                 best = &s;
             }
-        std::string what = best ? std::format("{} (거리 {:.2f})", best->name, best_t)
-                                : "없음";
+        std::string what = "없음";
+        if (best) what = std::format("{} (거리 {:.2f})", best->name, best_t);
         std::println("화소 ({:3.0f},{:3.0f}) -> {}", px, py, what);
     }
 
