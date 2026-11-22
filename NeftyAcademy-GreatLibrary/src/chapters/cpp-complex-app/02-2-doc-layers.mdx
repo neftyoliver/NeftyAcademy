@@ -1,0 +1,190 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '타일로 나눈 픽셀과 쓸 때 복사, 레이어 트리와 묶음의 합성, 바뀐 타일만 다시 합치기, 실제 프로그램';
+export const terms = ['PROP_OFFSETS', 'PROP_GROUP_ITEM', 'PROP_ITEM_PATH', 'gegl_buffer_dup'];
+
+가로세로 4000픽셀인 그림은 픽셀마다 4바이트만 써도 레이어 한 장이 64MB입니다. 레이어가 열 장이면 640MB이고, 붓질마다 사본을 남기면 실행 취소 몇 번에 메모리가 바닥납니다. 그림 편집기는 [「글의 자료 구조: 피스 테이블과 로프」](#/read/cpp-complex-app/doc-text)와 같은 길을 갑니다. 픽셀을 작은 **타일**로 나눠 바뀐 타일만 새로 만들고, 레이어는 **트리**로 엮어 아래에서 위로 합칩니다.
+
+```cpp
+// 타일로 나눈 레이어와 레이어 트리: 칠한 타일만 만들고, 바뀐 타일만 다시 합친다
+#include <array>
+#include <map>
+#include <memory>
+#include <print>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+constexpr int T = 4, W = 16, H = 8;              // 타일 한 변, 보여 줄 크기
+using Tile = std::array<char, T * T>;            // 0은 투명, 그 밖은 색
+using Key = std::pair<int, int>;                 // 타일의 (행, 열)
+
+struct Layer {                                   // 잎이면 픽셀, 묶음이면 자식
+    std::string name;
+    bool erase = false, pass = false;            // 아래를 지움, 묶음을 통과
+    std::map<Key, std::shared_ptr<Tile>> tiles;  // 칠한 곳에만 타일이 있다
+    std::vector<Layer> kids;                     // 앞이 아래, 뒤가 위
+    explicit Layer(std::string n, bool e = false) : name(std::move(n)), erase(e) {}
+};
+
+std::set<Key> dirty;                             // 다시 합쳐야 하는 타일
+
+void paint(Layer& l, int x, int y, int w, int h, char c) {
+    for (int j = y; j < y + h; ++j)
+        for (int i = x; i < x + w; ++i) {
+            Key k{j / T, i / T};
+            auto& t = l.tiles[k];
+            if (!t) t = std::make_shared<Tile>();          // 처음 칠하는 타일
+            else if (t.use_count() > 1)                    // 함께 쓰던 타일이면
+                t = std::make_shared<Tile>(*t);            // 쓰기 전에 복사한다
+            (*t)[(j % T) * T + i % T] = c;
+            dirty.insert(k);
+        }
+}
+
+void blend(const Layer& l, Key k, Tile& back) {  // back 위에 l의 타일 k를 합친다
+    if (l.kids.empty()) {
+        auto it = l.tiles.find(k);
+        if (it == l.tiles.end()) return;         // 타일이 없으면 할 일도 없다
+        for (int i = 0; i < T * T; ++i)
+            if (char c = (*it->second)[i]) back[i] = l.erase ? 0 : c;
+    } else if (l.pass) {
+        for (const Layer& kid : l.kids) blend(kid, k, back);  // 바깥 그림에 바로
+    } else {
+        Tile own{};                              // 묶음만 따로 합친 다음
+        for (const Layer& kid : l.kids) blend(kid, k, own);
+        for (int i = 0; i < T * T; ++i)
+            if (own[i]) back[i] = own[i];        // 한 장처럼 얹는다
+    }
+}
+
+std::map<Key, Tile> shown;                       // 합쳐 둔 결과
+
+std::size_t refresh(const Layer& root) {         // 더러운 타일만 다시 합친다
+    std::size_t n = dirty.size();
+    for (Key k : dirty) blend(root, k, shown[k] = Tile{});
+    dirty.clear();
+    return n;
+}
+
+void show() {
+    for (int y = 0; y < H; ++y) {
+        std::string row;
+        for (int x = 0; x < W; ++x) {
+            auto it = shown.find({y / T, x / T});
+            char c = it == shown.end() ? 0 : it->second[(y % T) * T + x % T];
+            row += c ? c : '.';
+        }
+        std::println("  {}", row);
+    }
+}
+
+void touch(const Layer& l) {                     // 이 노드가 닿는 타일을 더럽힌다
+    for (const auto& [k, t] : l.tiles) dirty.insert(k);
+    for (const Layer& kid : l.kids) touch(kid);
+}
+
+int main() {
+    Layer root{"그림"};
+    root.kids = {Layer{"배경"}, Layer{"묶음"}};
+    Layer& back = root.kids[0];
+    Layer& group = root.kids[1];
+    group.kids = {Layer{"글씨"}, Layer{"지우개", true}};
+    Layer& text = group.kids[0];
+
+    paint(back, 0, 0, 16, 8, ':');
+    paint(text, 2, 2, 8, 4, 'A');
+    paint(group.kids[1], 6, 3, 6, 4, 'x');
+    std::println("처음: 다시 합친 타일 {}개", refresh(root));
+    show();
+    std::println("가진 타일: 배경 {}, 글씨 {}, 지우개 {}", back.tiles.size(),
+                 text.tiles.size(), group.kids[1].tiles.size());
+
+    Layer before = text;                         // 스냅숏: 타일은 함께 쓴다
+    paint(text, 2, 2, 2, 1, 'B');
+    std::set<Key> changed;                       // 포인터가 다르면 바뀐 타일이다
+    for (const auto& [k, t] : text.tiles) {
+        auto it = before.tiles.find(k);
+        if (it == before.tiles.end() || it->second != t) changed.insert(k);
+    }
+    std::println("점을 찍은 뒤: 새로 복사한 타일 {}개, 다시 합친 타일 {}개",
+                 changed.size(), refresh(root));
+    text = before;                               // 실행 취소: 포인터만 되돌린다
+    dirty = changed;
+    std::println("되돌린 뒤: 다시 합친 타일 {}개", refresh(root));
+
+    group.pass = true;                           // 묶음을 따로 합치지 않는다
+    touch(group);
+    std::println("묶음을 통과로 바꾼 뒤: 다시 합친 타일 {}개", refresh(root));
+    show();
+
+    paint(back, 50000, 50000, 10, 10, '#');      // 캔버스에 정해진 크기가 없다
+    std::println("5만 픽셀 떨어진 10x10 점: 배경 타일 {}개, 다시 합친 타일 {}개",
+                 back.tiles.size(), refresh(root));
+}
+```
+
+```text
+처음: 다시 합친 타일 8개
+  ::::::::::::::::
+  ::::::::::::::::
+  ::AAAAAAAA::::::
+  ::AAAA::::::::::
+  ::AAAA::::::::::
+  ::AAAA::::::::::
+  ::::::::::::::::
+  ::::::::::::::::
+가진 타일: 배경 8, 글씨 6, 지우개 4
+점을 찍은 뒤: 새로 복사한 타일 1개, 다시 합친 타일 1개
+되돌린 뒤: 다시 합친 타일 1개
+묶음을 통과로 바꾼 뒤: 다시 합친 타일 6개
+  ::::::::::::::::
+  ::::::::::::::::
+  ::AAAAAAAA::::::
+  ::AAAA......::::
+  ::AAAA......::::
+  ::AAAA......::::
+  ::::::......::::
+  ::::::::::::::::
+5만 픽셀 떨어진 10x10 점: 배경 타일 17개, 다시 합친 타일 9개
+```
+
+- **칠한 곳에만 타일이 있다**: 타일은 좌표로 찾는 표에 들어 있고, 표에 없는 타일은 투명입니다. 5만 픽셀 떨어진 곳에 점을 찍어도 타일 9개가 늘 뿐입니다. 메모리는 캔버스의 크기가 아니라 칠한 넓이를 따릅니다
+- **쓸 때 복사**: 스냅숏은 타일의 포인터만 복사합니다. 그 뒤에 점을 찍으면 함께 쓰던 타일 하나만 복사하므로, 글씨 레이어의 타일 6개 가운데 1개만 새로 생겼습니다. 실행 취소는 포인터를 되돌리는 일입니다([「실행 취소 스택」](#/read/cpp-complex-app/cmd-stack))
+- **포인터가 다르면 바뀐 타일**: 두 판의 포인터를 견주면 픽셀을 보지 않고도 어디가 바뀌었는지 압니다. 되돌릴 때 다시 합칠 타일을 이렇게 골랐습니다
+- **바뀐 타일만 다시 합친다**: 합친 결과도 타일마다 간직하고, 더러워진 타일만 다시 계산합니다. 점 하나에는 1개, 묶음의 설정을 바꿨을 때는 묶음이 닿는 6개였습니다([「무효화와 다시 그리기」](#/read/cpp-complex-app/rnd-invalidate))
+- **묶음은 따로 합친다**: 묶음은 빈 타일에 자식들을 먼저 합친 뒤 그 결과를 한 장처럼 얹습니다. 그래서 묶음 속 지우개가 글씨만 지웠습니다. 통과로 바꾸면 자식들이 바깥 그림에 바로 합쳐져 배경까지 지워집니다
+
+## 실제 프로그램
+
+노드마다 보임, 불투명도, 합성 방식이 붙고 묶음이 자식을 갖는다는 뼈대는 프로그램마다 같습니다.
+
+- **GIMP**: 파일 형식 XCF는 픽셀을 64×64 이하의 타일로 나누어 적습니다. 레이어는 캔버스와 다른 크기를 갖고 `PROP_OFFSETS`로 놓인 자리를 적으며, 묶음은 `PROP_GROUP_ITEM`으로 표시하고 트리 속 자리는 `PROP_ITEM_PATH`로 적습니다. 픽셀을 다루는 GEGL의 버퍼는 성긴 타일 버퍼여서 메모리보다 큰 그림을 디스크로 내보내며 다루고, `gegl_buffer_dup`로 만든 사본은 경계가 맞는 타일을 쓸 때 복사로 함께 씁니다
+- **Krita**: 레이어를 아래에서 위로 합치고, 묶음 레이어는 다른 레이어와 따로 합칩니다. 통과 모드를 켜면 묶음 속 레이어가 묶음 밖에 있는 것처럼 합쳐집니다. Photoshop에서 저장한 PSD의 묶음은 통과가 기본이라고 설명서가 밝힙니다
+- **OpenRaster**: 여러 프로그램이 주고받으려고 만든 형식으로, 레이어 트리를 `stack.xml`에 `stack`과 `layer` 요소로 적습니다. 첫 자식이 맨 위이고, 묶음은 투명한 바탕에 먼저 그린 뒤 묶음의 불투명도와 합성 방식으로 얹는 것이 기본입니다
+
+| 일 | 통짜 배열 | 타일 |
+| --- | --- | --- |
+| 빈 곳 | 캔버스 크기만큼 든다 | 타일이 없다 |
+| 실행 취소용 사본 | 레이어 전체 | 바뀐 타일만 |
+| 다시 합치기 | 바뀐 사각형을 따로 셈한다 | 더러운 타일만 |
+| 메모리가 모자랄 때 | 통째로 메모리에 있어야 한다 | 타일 단위로 디스크에 내보낸다 |
+
+<Note>
+예제의 픽셀은 글자 하나이고 덮거나 지우기만 합니다. 실제 픽셀은 색과 불투명도를 가져서, 위의 것을 불투명도만큼 섞습니다. 묶음을 따로 합치는 까닭도 여기서 분명해집니다. 묶음의 불투명도를 50%로 낮출 때 자식마다 50%를 곱하면 겹친 자식끼리 서로 비쳐 보이고, 묶음을 한 장으로 합친 뒤에 곱해야 묶음 전체가 고르게 흐려집니다.
+</Note>
+
+## 정리
+
+- 픽셀을 타일로 나눠 표에 담으면 칠한 곳만 메모리를 쓰고, 타일을 쓸 때 복사하면 스냅숏과 실행 취소가 바뀐 타일만큼만 든다
+- 레이어는 트리이고 아래에서 위로 합치며, 묶음을 따로 합치느냐 바깥에 바로 합치느냐에 따라 결과가 달라진다
+- 합친 결과도 타일마다 간직해 더러운 타일만 다시 합치고, 바뀐 곳은 타일의 포인터를 견주어 찾는다
+
+## 참고 문서
+
+- [GIMP 개발자 문서: XCF 파일 형식(타일, 레이어 속성, 묶음)](https://developer.gimp.org/core/standards/xcf)
+- [GEGL: Features(성긴 타일 버퍼와 스왑)](https://gegl.org/features.html)
+- [GEGL API: GeglBuffer(사본이 타일을 쓸 때 복사로 함께 쓴다)](https://developer.gimp.org/api/gegl/class.Buffer.html)
+- [Krita 설명서: Introduction to Layers and Masks(합치는 차례, 묶음과 통과)](https://docs.krita.org/Introduction_to_Layers_and_Masks)
+- [OpenRaster: Layer Stack Specification(stack과 layer, 묶음의 격리)](https://www.openraster.org/baseline/layer-stack-spec.html)
