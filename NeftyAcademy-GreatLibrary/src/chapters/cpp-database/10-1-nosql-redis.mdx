@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'Redis: 메모리 위의 자료 구조, hiredis의 명령과 인자, TTL과 카운터, 파이프라인, WATCH와 EXEC, 캐시';
+export const terms = [
+  'redisAppendCommand', 'redisCommand', 'redisCommandArgv', 'redisConnect', 'redisContext',
+  'redisFree', 'redisGetReply', 'redisReply',
+];
 
 Redis는 메모리에 자료 구조를 두고 명령으로 다루는 서버입니다. 키 하나에 문자열, 해시, 리스트, 집합, 정렬된 집합, 스트림 같은 값을 담고, 키마다 수명(TTL)을 정할 수 있습니다. 명령을 한 줄로 세워 하나씩 실행하므로 명령 하나하나는 원자적입니다. 디스크에 오래 남길 데이터의 원본보다는 캐시, 세션, 카운터, 순위표, 작업 줄처럼 빠르고 가벼운 일에 많이 씁니다. C에서는 공식 클라이언트인 hiredis로 붙습니다.
 

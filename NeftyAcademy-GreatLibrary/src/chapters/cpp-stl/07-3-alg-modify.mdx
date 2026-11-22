@@ -1,6 +1,14 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '복사와 변형, 채우기, remove와 unique가 지우지 않는다는 것, 나누기와 돌리기';
+export const terms = [
+  'std::copy', 'ranges::copy', 'copy_if', 'copy_n', 'copy_backward', 'std::transform',
+  'ranges::transform', 'std::fill', 'std::generate', 'std::remove', 'remove_if', 'std::replace',
+  'replace_if', 'std::unique', 'std::reverse', 'std::rotate', 'std::erase', 'erase_if',
+  'std::shuffle', 'ranges::shuffle', 'ranges::fill', 'ranges::replace', 'ranges::reverse',
+  'ranges::rotate', 'ranges::unique', 'ranges::remove', 'ranges::remove_if', 'std::partition',
+  'stable_partition', 'ranges::partition',
+];
 
 둘째 갈래는 범위의 **내용을 바꾸는** 알고리즘입니다. 이 갈래를 쓸 때 늘 떠올릴 것이 하나 있습니다. [알고리즘은 칸의 개수를 바꾸지 못합니다.](#/read/cpp-stl/ov-parts) 쓰는 쪽은 받을 자리를 마련해 줘야 하고, "지우는" 알고리즘은 사실 지우지 않습니다.
 

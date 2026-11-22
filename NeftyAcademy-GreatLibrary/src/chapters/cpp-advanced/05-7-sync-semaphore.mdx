@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '자리의 수를 세는 세마포어, 한 번 쓰는 출발선 래치, 단계마다 모이는 배리어, 뮤텍스와 다른 점';
+export const terms = ['counting_semaphore', 'binary_semaphore', 'std::latch', 'std::barrier'];
 
 뮤텍스는 자료를 지키는 도구입니다. 스레드끼리 **때를 맞추는** 일(몇 개까지만 동시에, 모두 준비되면 출발, 모두 끝나면 다음 단계)은 조건 변수로 만들 수 있지만 매번 뮤텍스와 조건을 엮어야 합니다. C++20은 그 흔한 꼴 셋을 따로 내놓았습니다.
 

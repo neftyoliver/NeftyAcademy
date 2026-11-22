@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '알림을 놓치는 틈, 조건을 잠근 채로 바꾸는 까닭, 누구를 깨울지, 길이에 끝이 있는 큐';
+export const terms = ['condition_variable', 'condition_variable_any', 'cv_status'];
 
 조건 변수로 "조건이 맞을 때까지 잔다"를 쓰는 법과, `wait`에 조건을 꼭 줘야 한다는 것은 [「mutex와 lock」](#/read/cpp-stl/conc-mutex)에서 봤습니다. 여기서는 그 규칙들이 **왜** 있는지를 틀리는 코드로 확인하고, 그때 미뤄 둔 길이에 끝이 있는 큐를 만듭니다.
 

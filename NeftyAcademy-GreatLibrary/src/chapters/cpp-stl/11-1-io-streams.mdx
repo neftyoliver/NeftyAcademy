@@ -1,6 +1,11 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '스트림과 스트림 버퍼의 두 층, 상태 비트, 읽기가 실패한 뒤에 하는 일, cout·cerr·clog와 tie';
+export const terms = [
+  'std::cout', 'std::cin', 'std::cerr', 'std::clog', 'std::endl', 'std::ostream', 'std::istream',
+  'std::iostream', 'std::ios_base', 'std::streambuf', 'std::ios', 'std::flush', 'std::streamsize',
+  '~cout', '~cin', '~cerr',
+];
 
 화면 출력은 [`std::println`](#/read/cpp-syntax/from-c-hello)으로 하면 됩니다. 그런데도 스트림을 알아야 하는 까닭이 둘 있습니다. 파일과 문자열을 읽는 표준 도구가 아직 스트림이고, 지금 있는 C++ 코드의 대부분이 `std::cout`과 `>>`로 쓰여 있습니다. 이 챕터는 스트림을 읽고 고칠 수 있을 만큼 다룹니다.
 

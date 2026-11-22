@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'QtConcurrent와 스레드 풀: run, mapped·filtered·mappedReduced, QFuture와 then, QFutureWatcher';
+export const terms = ['QtConcurrent', 'QFuture', 'QFutureWatcher', 'QThreadPool'];
 
 [「QThread와 워커 객체」](#/read/cpp-qt/qthr-worker)는 오래 사는 작업 스레드에 잘 맞지만, "이 함수를 백그라운드에서 한 번 돌려 줘"나 "이 이미지 천 장의 썸네일을 코어를 다 써서 만들어 줘" 같은 일에는 너무 거창합니다. **QtConcurrent**는 Qt의 전역 **스레드 풀**에 일을 던지고, 결과를 `QFuture`로 돌려받는 고수준 API입니다. 스레드를 직접 만들고 끝내는 일이 없습니다.
 

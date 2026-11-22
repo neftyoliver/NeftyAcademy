@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '둘을 묶는 pair와 여럿을 묶는 tuple, tie로 견주고 풀기, apply로 인자 묶음 넘기기, 구조체와 고르기';
+export const terms = [
+  'std::pair', '~pair', 'std::tuple', '~tuple', 'std::tie', 'std::get', 'std::apply',
+  'forward_as_tuple', 'std::ignore', 'piecewise_construct',
+];
 
 이름 없이 값을 묶는 타입이 둘 있습니다. `std::pair`는 둘을, `std::tuple`은 몇 개든 묶습니다. 직접 만들어 쓰는 일보다 표준 라이브러리가 돌려주는 것을 **받는** 일이 더 많습니다. [`map`의 원소](#/read/cpp-stl/assoc-map), `insert`의 결과, `minmax`의 결과가 모두 `pair`입니다.
 

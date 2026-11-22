@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'N+1 문제: 목록 하나에 항목마다 쿼리 하나, sqlite3_trace_v2로 문장 세기, 조인과 목록으로 한꺼번에';
+export const terms = ['SQLITE_TRACE_STMT', 'sqlite3_sql', 'sqlite3_trace_v2', 'PQtrace'];
 
 목록을 쿼리 하나로 가져온 뒤, 항목마다 딸린 데이터를 쿼리 하나씩 더 묻는 모양을 **N+1 문제**라고 부릅니다. 손님 100명을 띄우며 손님마다 주문을 물으면 쿼리가 101번 나갑니다. 코드로는 반복문 안의 함수 호출 하나라서 눈에 잘 띄지 않고, ORM이 `customer.orders()` 같은 접근을 처음 할 때 몰래 쿼리를 보내는 지연 로딩이 흔한 원인입니다. 서버형 데이터베이스에서는 쿼리마다 왕복이 붙어서, localhost에서도 한 번에 0.05ms쯤([「연결 풀」](#/read/cpp-database/pool-pool)), 네트워크를 건너면 그 몇십 배가 항목 수만큼 쌓입니다.
 

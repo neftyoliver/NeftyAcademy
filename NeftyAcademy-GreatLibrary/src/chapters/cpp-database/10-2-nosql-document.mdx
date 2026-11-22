@@ -1,6 +1,11 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '문서 데이터베이스: jsonb와 nlohmann::json, 포함과 경로 연산자, 정규화, GIN 인덱스, mongocxx';
+export const terms = [
+  'bsoncxx::builder::basic::kvp', 'bsoncxx::builder::basic::make_array',
+  'bsoncxx::builder::basic::make_document', 'bsoncxx::to_json', 'mongocxx::client',
+  'mongocxx::instance', 'mongocxx::uri',
+];
 
 **문서 데이터베이스**는 행 대신 JSON 같은 문서를 통째로 저장합니다. 문서 안에 객체와 배열이 겹겹이 들어갈 수 있고, 같은 모음 안의 문서라도 필드가 서로 달라도 됩니다. MongoDB가 대표적이고, 관계형 데이터베이스도 JSON 열을 갖추고 있습니다. SQLite의 JSON 함수는 [「확장」](#/read/cpp-database/sqlite-ext)에서 보았고, PostgreSQL의 `jsonb`는 문서를 이진 꼴로 저장하며 인덱스까지 겁니다. 문서가 필요하다고 해서 꼭 새 시스템을 들일 필요는 없습니다.
 

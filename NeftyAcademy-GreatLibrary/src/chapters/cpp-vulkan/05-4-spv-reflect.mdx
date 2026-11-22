@@ -1,6 +1,18 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '리플렉션: SPIR-V에서 바인딩·오프셋·입출력 읽기, SPIRV-Cross C API, 레이아웃 만들기와 구조체 맞추기';
+export const terms = [
+  'spvc_compiler', 'spvc_context', 'spvc_context_create', 'spvc_context_create_compiler',
+  'spvc_context_destroy', 'spvc_context_parse_spirv', 'spvc_parsed_ir', 'SpvDecorationBinding',
+  'SpvDecorationDescriptorSet', 'SpvDecorationLocation', 'SpvId',
+  'spvc_compiler_create_shader_resources', 'spvc_compiler_get_decoration',
+  'spvc_compiler_get_member_name', 'spvc_compiler_get_type_handle',
+  'spvc_compiler_type_struct_member_array_stride',
+  'spvc_compiler_type_struct_member_matrix_stride', 'spvc_compiler_type_struct_member_offset',
+  'spvc_reflected_resource', 'spvc_resource_type', 'spvc_resources',
+  'spvc_resources_get_resource_list_for_type', 'spvc_type', 'spvc_type_get_member_type',
+  'spvc_type_get_num_member_types', 'spvc_type_id',
+];
 
 SPIR-V에는 셰이더가 바깥과 주고받는 모든 것이 장식으로 적혀 있습니다. 어느 세트·바인딩에 어떤 종류의 리소스가 오는지, 블록 멤버의 오프셋과 배열 간격, 입출력의 location, 컴퓨트의 워크그룹 크기, 특수화 상수까지 읽어 낼 수 있습니다. 이것을 **리플렉션**이라 하고, 디스크립터 세트 레이아웃과 파이프라인 레이아웃을 손으로 쓰는 대신 셰이더에서 만들어 내거나, C++ 구조체가 블록과 맞는지 검사하는 데 씁니다. 아래 프로그램은 [「인터페이스 블록과 레이아웃」](#/read/cpp-vulkan/glsl-interface)의 블록들을 SPIRV-Cross의 C API로 읽습니다(scalar 블록은 세트 1로 옮겼습니다).
 

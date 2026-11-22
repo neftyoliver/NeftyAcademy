@@ -1,6 +1,9 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'Qt Test: 시험 클래스와 QCOMPARE, 데이터 주도 시험, QSignalSpy로 시그널 확인, 실패 보고 읽기';
+export const terms = [
+  'QTest', 'QCOMPARE', 'QVERIFY', 'QTEST_MAIN', 'QSignalSpy', 'QFETCH', 'QTRY_COMPARE', 'QSKIP',
+];
 
 Qt에는 단위 시험 도구 **Qt Test**가 들어 있습니다. 다른 시험 프레임워크(GoogleTest, Catch2)도 Qt와 함께 쓸 수 있지만, Qt Test는 시그널 기록, 이벤트 흉내([「기본 위젯」](#/read/cpp-qt/wid-basic)의 `QTest::keyClicks`), 이벤트 루프 기다리기 같은 Qt다운 기능을 바로 제공합니다. 시험 하나는 시험 클래스의 `private slots:` 함수 하나입니다.
 

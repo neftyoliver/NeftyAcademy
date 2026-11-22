@@ -1,6 +1,13 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '콘셉트로 타입 살펴보기, 더 좁은 쪽이 이기는 오버로드, 콘셉트가 보지 못하는 뜻, 오류 메시지의 변화';
+export const terms = [
+  'same_as', 'std::integral', 'floating_point', 'convertible_to', 'std::invocable',
+  'std::predicate', 'std::regular', 'std::semiregular', 'std::copyable', 'std::movable',
+  'totally_ordered', 'equality_comparable', 'constructible_from', 'assignable_from',
+  'signed_integral', 'common_with', 'regular_invocable', 'strict_weak_order',
+  'indirect_unary_predicate', 'std::sortable',
+];
 
 [「표준 콘셉트」](#/read/cpp-syntax/con-standard)에서 `<concepts>`의 이름들을 표로 봤습니다. 콘셉트는 [특성](#/read/cpp-stl/tr-type-traits)처럼 `bool`로 값을 내므로, 실제 타입을 넣어 찍어 보면 뜻이 잡힙니다. 예상과 다른 줄이 배울 곳입니다.
 

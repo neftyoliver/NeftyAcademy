@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '멤버 함수 안에서 자기 shared_ptr 얻기, 동작 원리와 조건, 콜백 동안 살아 있기';
+export const terms = ['enable_shared_from_this', 'shared_from_this', 'weak_from_this'];
 
 멤버 함수 안에서 "나를 가리키는 `shared_ptr`"가 필요할 때가 있습니다. 나중에 불릴 콜백에 나 자신을 넘겨, 그때까지 살아 있게 하려는 경우입니다. `std::shared_ptr<T>(this)`라고 쓰면 [제어 블록이 하나 더 생겨](#/read/cpp-stl/mem-shared) 두 번 지워집니다. 표준이 준 답이 `std::enable_shared_from_this`입니다.
 

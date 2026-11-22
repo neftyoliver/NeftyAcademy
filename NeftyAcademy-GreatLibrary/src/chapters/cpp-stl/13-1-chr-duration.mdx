@@ -1,6 +1,12 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '단위가 타입에 든 기간, 저절로 되는 변환과 적어야 하는 변환, floor·ceil·round, 시각과 기간의 계산';
+export const terms = [
+  'std::chrono', 'chrono::duration', 'chrono::time_point', 'duration_cast', 'chrono_literals',
+  'chrono::seconds', 'chrono::milliseconds', 'chrono::microseconds', 'chrono::nanoseconds',
+  'chrono::minutes', 'chrono::hours', 'chrono::floor', 'chrono::ceil', 'chrono::round',
+  'chrono::days',
+];
 
 `sleep(100)`의 100은 초일까요, 밀리초일까요. `<chrono>`는 이 물음이 생기지 않게 합니다. [「사용자 정의 리터럴」](#/read/cpp-syntax/types-literal)에서 `1500ms` 같은 접미어를 잠깐 봤습니다. 그 뒤에 있는 타입 둘, **기간**(`duration`)과 **시각**(`time_point`)을 봅니다.
 

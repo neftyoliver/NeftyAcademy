@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '태그 읽고 쓰기: 태그 정의 한곳에 모으기, 환산과 품질, 쓰기 권한과 되읽기, 명령 핸드셰이크';
+export const terms = ['modbus_write_registers'];
 
 PLC와 말하는 프로그램이 커지면 `modbus_read_registers(ctx, 37, ...)` 같은 줄이 코드 곳곳에 흩어지기 쉽습니다. 37번이 무엇인지, 몇 배를 해야 실제 값인지, 써도 되는지는 그 줄을 쓴 사람만 압니다. 현장 소프트웨어는 이것을 **태그**로 정리합니다. 태그는 "Oven.Temperature" 같은 이름에 주소, 형식, 환산, 단위, 권한을 묶은 것이고, 나머지 코드는 이름으로만 값을 다룹니다. HMI와 SCADA가 모두 이 구조이며, 직접 만드는 프로그램도 같은 층을 두는 것이 좋습니다.
 

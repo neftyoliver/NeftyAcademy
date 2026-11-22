@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '메모리 잠금과 할당 금지: 페이지 폴트의 비용, mlockall과 malloc 조정, 실시간 구간의 숨은 할당 찾기';
+export const terms = ['MCL_CURRENT', 'MCL_FUTURE', 'mlockall'];
 
 실시간 우선순위와 실시간 커널을 갖추어도, 주기 안의 코드가 스스로 늦어지면 소용이 없습니다. 그 가장 흔한 원인이 **메모리**입니다. 리눅스는 프로그램이 메모리를 잡을 때가 아니라 처음 만질 때 실제 페이지를 줍니다. 그리고 `malloc`과 `new`는 잠금을 쥐고, 때로는 운영 체제에 메모리를 더 달라고 합니다. 둘 다 언제 얼마나 걸릴지 알 수 없습니다.
 

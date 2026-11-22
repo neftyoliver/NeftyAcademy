@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '벌칸과 OpenGL 창 넣기: QOpenGLWidget, QVulkanWindow와 창 컨테이너, Qt Quick 안에 그리기';
+export const terms = [
+  'QWindow', 'QVulkanWindow', 'QOpenGLWidget', 'QVulkanInstance', 'QQuickWindow',
+  'QOpenGLFunctions', 'QSurfaceFormat',
+];
 
 CAD 뷰, 의료 영상, 과학 시각화, 게임 엔진의 편집기처럼 이미 OpenGL이나 Vulkan으로 그리는 코드가 있다면, 그것을 Qt 앱의 한 영역에 넣고 둘레를 Qt의 메뉴, 패널, 버튼으로 채우고 싶어집니다. Qt는 위젯 앱과 Qt Quick 앱 각각에 그 방법을 제공합니다.
 

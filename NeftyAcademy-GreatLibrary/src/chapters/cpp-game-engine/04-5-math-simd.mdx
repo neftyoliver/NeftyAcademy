@@ -1,6 +1,11 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'SIMD로 빠르게: 칸별 배열(SoA)로 넷씩 처리하기, 절두체 컬링을 SSE로, 컴파일러마다 다른 결과';
+export const terms = [
+  '__m128', '_mm_add_ps', '_mm_and_ps', '_mm_castsi128_ps', '_mm_cmpge_ps', '_mm_loadu_ps',
+  '_mm_movemask_ps', '_mm_mul_ps', '_mm_set1_epi32', '_mm_set1_ps', '_mm_setzero_ps',
+  '_mm_sub_ps',
+];
 
 [「벡터와 행렬」](#/read/cpp-game-engine/math-vectors)의 `Vec3`를 보면, float 네 개를 한 번에 계산하는 SIMD 레지스터(SSE의 `__m128`)에 딱 맞을 것 같습니다. 실제로 많은 엔진이 처음에 `Vec4`를 `__m128`로 감싸 봅니다. 그런데 게임 엔진에서 SIMD가 정말 힘을 쓰는 것은 그 방식이 아닙니다. 「C++ 고급」의 [「SIMD」](#/read/cpp-advanced/perf-simd)에서 본 기초를 엔진의 대표적인 일 하나에 적용해 봅니다.
 

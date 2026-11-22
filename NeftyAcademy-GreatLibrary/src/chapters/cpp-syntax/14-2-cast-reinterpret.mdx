@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '비트를 다른 타입으로 읽기, 안전한 bit_cast, 바이트로 보기, 레지스터 주소';
+export const terms = ['~reinterpret_cast', 'bit_cast'];
 
 하드웨어와 통신 프로토콜을 다루면 "이 4바이트를 `float`로", "이 구조체를 바이트 열로" 읽어야 할 때가 옵니다. C에서는 포인터 변환이나 `union`으로 했습니다. C++에는 **정의된 방법**이 따로 있습니다.
 

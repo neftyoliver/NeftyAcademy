@@ -1,6 +1,11 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'ORM과 쿼리 빌더: SOCI의 묶기와 매핑, sqlpp23의 컴파일 시간 검사, sqlite_orm과 ODB, 날 SQL의 문';
+export const terms = [
+  'soci::i_null', 'soci::i_ok', 'soci::indicator', 'soci::into', 'soci::postgresql',
+  'soci::postgresql_soci_error', 'soci::rowset', 'soci::session', 'soci::soci_error',
+  'soci::sqlite3', 'soci::sqlite3_soci_error', 'soci::use',
+];
 
 드라이버 API 위에는 SQL을 얼마나 대신 써 주느냐에 따라 여러 층의 라이브러리가 있습니다. SOCI나 Qt SQL 같은 얇은 층은 SQL은 그대로 두고 값 묶기와 형 변환을 맡습니다. sqlpp23 같은 **쿼리 빌더**는 SQL을 C++ 식으로 짜게 해서 컴파일러가 검사하게 하고, sqlite_orm이나 ODB 같은 **ORM**(객체 관계 매핑)은 객체를 넣고 꺼내는 SQL을 아예 만들어 줍니다. 대신 써 주는 몫이 클수록 실제로 도는 SQL이 눈에서 멀어지고, 어느 층이든 SQL 글자를 직접 넣는 문은 남겨 둡니다.
 

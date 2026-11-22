@@ -1,6 +1,14 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '계층의 모양, 무엇이 무엇을 던지나, 내 예외 만들기, exception_ptr로 옮기기, 문맥을 덧붙이는 중첩';
+export const terms = [
+  'std::exception', 'std::runtime_error', '~runtime_error', 'std::logic_error', '~logic_error',
+  'std::out_of_range', '~out_of_range', 'std::invalid_argument', '~invalid_argument',
+  'std::bad_alloc', '~bad_alloc', 'exception_ptr', 'current_exception', 'rethrow_exception',
+  'std::terminate', 'throw_with_nested', 'rethrow_if_nested', 'std::length_error',
+  'std::domain_error', 'std::overflow_error', 'std::range_error', 'std::underflow_error',
+  'bad_cast', 'bad_typeid', 'bad_array_new_length',
+];
 
 [「throw, try, catch」](#/read/cpp-syntax/exc-basic)에서 예외를 던지고 받는 문법과 표준 예외 몇 가지를 봤습니다. 여기서는 계층 전체와, 라이브러리가 예외를 다루라고 준 도구를 봅니다.
 

@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '전해지는 것을 정확히 적기, 설치해서 find_package로 찾게 하기, 다른 CPU용 빌드, 빌드 시간 줄이기';
+export const terms = ['find_package', 'target_precompile_headers', 'enable_testing', 'add_test'];
 
 [「CMake로 프로젝트 꾸리기」](#/read/cpp-syntax/mod-cmake)에서 타깃, 빌드 명령, 프리셋까지 봤습니다. 프로젝트가 자라면 네 가지가 더 필요해집니다. 타깃 사이에 무엇이 전해지는지 정확히 적는 일, 내 라이브러리를 남이 가져다 쓰게 하는 일, 다른 CPU용으로 빌드하는 일, 그리고 빌드 시간입니다. CMake 3.28과 Ninja로 돌렸습니다.
 

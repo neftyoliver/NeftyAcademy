@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'CAN과 CANopen: 우선순위 중재, 프레임, COB-ID, 객체 사전, SDO와 PDO, NMT, 리눅스 SocketCAN';
+export const terms = ['can_filter', 'can_frame', 'sockaddr_can'];
 
 CAN(컨트롤러 영역 네트워크)은 원래 자동차 안의 전자 장치들을 잇기 위해 1980년대에 만들어진 버스입니다. 선 두 가닥으로 여러 장치를 잇고 잡음에 강하며 칩이 싸서, 서보 드라이브, 엔코더, 의료 기기, 엘리베이터까지 퍼졌습니다. CAN은 "짧은 메시지를 우선순위대로 보내는" 일만 정하고, 메시지의 뜻은 위의 프로토콜이 정합니다. 산업 자동화에서 그 역할을 가장 많이 하는 것이 **CANopen**입니다.
 

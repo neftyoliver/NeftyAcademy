@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '재연결과 타임아웃: 끊김은 PQstatus로, 트랜잭션째로 다시, 지수 백오프, 멱등 키, 여러 타임아웃';
+export const terms = [
+  'PGRES_COMMAND_OK', 'CONNECTION_BAD', 'PQPING_NO_RESPONSE', 'PQPING_OK', 'PQbackendPID',
+  'PQcmdTuples', 'PQping', 'PQreset', 'mysql_ping',
+];
 
 연결은 언젠가 끊깁니다. 서버가 다시 시작하거나 다른 서버로 넘어가고, 네트워크 장비가 오래 조용한 연결을 버리고, 관리자가 세션을 끊습니다. 프로그램은 끊김을 알아보고, 잠시 기다렸다 다시 맺고, 하던 트랜잭션을 처음부터 다시 해야 합니다. 그리고 무엇을 기다리든 끝을 정해 둬야 멈추지 않습니다.
 

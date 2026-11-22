@@ -1,6 +1,12 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '스크립트 언어 붙이기: Lua를 품고 C++ 함수 내보내기, 보호 호출로 오류 가두기, 다시 불러오기';
+export const terms = [
+  'luaL_checknumber', 'luaL_checkstring', 'luaL_loadbuffer', 'luaL_newstate', 'luaL_openlibs',
+  'lua_State', 'lua_close', 'lua_getglobal', 'lua_isfunction', 'lua_pcall', 'lua_pop',
+  'lua_pushinteger', 'lua_pushnumber', 'lua_register', 'lua_tostring',
+];
+export const noterms = ['move'];
 
 게임의 규칙과 적의 행동은 끝없이 고쳐집니다. 그때마다 C++를 다시 빌드하고 게임을 다시 켜면 디자이너가 기다리다 지칩니다. 그래서 많은 엔진이 가벼운 **스크립트 언어**를 품고, 게임 쪽 논리는 스크립트로 쓰게 합니다. Lua는 C로 된 작은 인터프리터를 라이브러리처럼 링크해 쓰는 언어라서, 오래전부터 게임에 많이 쓰여 왔습니다.
 

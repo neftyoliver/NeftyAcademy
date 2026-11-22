@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '경합을 막는 mutex와 lock_guard, 조건 변수로 기다리기, 스레드에 안전한 작업 큐 만들기, 잠금의 값';
+export const terms = ['std::mutex', '~mutex', 'std::lock'];
 
 [앞 페이지](#/read/cpp-stl/conc-thread)의 끝에서 두 스레드가 같은 변수를 고쳐 값이 틀어졌습니다. 고치는 방법은 "한 번에 한 스레드만 들어오게" 하는 것이고, 그 문지기가 `std::mutex`입니다.
 

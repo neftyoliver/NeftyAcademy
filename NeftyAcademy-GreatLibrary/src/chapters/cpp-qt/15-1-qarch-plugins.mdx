@@ -1,6 +1,11 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '플러그인: 인터페이스와 IID, Q_PLUGIN_METADATA, QPluginLoader로 찾아 불러 쓰기, 호환성 규칙';
+export const terms = [
+  'QPluginLoader', 'Q_DECLARE_INTERFACE', 'Q_INTERFACES', 'Q_PLUGIN_METADATA', 'qobject_cast',
+  'QLibrary',
+];
+export const noterms = ['future'];
 
 앱을 다시 빌드하지 않고 기능을 더하고 싶을 때 **플러그인**을 씁니다. 이미지 편집기의 필터, 에디터의 언어 지원, 장비 제어 프로그램의 기기별 드라이버가 그런 예입니다. Qt 자신도 이 구조로 되어 있어서, [「데스크톱 배포 도구」](#/read/cpp-qt/dep-desktop)에서 본 플랫폼, 이미지 형식, SQL 드라이버가 모두 플러그인입니다. 게임 엔진 책의 [「동적 라이브러리와 핫 리로드」](#/read/cpp-game-engine/plat-hot-reload)에서는 `dlopen`으로 직접 라이브러리를 불렀는데, Qt의 플러그인 장치는 그 위에 **메타데이터**, 인터페이스 확인, 판 확인을 얹고 플랫폼마다 다른 부분을 감춰 줍니다.
 

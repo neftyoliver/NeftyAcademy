@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'TLS가 지키는 세 가지, 인증서와 CA 사슬, 이름 확인의 중요성, OpenSSL 클라이언트';
+export const terms = [
+  'SSL_CTX_new', 'SSL_CTX', 'SSL_CTX_free', 'TLS_client_method', 'SSL_get_verify_result',
+  'SSL_set_tlsext_host_name', 'SSL_CTX_set_default_verify_paths', 'SSL_set1_host',
+];
 
 [「HTTP」](#/read/c-mid/http)와 [「MQTT」](#/read/c-mid/iot-mqtt)는 그대로 쓰면 글자가 선 위를 알몸으로 지나갑니다. 같은 Wi-Fi에 있는 누구나 엿보고, 중간에서 바꿔치기할 수 있습니다. **TLS**는 TCP와 응용 사이에 끼어 이것을 막습니다. HTTPS, MQTTS(8883번), 메일의 암호화가 모두 TLS입니다.
 

@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '전처리와 include: GLSL 전처리기, VULKAN 매크로, GL_GOOGLE_include_directive, 포함 콜백과 가드';
+export const terms = [
+  'shaderc_compile_into_preprocessed_text', 'shaderc_compile_options_add_macro_definition',
+  'shaderc_compile_options_set_include_callbacks', 'shaderc_include_result',
+];
 
 GLSL에도 C와 비슷한 전처리기가 있어서 `#define`, `#if`, `#ifdef`, `#error`, `#line`을 씁니다. 벌칸 GLSL에는 `VULKAN` 매크로가 정의되어 있어, OpenGL과 함께 쓰는 셰이더를 가를 수 있습니다. 표준 GLSL에는 `#include`가 없고 glslang과 shaderc가 GL_GOOGLE_include_directive 확장으로 지원하는데, shaderc 라이브러리는 파일을 직접 읽지 않고 프로그램이 넘긴 콜백에게서 받습니다.
 

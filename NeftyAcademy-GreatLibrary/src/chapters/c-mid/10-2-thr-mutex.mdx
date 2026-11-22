@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '뮤텍스로 경쟁 상태 막기: mtx_lock과 mtx_unlock, 짧은 임계 구역, 뮤텍스의 값, 반대 순서의 교착';
+export const terms = [
+  'mtx_lock', 'mtx_unlock', 'mtx_init', 'mtx_t', 'mtx_destroy', 'mtx_trylock',
+  'pthread_mutex_lock', 'pthread_mutex_unlock', 'mtx_plain',
+];
 
 「컴퓨터의 입문」의 [「스레드의 개념」](#/read/basics/threads)에서 두 스레드가 같은 변수에 1을 백만 번씩 더했더니 결과가 200만에 한참 못 미쳤습니다. `x++`가 읽기, 더하기, 쓰기의 세 단계라 중간에 끼어들 수 있었기 때문입니다. 이 쪽은 그 문제를 **뮤텍스**(mutex, mutual exclusion: 서로 배제)로 막습니다. 뮤텍스는 한 번에 한 스레드만 잡을 수 있는 자물쇠입니다.
 

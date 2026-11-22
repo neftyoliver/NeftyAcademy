@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '스레드를 건너는 시그널: 받는 객체의 스레드가 정하는 연결, 직접·큐·막는 큐, 람다의 문맥 객체';
+export const terms = [
+  'Qt::QueuedConnection', 'Qt::BlockingQueuedConnection', 'Qt::DirectConnection',
+  'Qt::AutoConnection', 'QMutex', 'QMutexLocker',
+];
 
 [「QThread와 워커 객체」](#/read/cpp-qt/qthr-worker)에서 작업 스레드의 시그널이 메인 스레드에서 처리되는 것을 봤습니다. Qt는 그것을 어떻게 알았을까요? 규칙은 하나입니다. **슬롯은 받는 객체가 사는 스레드에서 실행된다.** 보내는 쪽과 받는 쪽이 같은 스레드면 그 자리에서 함수처럼 부르고, 다르면 받는 쪽 스레드의 이벤트 큐에 넣어 나중에 그 스레드가 실행합니다.
 

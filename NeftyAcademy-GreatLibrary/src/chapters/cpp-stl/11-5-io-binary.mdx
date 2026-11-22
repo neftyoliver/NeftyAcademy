@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'read와 write, binary 방식, 구조체를 통째로 쓰면 안 되는 까닭, 바이트 순서를 정해 한 필드씩 쓰기';
+export const terms = ['std::byte', 'std::byteswap', 'byteswap', 'std::to_integer'];
 
 `<<`와 `>>`는 값을 **글자로** 바꿉니다. 센서 로그, 이미지, 펌웨어처럼 바이트 그대로 주고받아야 하는 자료에는 `read`와 `write`를 씁니다.
 

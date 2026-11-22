@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '인터페이스 블록: uniform·buffer·push_constant, set과 binding, std140·std430·scalar 레이아웃의 오프셋';
+export const terms = [
+  'VkDescriptorImageInfo', 'vkx::Bindings', 'vkx::bind_buffer', 'vkx::make_bindings',
+  'vkx::make_layout',
+];
 
 셰이더는 바깥의 데이터를 **인터페이스 블록**으로 받습니다. `uniform` 블록(UBO)은 읽기 전용의 작은 데이터, `buffer` 블록(SSBO)은 읽고 쓰는 큰 데이터, `push_constant` 블록은 커맨드 버퍼에 직접 담는 아주 작은 데이터입니다. 앞의 둘은 `set`과 `binding` 번호를 달고, C++ 쪽에서는 그 자리에 버퍼를 **디스크립터**로 겁니다. 디스크립터는 [「세트와 레이아웃」](#/read/cpp-vulkan/desc-sets)에서 자세히 보고, 여기서는 세트 하나를 만드는 도우미만 둡니다.
 

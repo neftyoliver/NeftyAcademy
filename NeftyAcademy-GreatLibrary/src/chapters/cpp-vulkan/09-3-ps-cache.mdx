@@ -1,6 +1,12 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '파이프라인 캐시: 컴파일 결과를 파일에 두고 다음 실행에 쓰기, 파일 검사, 캐시에 든 것만 만들기';
+export const terms = [
+  'VkPipelineCache', 'VkPipelineCacheCreateInfo', 'VkPipelineCacheHeaderVersionOne',
+  'VkPipelineCreateFlags', 'VkPipelineCreationFeedback', 'VkPipelineCreationFeedbackCreateInfo',
+  'vkCreatePipelineCache', 'vkDestroyPipelineCache', 'vkGetPipelineCacheData',
+  'vkMergePipelineCaches',
+];
 
 파이프라인을 만들 때 드라이버는 셰이더를 GPU의 기계어로 컴파일하고, 여기에 시간이 많이 듭니다. **파이프라인 캐시**(`VkPipelineCache`)는 드라이버가 그 결과를 담아 두는 객체입니다. 파이프라인을 만드는 함수에 넘기면 드라이버가 캐시를 먼저 찾아보고, 없을 때만 컴파일해서 넣어 둡니다. 담긴 것은 바이트로 꺼내 파일에 두었다가 다음 실행에 다시 넣을 수 있습니다. 아래 프로그램은 두 번 실행한 셈 치고 그 과정을 밟은 다음, 쓰면 안 되는 파일 세 가지를 가려 봅니다.
 

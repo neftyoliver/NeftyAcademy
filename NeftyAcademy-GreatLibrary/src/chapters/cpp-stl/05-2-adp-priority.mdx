@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '가장 큰 것이 먼저 나오는 큐, 비교자로 순서 뒤집기, 타이머 줄 세우기, 상위 k개, 옮겨 꺼내기의 한계';
+export const terms = ['priority_queue'];
 
 `std::priority_queue`는 넣은 순서와 상관없이 **가장 우선인 것**이 먼저 나오는 큐입니다. `<queue>` 헤더에 있고, [`stack`과 `queue`](#/read/cpp-stl/adp-stack)처럼 다른 컨테이너를 감싼 어댑터입니다. 속은 `vector`이고 그 위에 힙이라는 배치를 유지합니다.
 

@@ -1,6 +1,9 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '행을 구조체로: 열 이름으로 고르기, 짝 표 한 번 적기, 형마다 get과 put, optional로 NULL, 리플렉션';
+export const terms = [
+  'SQLITE_DBCONFIG_DQS_DDL', 'SQLITE_DBCONFIG_DQS_DML', 'sqlite3_last_insert_rowid',
+];
 
 지금까지의 예제는 `sqlite3_column_int64(st, 3)`처럼 열을 번호로 읽었습니다. 번호는 SELECT가 돌려주는 열의 순서에 묶여 있어서, `SELECT *`로 읽던 테이블에 누가 열을 하나 끼워 넣으면 컴파일도 실행도 멀쩡한 채 값이 엉뚱한 멤버로 들어갑니다. 구조체가 늘 때마다 같은 읽기·쓰기 코드를 손으로 되풀이하는 것도 실수가 끼기 쉬운 자리입니다. 이 쪽에서는 열과 멤버의 짝을 구조체마다 한 번만 적고, 읽기와 쓰기는 모든 구조체가 함께 쓰는 템플릿에 맡깁니다.
 

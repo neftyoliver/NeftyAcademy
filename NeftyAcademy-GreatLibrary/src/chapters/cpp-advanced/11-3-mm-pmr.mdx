@@ -1,6 +1,11 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '내 타입이 자원을 물려받게 하기, 한도를 거는 자원 만들기, 자원이 따라가지 않는 자리, 잰 값';
+export const terms = [
+  'std::pmr', 'monotonic_buffer_resource', 'unsynchronized_pool_resource',
+  'synchronized_pool_resource', 'polymorphic_allocator', 'memory_resource', 'new_delete_resource',
+  'null_memory_resource', 'set_default_resource', '~pmr',
+];
 
 `std::pmr`의 자원을 쓰는 법과, 요청을 세는 작은 자원을 만드는 법은 [「allocator와 pmr」](#/read/cpp-stl/mem-allocator)에서 봤습니다. 여기서는 설계 쪽을 봅니다. **내가 만든 타입**이 컨테이너의 자원을 물려받게 하는 법, 쓸모 있는 자원을 만드는 법, 그리고 자원이 조용히 빠져나가는 자리입니다.
 

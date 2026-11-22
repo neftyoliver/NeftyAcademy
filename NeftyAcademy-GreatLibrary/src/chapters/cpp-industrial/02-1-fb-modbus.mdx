@@ -1,6 +1,14 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'Modbus RTU와 TCP: 네 데이터 영역과 기능 코드, RTU 프레임과 CRC, libmodbus, 흔한 함정';
+export const terms = [
+  'modbus_close', 'modbus_connect', 'modbus_free', 'modbus_get_float_abcd',
+  'modbus_get_float_cdab', 'modbus_mapping_free', 'modbus_mapping_new', 'modbus_mapping_t',
+  'modbus_new_rtu', 'modbus_new_tcp', 'modbus_read_registers', 'modbus_receive', 'modbus_reply',
+  'modbus_set_debug', 'modbus_set_response_timeout', 'modbus_set_slave', 'modbus_strerror',
+  'modbus_t', 'modbus_tcp_accept', 'modbus_tcp_listen', 'modbus_write_bit',
+  'modbus_write_register',
+];
 
 Modbus는 1979년 Modicon이 자기 PLC를 위해 만든 프로토콜인데, 단순하고 공개되어 있어서 지금도 가장 널리 쓰이는 산업용 프로토콜입니다. 온도 조절기, 인버터, 전력계, 유량계처럼 작은 장비는 대개 Modbus를 지원합니다. 산업용 통신을 처음 짜 본다면 거의 틀림없이 Modbus부터 만나게 됩니다.
 

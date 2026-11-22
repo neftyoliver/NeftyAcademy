@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '명령과 실행 취소: QUndoCommand와 QUndoStack, 이동 합치기, 매크로, 저장 상태, 메뉴 동작';
+export const terms = ['QUndoStack', 'QUndoCommand', 'QUndoView', 'QPlainTextEdit', 'QUndoGroup'];
 
 편집하는 앱이라면 실행 취소는 빠질 수 없습니다. 게임 엔진 책의 [「실행 취소」](#/read/cpp-game-engine/ed-undo)에서는 바꾸는 일 하나하나를 **명령 객체**로 만들고 스택에 쌓는 구조를 직접 짰습니다. Qt에는 이 구조가 `QUndoCommand`와 `QUndoStack`으로 들어 있습니다(Qt 6부터 QtGui 모듈에 있고, 스택을 목록으로 보여 주는 `QUndoView`만 Widgets에 있습니다). [「상태 관리」](#/read/cpp-qt/qarch-state)에서처럼 상태를 바꾸는 길을 하나로 모아 두었다면, 그 길을 명령으로 바꾸기만 하면 됩니다.
 

@@ -1,6 +1,11 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '타깃으로 생각하기, 최소한의 CMakeLists.txt, 빌드와 테스트 명령, 프리셋, 외부 라이브러리';
+export const terms = [
+  'cmake', 'ctest', 'add_executable', 'target_link_libraries', 'cmake_minimum_required',
+  'add_library', 'target_include_directories', 'target_compile_options',
+  'target_compile_definitions',
+];
 
 파일이 둘을 넘으면 `g++ a.cpp b.cpp …`를 손으로 칠 수 없습니다. C++에는 표준 빌드 도구가 없지만 사실상의 표준은 **CMake**입니다. CMake는 직접 컴파일하지 않고, Ninja나 Make가 읽을 빌드 파일을 **만들어 줍니다.**
 

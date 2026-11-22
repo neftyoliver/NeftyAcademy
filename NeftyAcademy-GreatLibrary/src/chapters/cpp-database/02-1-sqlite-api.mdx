@@ -1,6 +1,14 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'SQLite C API: 파일 하나인 데이터베이스, sqlite3_open_v2와 RAII, 결과 코드, sqlite3_exec의 쓰임새';
+export const terms = [
+  'SQLITE_OK', 'sqlite3', 'sqlite3_exec', 'sqlite3_free', 'sqlite3_stmt', 'SQLITE_CANTOPEN',
+  'SQLITE_CONSTRAINT', 'SQLITE_CONSTRAINT_PRIMARYKEY', 'SQLITE_CONSTRAINT_UNIQUE',
+  'SQLITE_OPEN_CREATE', 'SQLITE_OPEN_EXRESCODE', 'SQLITE_OPEN_READONLY', 'SQLITE_OPEN_READWRITE',
+  'SQLITE_READONLY', 'SQLITE_VERSION', 'sqlite3_changes64', 'sqlite3_close_v2', 'sqlite3_errmsg',
+  'sqlite3_errstr', 'sqlite3_extended_errcode', 'sqlite3_libversion', 'sqlite3_libversion_number',
+  'sqlite3_open_v2',
+];
 
 **SQLite**는 서버가 없는 데이터베이스입니다. 프로그램에 라이브러리로 들어가 데이터베이스 파일 하나를 직접 읽고 씁니다. 따로 띄울 프로세스도, 설정할 계정도 없어서 휴대폰 앱, 웹 브라우저, 데스크톱 프로그램, 장비의 설정과 기록 저장에 아주 널리 쓰이고, 소스는 퍼블릭 도메인입니다. C로 쓰였고 C API를 내놓으므로 C++에서는 이것을 그대로 부르거나 얇게 감싸 씁니다.
 

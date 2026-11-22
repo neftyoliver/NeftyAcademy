@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'I2C 버스: 선 두 개에 여러 장치, 주소와 ACK, 레지스터 읽기의 순서, 리눅스 i2c-dev';
+export const terms = ['ioctl()', 'I2C_RDWR', 'i2c_msg', 'i2c_rdwr_ioctl_data'];
 
 **I2C**(I²C, Inter-Integrated Circuit, "아이스퀘어시"라고도 읽음)는 선 두 가닥에 장치 여러 개를 매달아 쓰는 버스입니다. 온도·습도 센서, 가속도계, 작은 OLED 화면, 시계 칩, EEPROM이 흔히 I2C로 붙습니다. [「UART」](#/read/c-mid/bus-uart)가 일대일이었다면 I2C는 **한 줄에 여럿**이고, 그래서 주소가 필요합니다.
 

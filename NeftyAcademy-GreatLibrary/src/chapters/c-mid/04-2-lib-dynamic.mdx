@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '실행할 때 불러오는 동적 라이브러리(.so): 로더가 찾는 길, soname, 다시 빌드 없이 고치기, dlopen';
+export const terms = ['dlopen()', 'dlsym()', 'dlclose()', 'ldd', 'LD_LIBRARY_PATH'];
 
 [「정적 라이브러리」](#/read/c-mid/lib-static)는 링크할 때 기계어를 실행 파일에 복사해 넣었습니다. 동적 라이브러리는 실행 파일에 "이 라이브러리의 이 함수가 필요하다"는 **쪽지만** 남기고, 프로그램을 실행할 때 OS의 로더가 라이브러리를 찾아 메모리에 올려 이어 줍니다. 리눅스에서는 `.so`(shared object), 윈도우에서는 `.dll`, 맥에서는 `.dylib`입니다. [「ELF」](#/read/c-mid/exe-elf)에서 본 `NEEDED: libc.so.6`이 바로 그 쪽지였습니다.
 

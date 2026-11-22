@@ -1,6 +1,11 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '비트를 세고 찾는 함수, 켜진 비트만 차례로 돌기, 2의 거듭제곱, 돌리기, 명령 하나가 되는지 확인하기';
+export const terms = [
+  'std::popcount', 'std::bit_ceil', 'std::bit_floor', 'std::bit_width', 'countl_zero',
+  'countr_zero', 'countl_one', 'countr_one', 'has_single_bit', 'std::rotl', 'std::rotr',
+  'std::endian',
+];
 
 켜진 비트를 세거나 가장 낮은 켜진 비트를 찾는 일은 예전에는 루프로 짜거나 `__builtin_popcount` 같은 컴파일러 전용 함수로 했습니다. C++20의 `<bit>`가 이것들을 표준 함수로 내놓았습니다. [`bitset`](#/read/cpp-stl/voc-bitset)과 달리 보통의 부호 없는 정수에 바로 씁니다.
 

@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '스레드 모드: 단일, 다중, 직렬화, 스레드마다 연결, WAL에서 함께 읽고 쓰기, 스냅숏과 BUSY_SNAPSHOT';
+export const terms = [
+  'SQLITE_BUSY_SNAPSHOT', 'SQLITE_OPEN_FULLMUTEX', 'SQLITE_OPEN_NOMUTEX', 'SQLITE_THREADSAFE',
+  'sqlite3_threadsafe',
+];
 
 SQLite는 여러 스레드에서 쓸 수 있지만, 어떻게 쓸 수 있는지는 라이브러리를 빌드한 방식과 연결을 여는 방식, 그리고 연결을 스레드 사이에서 나눠 쓰는지에 달려 있습니다.
 

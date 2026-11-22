@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '블렌딩, 깊이, 스텐실: 블렌딩 식과 네 가지 방식, 반투명을 그리는 순서, 스텐실로 가리기와 테두리';
+export const terms = [
+  'VkPipelineColorBlendAttachmentState', 'VkPipelineColorBlendStateCreateInfo',
+  'VkPipelineDepthStencilStateCreateInfo', 'VkBlendFactor', 'VkStencilOpState',
+];
 
 프래그먼트 셰이더가 낸 색은 스텐실 시험, 깊이 시험, 블렌딩을 거쳐 첨부물에 적힙니다. 깊이 시험은 [「깊이 버퍼」](#/read/cpp-vulkan/tex-depth)에서 보았으니 여기서는 나머지 둘을 봅니다. 아래 프로그램은 도우미를 거치지 않고 파이프라인의 구조체를 직접 채워, 블렌딩 방식 넷과 스텐실 설정 셋으로 파이프라인 일곱 개를 만듭니다.
 

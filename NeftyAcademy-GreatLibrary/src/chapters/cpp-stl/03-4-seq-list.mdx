@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '노드와 포인터, 옮겨도 살아 있는 반복자, splice로 만드는 LRU 캐시, forward_list, 치르는 값';
+export const terms = ['std::list', '~list', 'forward_list'];
 
 `std::list`는 원소마다 노드를 따로 잡고 앞뒤를 포인터로 잇는 이중 연결 리스트입니다. [앞에서](#/read/cpp-stl/ov-complexity) 차례로 도는 속도가 `vector`의 일곱 배 느리고, [메모리는 여덟 배](#/read/cpp-stl/ov-allocator) 든다는 것을 재어 보았습니다. 그런데도 `list`여야 하는 자리가 있습니다.
 
@@ -63,7 +64,7 @@ private:
     using Item = std::pair<int, std::string>;
     std::size_t capacity_;
     std::list<Item> items_;                                     // 앞이 최근
-    std::unordered_map<int, std::list<Item>::iterator> index_;  // 키 -> 노드
+    std::unordered_map<int, std::list<Item>::iterator> index_;  // 열쇠 -> 노드
 };
 
 int main()
@@ -90,7 +91,7 @@ put(4)  4:four 1:one 3:three
 get(2) = 없음
 ```
 
-`index_`에 적어 둔 반복자는 다른 항목이 들어오고 나가고 자리를 바꾸는 동안 내내 유효합니다. `vector`였다면 `push`나 `erase` 한 번에 모두 죽습니다. (이 예제의 `put`은 없는 키만 넣는다고 가정했습니다. 있는 키를 고치는 일은 `get`처럼 찾아서 `splice`하면 됩니다.)
+`index_`에 적어 둔 반복자는 다른 항목이 들어오고 나가고 자리를 바꾸는 동안 내내 유효합니다. `vector`였다면 `push`나 `erase` 한 번에 모두 죽습니다. (이 예제의 `put`은 없는 열쇠만 넣는다고 가정했습니다. 있는 열쇠의 값을 고치는 일은 `get`처럼 찾아서 `splice`하면 됩니다.)
 
 ## 자기만의 알고리즘
 

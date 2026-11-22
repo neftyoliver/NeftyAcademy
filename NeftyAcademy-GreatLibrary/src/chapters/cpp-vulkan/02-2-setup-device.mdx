@@ -1,6 +1,15 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '물리 장치와 논리 장치: 장치 고르기와 점수, 큐 받기, 기능을 묻고 켜기, portability_subset, vkx_device';
+export const terms = [
+  'VkDevice', 'VkDeviceCreateInfo', 'VkPhysicalDevice', 'VkPhysicalDeviceFeatures2',
+  'VkPhysicalDeviceVulkan12Features', 'VkPhysicalDeviceVulkan13Features',
+  'vkEnumeratePhysicalDevices', 'vkGetPhysicalDeviceFeatures2', 'vkCreateDevice',
+  'vkDestroyDevice', 'VkPhysicalDeviceProperties', 'VkPhysicalDeviceVulkan11Features',
+  'vkEnumerateDeviceExtensionProperties', 'vkGetDeviceQueue',
+  'vkGetPhysicalDeviceMemoryProperties', 'vkGetPhysicalDeviceProperties', 'vkx::Device',
+  'vkx::make_device', 'vkx::score',
+];
 
 물리 장치(`VkPhysicalDevice`)는 기계에 꽂힌 GPU 하나이고, 인스턴스에서 나열해 얻습니다. 이름, 종류, 지원하는 판, 한계값, 기능, 메모리, 큐 패밀리를 물어볼 수 있을 뿐 만들거나 없애지 않습니다. 실제 일은 그 장치로 만든 **논리 장치**(`VkDevice`)에 시킵니다. 논리 장치를 만들 때 큐를 몇 개 쓸지, 어떤 장치 확장과 기능을 켤지 정하고, 그 밖의 것은 쓸 수 없습니다. 이 쪽의 `vkx_device.hpp`는 [「인스턴스와 확장」](#/read/cpp-vulkan/setup-instance)의 도우미 위에 얹혀, 장치를 고르고 논리 장치와 큐를 만들어 줍니다.
 

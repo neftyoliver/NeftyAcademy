@@ -1,6 +1,11 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'accumulate와 초깃값의 타입, 평균과 분산, 누적 합과 이웃 차, 넘치지 않는 midpoint';
+export const terms = [
+  'accumulate', 'inner_product', 'partial_sum', 'adjacent_difference', 'std::iota',
+  'ranges::iota', 'std::gcd', 'std::lcm', 'std::midpoint', 'std::lerp', 'std::clamp', 'std::min',
+  'std::max', 'fold_left', 'ranges::min', 'ranges::max', 'ranges::clamp',
+];
 
 합, 평균, 누적, 차이 같은 계산은 `<algorithm>`이 아니라 <strong>`<numeric>`</strong>에 있습니다. 개수는 적지만 측정값을 다루는 코드에서 매일 쓰고, 함정이 하나 있습니다.
 

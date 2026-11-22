@@ -1,6 +1,11 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'PostgreSQL: 서버형 데이터베이스, 연결 문자열, libpqxx의 트랜잭션과 매개변수, RETURNING, 예외';
+export const terms = [
+  'PGresult', 'PQclear', 'PQconnectdb', 'PQgetvalue', 'PQntuples', 'PQexecParams', 'PQgetisnull',
+  'pqxx::connection', 'pqxx::nontransaction', 'pqxx::read_transaction', 'pqxx::result',
+  'pqxx::unique_violation', 'pqxx::work',
+];
 
 SQLite와 달리 **서버형 데이터베이스**는 데이터를 맡은 서버 프로세스가 따로 돌고, 프로그램은 네트워크(PostgreSQL은 TCP 5432번 포트나 유닉스 소켓)로 붙어 SQL을 보냅니다. 사용자와 권한이 있고, 수많은 클라이언트가 동시에 읽고 씁니다. PostgreSQL은 연결마다 서버 쪽 프로세스를 하나씩 띄우기 때문에 연결을 맺는 일 자체가 비싸며, 이 때문에 연결 풀을 씁니다([「연결 풀」](#/read/cpp-database/pool-pool)). 공식 C 클라이언트 라이브러리가 **libpq**이고, 그 위에 만든 공식 C++ 라이브러리가 **libpqxx**입니다.
 

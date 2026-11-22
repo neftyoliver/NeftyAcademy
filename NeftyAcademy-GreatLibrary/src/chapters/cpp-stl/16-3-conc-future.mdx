@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '결과와 예외를 받아 오는 future, async의 실행 방식과 함정, promise로 값 넣기, async가 맞지 않는 곳';
+export const terms = [
+  'std::future', '~future', 'std::async', 'std::launch', 'launch::async', 'launch::deferred',
+  'future_status', 'future_error', 'future_errc',
+];
 
 [스레드](#/read/cpp-stl/conc-thread)의 함수가 돌려주는 값은 버려집니다. "다른 스레드에서 계산하고 **결과를 받아 오는**" 일을 위한 것이 `<future>`입니다. `std::future<T>`는 "나중에 `T`가 들어올 자리"이고, `std::async`가 그 자리를 채울 일을 시작시킵니다.
 

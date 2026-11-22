@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '백업: 파일 복사의 함정, 백업 API와 VACUUM INTO, 열어서 확인하기, pg_dump와 시점 복구, 3-2-1';
+export const terms = [
+  'SQLITE_LOCKED', 'sqlite3_backup', 'sqlite3_backup_finish', 'sqlite3_backup_init',
+  'sqlite3_backup_pagecount', 'sqlite3_backup_remaining', 'sqlite3_backup_step', 'sqlite3_rsync',
+];
 
 데이터는 디스크 고장만이 아니라 잘못 실행한 `DELETE`나 `UPDATE`, 버그 있는 마이그레이션, 랜섬웨어로도 사라집니다. 백업을 설계할 때는 최근 얼마 동안의 데이터까지 잃어도 되는지(**RPO**, 복구 시점 목표)와 되살리기까지 얼마나 걸려도 되는지(**RTO**, 복구 시간 목표)를 먼저 정합니다. 하루에 한 번 덤프를 뜨면 RPO는 최대 하루입니다.
 

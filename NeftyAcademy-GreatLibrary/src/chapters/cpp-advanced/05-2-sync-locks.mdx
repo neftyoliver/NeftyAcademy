@@ -1,6 +1,9 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '잠금 객체 넷의 차이, unique_lock으로만 되는 일, 잠근 범위의 값, 자료와 잠금을 한 타입으로 묶기';
+export const terms = [
+  'lock_guard', 'unique_lock', 'scoped_lock', 'try_to_lock', 'defer_lock', 'adopt_lock',
+];
 
 뮤텍스의 `lock()`과 `unlock()`은 직접 부르지 않습니다. [잠금 객체](#/read/cpp-stl/conc-mutex)가 생성자에서 잠그고 소멸자에서 풉니다. 표준에는 그런 객체가 넷 있고, 고르는 기준은 "무엇을 더 할 수 있어야 하는가"입니다.
 

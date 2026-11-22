@@ -1,6 +1,9 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'SQL 주입과 매개변수 바인딩: 로그인 우회, UNION으로 빼내기, 문장 끼워 넣기, 허용 목록, LIKE';
+export const terms = [
+  'sqlite3_column_int', 'sqlite3_mprintf', 'PQescapeLiteral', 'mysql_real_escape_string',
+];
 
 **SQL 주입**(SQL injection)은 입력을 SQL 문자열에 이어 붙일 때, 입력이 데이터가 아니라 SQL의 일부로 해석되어 문장의 모양 자체가 바뀌는 보안 구멍입니다. 웹과 서버 프로그램에서 가장 오래되고 가장 흔한 구멍 가운데 하나이며, 로그인 우회, 데이터 유출, 데이터 삭제로 이어집니다. 원인은 하나이고 처방도 하나입니다. 값을 문자열로 이어 붙이지 말고 **묶는**(바인딩) 것입니다.
 

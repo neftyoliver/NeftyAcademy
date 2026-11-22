@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'QThread와 워커 객체: moveToThread로 작업 스레드에 보내기, 진행 알리기, 끝내고 정리하기, 취소';
+export const terms = ['QThread', '~thread', 'Q_ARG', 'QMetaObject::invokeMethod'];
 
 [「이벤트 루프」](#/read/cpp-qt/obj-eventloop)에서 슬롯이 오래 걸리면 창이 얼어붙는다고 했습니다. 해결책은 그 일을 다른 스레드로 보내는 것입니다. Qt에서 가장 권장되는 방법은 **워커 객체** 방식입니다. 일을 하는 평범한 QObject를 만들고, 그것을 `QThread`가 돌리는 스레드로 **옮긴** 뒤, 시그널과 슬롯으로만 대화합니다.
 

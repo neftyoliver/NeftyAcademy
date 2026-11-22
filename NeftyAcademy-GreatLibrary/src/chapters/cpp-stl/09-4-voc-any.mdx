@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '아무 타입이나 담는 상자, 꺼낼 때 타입을 정확히 맞춰야 한다는 것, 치르는 값, variant와 고르기';
+export const terms = ['std::any', '~any', 'any_cast', 'bad_any_cast'];
 
 `std::any`는 복사할 수 있는 **아무 타입의 값 하나**를 담습니다. [`variant`](#/read/cpp-stl/voc-variant)가 "적어 둔 후보 가운데 하나"라면 `any`는 후보를 적지 않습니다. 그만큼 자유롭고, 그만큼 컴파일러가 도와주지 못합니다. C의 `void*`가 하던 일을 타입 검사와 함께 하는 도구입니다.
 

@@ -1,6 +1,9 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'QVariant: 어떤 값이든 담는 상자, 타입 묻기와 안전하게 꺼내기, 사용자 정의 타입, 나무 모양 데이터';
+export const terms = [
+  'QVariant', 'QVariantList', 'QVariantMap', 'Q_DECLARE_METATYPE', 'QDate', 'QDateTime',
+];
 
 [「속성」](#/read/cpp-qt/obj-properties)의 `property("target")`은 `double`도 `QString`도 아닌 `QVariant`를 돌려주었습니다. 모델의 `data()`, 설정 파일의 값, QML과 주고받는 값도 모두 `QVariant`입니다. 이름으로 오가는 값은 컴파일할 때 타입을 알 수 없으니, **어떤 타입이든 담을 수 있는 상자**가 필요합니다. `QVariant`는 값과 그 값의 타입 정보를 함께 들고 다닙니다.
 

@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'moc가 하는 일: Q_OBJECT 클래스의 메타 객체 생성, 시그널 본체, 이름으로 부르기와 속성';
+export const terms = ['Q_OBJECT', 'QMetaObject', 'Q_INVOKABLE', 'QMetaMethod'];
 
 C++에는 실행 중에 "이 객체의 클래스 이름은? 어떤 메서드가 있지? 이름이 `warmer`인 메서드를 불러 줘" 같은 질문을 할 방법이 거의 없습니다. Qt는 이 빈틈을 **moc**(Meta-Object Compiler)로 채웁니다. moc는 `Q_OBJECT`가 붙은 클래스를 읽고, 그 클래스의 이름, 시그널, 슬롯, 속성 목록을 담은 **메타 객체**를 C++ 코드로 생성합니다. 시그널과 슬롯, QML 연결, 속성 애니메이션, 스크립트 연결이 모두 이 정보 위에서 돕니다.
 

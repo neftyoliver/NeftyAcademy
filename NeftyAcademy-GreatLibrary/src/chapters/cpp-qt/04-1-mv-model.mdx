@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '모델 인터페이스: 데이터와 화면 나누기, 행·열·역할로 값 내주기, 바뀜을 알리는 규칙, 모델 검사기';
+export const terms = [
+  'QAbstractItemModel', 'QModelIndex', 'QAbstractTableModel', 'QStandardItemModel',
+  'QStringListModel',
+];
 
 목록이나 표를 화면에 보여 줄 때, 데이터를 위젯 안에 직접 넣어 두면(`QTableWidget`에 칸마다 글을 넣는 식) 데이터가 바뀔 때마다 화면 칸을 찾아 고쳐야 하고, 같은 데이터를 두 곳에 보여 주면 두 벌을 맞춰야 합니다. Qt의 **모델/뷰**는 이것을 나눕니다. **모델**은 데이터를 갖고 "몇 행, 몇 열이고, 이 칸의 값은 이것"이라고 답만 하고, **뷰**는 모델에게 물어 화면을 그립니다. 데이터가 바뀌면 모델이 알리고, 붙어 있는 모든 뷰가 스스로 다시 그립니다.
 

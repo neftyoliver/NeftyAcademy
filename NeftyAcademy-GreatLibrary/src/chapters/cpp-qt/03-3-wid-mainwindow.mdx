@@ -2,6 +2,10 @@ import { Figure, Note } from 'neftyacademy-paragons-bookshelf';
 import { QtMock } from '../../components/QtMock';
 
 export const summary = '메인 윈도우: 가운데 위젯, 메뉴와 도구 모음이 함께 쓰는 QAction, 단축키, 상태줄, 도킹 창';
+export const terms = [
+  'QMainWindow', 'QAction', 'QKeySequence', 'QMenu', 'QMenuBar', 'QToolBar', 'QDockWidget',
+  'QStatusBar',
+];
 
 문서 편집기, IDE, 그림 도구 같은 데스크톱 앱은 거의 같은 모양입니다. 위에 메뉴와 도구 모음, 가운데 큰 작업 영역, 옆에 붙였다 뗄 수 있는 패널, 아래에 상태 표시줄입니다. `QMainWindow`는 이 틀을 미리 만들어 둔 위젯입니다. 우리는 칸마다 무엇을 넣을지만 정하면 됩니다.
 

@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '정렬된 트리, 넣는 다섯 가지 방법의 차이, 범위로 찾기, set, 무효화 규칙과 값';
+export const terms = ['std::map', '~map', 'std::set'];
 
 `std::map`은 **열쇠**(key)로 값을 찾는 컨테이너이고, `std::set`은 열쇠만 있는 `map`입니다. 둘 다 원소를 열쇠 순서로 정렬해 둔 트리여서, 찾기와 넣기와 지우기가 [O(log n)](#/read/cpp-stl/ov-complexity)이고 차례로 돌면 정렬된 순서로 나옵니다.
 

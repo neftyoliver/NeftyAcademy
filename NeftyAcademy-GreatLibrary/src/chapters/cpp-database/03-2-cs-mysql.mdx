@@ -1,6 +1,15 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'MySQL과 MariaDB: 두 데이터베이스의 관계, Connector/C와 MYSQL_BIND, utf8mb4, 엄격 모드, 재연결 함정';
+export const terms = [
+  'MYSQL', 'MYSQL_BIND', 'MYSQL_OPT_RECONNECT', 'MYSQL_RES', 'MYSQL_ROW',
+  'MYSQL_SET_CHARSET_NAME', 'MYSQL_STMT', 'MYSQL_TYPE_STRING', 'mysql_character_set_name',
+  'mysql_close', 'mysql_errno', 'mysql_error', 'mysql_fetch_row', 'mysql_free_result',
+  'mysql_get_server_info', 'mysql_init', 'mysql_options', 'mysql_query', 'mysql_real_connect',
+  'mysql_stmt_bind_param', 'mysql_stmt_close', 'mysql_stmt_errno', 'mysql_stmt_error',
+  'mysql_stmt_execute', 'mysql_stmt_init', 'mysql_stmt_insert_id', 'mysql_stmt_prepare',
+  'mysql_store_result', 'mysql_warning_count',
+];
 
 **MySQL**은 웹 서비스에서 가장 널리 쓰여 온 오픈 소스 데이터베이스 가운데 하나이고, 지금은 오라클이 개발합니다. **MariaDB**는 MySQL을 처음 만든 개발자들이 2009년에 갈라져 나와 만든 데이터베이스입니다. 프로토콜과 SQL이 대부분 같아서 같은 클라이언트 라이브러리로 둘 다 붙을 수 있지만, 판이 올라갈수록 기능과 기본값이 조금씩 달라지고 있습니다. 둘 다 보통 InnoDB 저장 엔진(트랜잭션, 행 잠금, 다중 판 동시성 제어)을 쓰고, 기본 격리 수준은 REPEATABLE READ입니다([「트랜잭션과 격리 수준」](#/read/cpp-database/db-transactions)).
 

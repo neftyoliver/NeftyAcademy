@@ -1,6 +1,11 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '커맨드 버퍼: 기록과 실행, 상태의 순환, 다시 내기, 풀과 스레드, 보조 커맨드 버퍼';
+export const terms = [
+  'VkCommandBufferAllocateInfo', 'VkCommandBufferBeginInfo', 'vkAllocateCommandBuffers',
+  'vkBeginCommandBuffer', 'vkEndCommandBuffer', 'VkCommandBufferInheritanceInfo',
+  'VkCommandBufferInheritanceRenderingInfo', 'vkCmdExecuteCommands', 'vkResetCommandPool',
+];
 
 `vkCmd`로 시작하는 함수는 GPU에 일을 시키지 않고 커맨드 버퍼에 적어 두기만 합니다. 실제 실행은 제출한 뒤에 일어나므로, 기록하는 시점과 실행하는 시점이 다릅니다. [「큐 패밀리」](#/read/cpp-vulkan/setup-queues)의 `vkx_cmd.hpp`가 감춰 둔 과정을 이 쪽에서 열어 봅니다. 커맨드 버퍼는 다음 상태를 돕니다.
 

@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '로캘: 날짜·숫자·통화 형식, 사용자 입력을 그 로캘로 읽기, 첫 요일과 글 방향, QCollator로 언어별 정렬';
+export const terms = ['QLocale', 'QCollator'];
 
 [「tr과 번역 파일」](#/read/cpp-qt/i18n-tr)은 글을 번역하지만, 국제화의 절반은 번역이 아닙니다. 같은 날짜, 같은 금액이라도 나라마다 쓰는 모양이 다르고, 주의 첫날과 글을 쓰는 방향과 사전의 순서도 다릅니다. `QLocale`은 이 관례들을 유니코드 CLDR 데이터에 따라 알려 줍니다.
 

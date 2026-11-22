@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '쓰기가 늦게 보이는 까닭, 순서 인자 넷의 약속, 넘겨주기와 세기, 기계마다 다른 값, x86이 숨기는 버그';
+export const terms = [
+  'memory_order', 'memory_order_relaxed', 'memory_order_acquire', 'memory_order_release',
+  'memory_order_seq_cst',
+];
 
 [원자적 연산](#/read/cpp-advanced/atm-atomic)마다 생략해 온 인자가 하나 있습니다. `store(v)`는 `store(v, std::memory_order_seq_cst)`입니다. 이 인자는 "이 연산이 **다른 연산들과 어떤 순서로** 보여야 하는가"를 정합니다. 기본값이 가장 강하고 가장 비쌉니다.
 

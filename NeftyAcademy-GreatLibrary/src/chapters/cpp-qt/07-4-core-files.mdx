@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '파일과 설정: QFile과 QTextStream, 안전한 저장 QSaveFile, QDir과 QFileInfo, QSettings, 표준 경로';
+export const terms = [
+  'QFile', 'QDir', 'QIODevice', 'QStandardPaths', 'QTemporaryDir', 'QSettings', 'QDataStream',
+  'QTextStream', 'QSaveFile', 'QFileInfo', 'QTemporaryFile',
+];
 
 앱은 문서를 저장하고, 창 크기와 최근 파일 목록을 기억하고, 캐시를 둘 곳이 필요합니다. Qt는 이것들을 플랫폼과 상관없는 하나의 API로 제공합니다. 파일 경로의 구분자, 인코딩, "설정은 어디에 두는가" 같은 플랫폼 차이를 Qt가 흡수합니다.
 

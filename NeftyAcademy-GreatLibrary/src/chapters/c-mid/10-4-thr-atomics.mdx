@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'stdatomic.h: 잠금 없이 세기, 비교 후 바꾸기, release·acquire로 건네기, CPU 명령';
+export const terms = [
+  'atomic_int', 'atomic_load', 'atomic_fetch_add', 'atomic_compare_exchange_weak', '~_Atomic',
+  'atomic_bool', 'atomic_load_explicit', 'atomic_store_explicit',
+];
 
 [「뮤텍스와 경쟁 상태」](#/read/c-mid/thr-mutex)에서 원자적 덧셈은 뮤텍스보다 몇 배 빨랐습니다(23~29ns 대 84~110ns). 원자적 연산은 CPU가 **끊기지 않는 한 덩어리로** 해 주는 읽기·고치기·쓰기입니다. 자물쇠 없이도 경쟁 상태가 생기지 않습니다. 이 쪽은 C11의 `stdatomic.h`로 원자적 연산 세 가지를 써 보고, 그것이 기계어로 어떻게 되는지 봅니다.
 

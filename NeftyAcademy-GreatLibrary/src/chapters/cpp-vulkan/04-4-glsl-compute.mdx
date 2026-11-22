@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '컴퓨트 셰이더: 워크그룹과 디스패치, 실행 번호, 공유 메모리와 barrier, 서브그룹, 원자 연산';
+export const terms = [
+  'VkComputePipelineCreateInfo', 'vkCmdDispatch', 'vkCreateComputePipelines', 'vkx::make_compute',
+  'gl_GlobalInvocationID', 'gl_LocalInvocationID', 'gl_SubgroupSize', 'gl_WorkGroupID',
+];
 
 컴퓨트 셰이더는 그림과 상관없이 GPU에 계산을 시킵니다. `vkCmdDispatch(x, y, z)`는 워크그룹을 x×y×z개 띄우고, 워크그룹 하나는 `local_size`로 정한 수만큼의 실행(invocation)으로 이루어집니다. 같은 워크그룹의 실행들은 공유 메모리를 함께 쓰고 `barrier()`로 서로를 기다릴 수 있지만, 다른 워크그룹과는 그럴 수 없습니다. 컴퓨트 파이프라인은 셰이더 하나뿐이라 만드는 도우미도 짧습니다.
 

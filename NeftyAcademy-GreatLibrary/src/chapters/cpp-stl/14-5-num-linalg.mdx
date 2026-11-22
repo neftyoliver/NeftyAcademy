@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '1차원 메모리를 여러 차원으로 보는 mdspan, 크기를 타입에 넣기, 행 우선과 열 우선, mdspan이 없을 때';
+export const terms = [
+  'mdspan', 'std::linalg', 'std::extents', 'std::dextents', 'std::layout_right',
+  'std::layout_left', 'std::submdspan', 'submdspan',
+];
 
 [「vector」](#/read/cpp-stl/seq-vector)에서 2차원 격자를 `vector` 하나에 담고 `y * width + x`로 칸을 찾았습니다. 그 곱셈과 덧셈을 대신해 주는 것이 C++23의 `std::mdspan`입니다. [`span`](#/read/cpp-stl/seq-span)이 "연속한 메모리의 한 구간"이라면 `mdspan`은 "그 구간을 몇 행 몇 열로 본 것"입니다. 메모리를 갖지 않고 보기만 합니다.
 

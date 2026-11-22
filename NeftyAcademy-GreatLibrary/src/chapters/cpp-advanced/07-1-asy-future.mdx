@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '둘이 나눠 쥐는 공유 상태와 그 값, 콜백 API를 future로 감싸기, 여럿이 기다리기, future가 못 하는 일';
+export const terms = ['std::promise', 'shared_future'];
 
 `std::async`로 일을 맡기고 `future`로 결과를 받는 법, `promise`로 값을 넣는 법은 [「future와 async」](#/read/cpp-stl/conc-future)에서 봤습니다. 여기서는 그 둘 사이에 있는 것을 들여다보고, `future`로 **할 수 있는 일의 끝**이 어디인지를 봅니다. 그 끝에서 [스레드 풀](#/read/cpp-advanced/asy-pool)과 [코루틴](#/read/cpp-advanced/co-task)이 시작합니다.
 

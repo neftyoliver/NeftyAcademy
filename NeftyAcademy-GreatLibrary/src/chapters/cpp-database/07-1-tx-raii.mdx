@@ -1,6 +1,9 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'RAII 트랜잭션: 소멸자가 되돌리는 Tx, 커밋은 명시적으로, 저장점으로 중첩, PostgreSQL의 중단 상태';
+export const terms = [
+  'ExecStatusType', 'pqxx::robusttransaction', 'pqxx::subtransaction', 'soci::transaction',
+];
 
 `BEGIN`과 `COMMIT`, `ROLLBACK`을 손으로 짝지으면, 함수가 중간에 돌아가거나 예외가 나는 길마다 `ROLLBACK`을 빠뜨리기 쉽습니다. 열린 채 남은 트랜잭션은 잠금을 쥔 채 풀로 돌아가 다음 사람에게까지 번집니다([「연결 풀」](#/read/cpp-database/pool-pool)). 파일이나 뮤텍스처럼 트랜잭션도 객체의 수명에 묶으면, 빠져나가는 길이 몇 개든 정리가 한 곳에서 일어납니다.
 

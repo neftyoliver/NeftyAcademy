@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '스레드 하나의 값, 상태와 소멸, 멈춤 신호의 세 조각, 막힌 호출 깨우기, 예외 나르기';
+export const terms = ['stop_token', 'stop_source', 'stop_callback'];
 
 스레드를 띄우고 `jthread`에게 `join`을 맡기는 데까지는 [STL 책의 맛보기](#/read/cpp-stl/conc-thread)에서 했습니다. 이 챕터부터 세 챕터는 그 너머입니다. 먼저 스레드 하나가 무엇이고 얼마짜리인지, 그리고 **자고 있는 스레드를 어떻게 깨워서 끝내는지**를 봅니다.
 

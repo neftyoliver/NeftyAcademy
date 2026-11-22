@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '부른 자리를 알려 주는 source_location, 매크로 없는 로그, 호출 경로를 붙잡는 stacktrace와 그 비용';
+export const terms = ['source_location', 'stacktrace', 'stacktrace_entry'];
 
 오류가 났을 때 가장 먼저 알고 싶은 것은 **어디서**입니다. C에서는 `__FILE__`과 `__LINE__` 매크로로 했습니다. C++20의 `std::source_location`이 그것을 보통의 값으로 만들었고, C++23의 `std::stacktrace`는 거기까지 온 호출 경로를 통째로 줍니다.
 

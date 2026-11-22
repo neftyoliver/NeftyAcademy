@@ -1,6 +1,9 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'new를 직접 쓰지 않는 까닭, 괄호 초기화의 함정, make_shared의 할당 한 번과 그 뒷면, for_overwrite';
+export const terms = [
+  'make_unique', 'make_shared', 'make_unique_for_overwrite', 'make_shared_for_overwrite',
+];
 
 스마트 포인터는 `new`로 얻은 포인터를 받아서도 만들 수 있지만, 지금까지의 예제는 모두 `std::make_unique`와 `std::make_shared`를 썼습니다. 그 까닭과, 두 함수가 안에서 하는 일을 봅니다.
 

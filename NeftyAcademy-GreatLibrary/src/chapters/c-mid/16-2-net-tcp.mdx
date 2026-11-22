@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'TCP: 연결, 순서와 재전송이 보장되는 바이트 흐름, 소켓 함수의 순서, 메시지 경계를 직접 만들기';
+export const terms = [
+  'socket()', 'bind()', 'listen()', 'accept()', 'connect()', 'send()', 'recv()', 'htonl()',
+  'ntohl()', 'poll()', 'sockaddr_in', 'getsockname()',
+];
 
 [「이더넷 프로토콜」](#/read/c-mid/net-ethernet)의 프레임은 깨지면 버려지고, IP 패킷은 순서가 바뀌거나 사라질 수 있습니다. **TCP**는 그 위에서 "보낸 바이트가 빠짐없이, 보낸 순서대로 도착한다"는 약속을 만들어 냅니다. 웹, 메일, SSH, 데이터베이스 연결이 모두 TCP 위에 있습니다. 이 쪽은 C의 소켓으로 서버와 클라이언트를 한 프로그램 안에 만들어 봅니다.
 

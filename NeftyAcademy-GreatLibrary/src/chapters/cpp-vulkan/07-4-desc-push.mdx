@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '푸시 상수: 커맨드 버퍼에 싣는 작은 값, 단계별 범위와 오프셋, 일부만 바꾸기, 128·256바이트 한도';
+export const terms = ['VkPushConstantRange', 'vkCmdPushConstants', 'vkGetBufferDeviceAddress'];
 
 **푸시 상수**는 버퍼도 디스크립터도 거치지 않고 커맨드 버퍼에 직접 실어 보내는 작은 값입니다. 파이프라인 레이아웃에 어느 단계가 어느 바이트를 읽는지 범위로 적어 두고 `vkCmdPushConstants`로 값을 넣으면, 그 뒤의 그리기가 그 값을 봅니다. 물체 번호처럼 그리기마다 바뀌는 값을 가장 싸게 넘기는 길입니다. 아래 프로그램은 세트 없이 푸시 상수만으로 사각형 넷을 그립니다.
 

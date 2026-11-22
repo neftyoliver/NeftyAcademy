@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'UDP: 연결 없이 덩어리째 보내는 데이터그램, 경계가 지켜지고 잘리는 모습, 언제 TCP 대신 쓰는가';
+export const terms = ['sendto()', 'recvfrom()'];
 
 **UDP**는 TCP와 같은 층에 있지만 약속이 거의 없습니다. 연결을 맺지 않고, 받았는지 확인하지 않고, 잃어버려도 다시 보내지 않습니다. 대신 보낸 덩어리(**데이터그램**)가 그 모양 그대로 도착하거나, 아예 오지 않습니다. [「TCP」](#/read/c-mid/net-tcp)와 견주며 봅니다.
 

@@ -1,6 +1,9 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '한 단계와 아래까지 훑는 두 반복자, directory_entry가 기억하는 것, 가지 건너뛰기, 도는 중의 오류';
+export const terms = [
+  'directory_iterator', 'recursive_directory_iterator', 'directory_entry', 'directory_options',
+];
 
 디렉터리 안을 훑는 도구는 반복자 둘입니다. `fs::directory_iterator`는 한 단계만, `fs::recursive_directory_iterator`는 아래까지 내려갑니다. 둘 다 [입력 반복자](#/read/cpp-stl/it-category)라서 한 번 지나가면 되돌아갈 수 없습니다.
 

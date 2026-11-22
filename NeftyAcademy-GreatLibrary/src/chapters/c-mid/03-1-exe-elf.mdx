@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '리눅스 실행 파일 형식 ELF 들여다보기: 헤더, 구역(.text, .data, .bss), 세그먼트, 필요한 라이브러리';
+export const terms = ['readelf', 'nm'];
 
 컴파일러가 만든 실행 파일은 기계어만 줄줄이 담은 덩어리가 아닙니다. OS가 그것을 메모리에 어떻게 올리고 어디서부터 실행할지, 어떤 라이브러리가 필요한지를 적은 **정해진 형식**의 파일입니다. 리눅스와 대부분의 유닉스 계열, 라즈베리파이, 안드로이드가 쓰는 형식이 ELF(Executable and Linkable Format)입니다. 이 쪽은 `readelf`, `nm`, `size`로 ELF 파일을 열어 봅니다. 윈도우의 [「PE」](#/read/c-mid/exe-pe)와 맥의 [「Mach-O」](#/read/c-mid/exe-macho)는 다음 쪽들에서 견줍니다.
 

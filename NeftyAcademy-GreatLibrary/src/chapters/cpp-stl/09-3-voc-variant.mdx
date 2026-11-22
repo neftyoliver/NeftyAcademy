@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '여럿 가운데 하나를 품는 타입, 무엇이 들었는지 묻기, visit과 overloaded, 상태 기계';
+export const terms = [
+  'std::variant', '~variant', 'std::visit', 'get_if', 'holds_alternative', 'monostate',
+  'bad_variant_access',
+];
 
 `std::variant<A, B, C>`는 "A이거나 B이거나 C인 값 하나"입니다. [「C++17」](#/read/cpp-syntax/ver-17)에서 가상 함수 없이 종류에 따라 다르게 동작하는 예를 보았습니다. C의 `union`과 꼬리표를 손으로 맞추던 일을 타입이 대신하고, **꼬리표와 내용이 어긋날 수 없게** 해 줍니다.
 

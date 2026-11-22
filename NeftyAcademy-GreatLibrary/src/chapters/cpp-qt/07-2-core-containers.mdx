@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '컨테이너와 암시적 공유: 복사는 공유하고 쓸 때 떼어 내기, 비const 반복의 함정, QMap과 QHash';
+export const terms = ['QList', 'QVector', 'QMap', 'QHash', 'QSet', 'QByteArray'];
 
 Qt에는 `QList`, `QMap`, `QHash`, `QSet` 같은 자체 컨테이너가 있습니다. STL과 하는 일은 비슷하지만 큰 차이가 하나 있습니다. **암시적 공유**(implicit sharing)입니다. 컨테이너를 복사하면 내용을 복사하지 않고 같은 데이터 블록을 함께 가리키다가, 누군가 **쓰려는 순간** 그쪽만 떼어 내 복사합니다(copy-on-write). `QString`, `QByteArray`, `QImage`, `QPixmap`도 같은 방식입니다.
 

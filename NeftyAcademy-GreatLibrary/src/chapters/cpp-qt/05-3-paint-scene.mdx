@@ -1,6 +1,9 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '그래픽스 뷰: 장면과 항목과 뷰, 항목 좌표와 장면 좌표, 충돌 확인, 많은 항목의 영역 질의, 확대한 뷰';
+export const terms = [
+  'QGraphicsScene', 'QGraphicsView', 'QGraphicsItem', 'QGraphicsRectItem', 'QGraphicsEllipseItem',
+];
 
 도면 편집기, 노드 그래프 편집기, 지도, 간단한 2D 게임처럼 움직이고 고를 수 있는 **물체가 수천 개** 있는 화면은 위젯 하나에 전부 그리면 관리가 힘듭니다. **그래픽스 뷰 프레임워크**는 물체 하나하나를 항목(`QGraphicsItem`)으로 두고, 항목들을 담는 장면(`QGraphicsScene`), 장면을 보는 창(`QGraphicsView`)으로 나눕니다. 고르기, 끌기, 충돌, 확대, 많은 항목 중 일부만 그리기가 이미 들어 있습니다.
 

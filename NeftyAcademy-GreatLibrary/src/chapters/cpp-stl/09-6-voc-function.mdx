@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '부를 수 있는 것을 담는 네 타입, 할당이 일어나는 크기, 가리키기만 하는 function_ref, bind_front';
+export const terms = [
+  'std::function', 'move_only_function', 'function_ref', 'std::invoke', 'std::bind', 'bind_front',
+  'bad_function_call', 'copyable_function',
+];
 
 [「std::function과 그 비용」](#/read/cpp-syntax/lam-function)에서 타입이 서로 다른 람다들을 `std::function` 한 타입에 담았고, 그 값으로 할당과 간접 호출을 치른다는 것을 보았습니다. C++23과 C++26이 이 자리에 타입을 셋 더 놓았습니다. 넷을 나란히 놓고, 언제 어느 것을 쓰는지 정리합니다.
 

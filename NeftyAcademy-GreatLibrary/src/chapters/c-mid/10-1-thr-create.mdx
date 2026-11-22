@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'threads.h로 스레드 만들고 기다리기: 구조체로 일과 결과 주고받기, 반복문 변수 주소의 함정';
+export const terms = [
+  'thrd_create', 'thrd_join', 'thrd_t', 'pthread_create', 'pthread_join', 'thrd_detach',
+  'thrd_sleep', 'thrd_current', 'thrd_yield', 'thrd_exit',
+];
 
 「컴퓨터의 입문」의 [「스레드의 개념」](#/read/basics/threads)에서 스레드가 무엇이고 왜 쓰는지를 봤습니다. 이 장은 C로 스레드 프로그램을 실제로 짭니다. C11부터 표준에 들어온 `threads.h`를 쓰므로 리눅스, 맥(Clang), 윈도우(MSVC 2022 17.8부터)에서 같은 코드가 돕니다. 리눅스와 맥에서 더 오래 쓰여 온 POSIX의 `pthread`와의 짝도 함께 적습니다.
 

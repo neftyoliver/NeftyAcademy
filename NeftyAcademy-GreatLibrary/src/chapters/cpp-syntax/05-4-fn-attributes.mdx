@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'nodiscard, maybe_unused, deprecated, fallthrough, 그리고 noexcept';
+export const terms = [
+  'nodiscard', 'maybe_unused', 'fallthrough', 'noreturn', 'no_unique_address', '~deprecated',
+  '~likely', '~unlikely', '~assume',
+];
 
 `[[…]]`는 컴파일러에게 건네는 쪽지입니다. 프로그램의 뜻은 바꾸지 않고, 경고를 더하거나 없애거나 최적화의 실마리를 줍니다. `noexcept`는 속성이 아니라 함수 타입의 일부지만 쓰임새가 닮아서 여기서 함께 소개합니다.
 

@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '끝을 반복자가 아닌 조건으로, 길이를 모르는 C 문자열 훑기, 개수로 끝내기, 옛 알고리즘과 맞추기';
+export const terms = ['default_sentinel', 'unreachable_sentinel', 'sentinel_for'];
 
 지금까지 구간은 반복자 **둘**이었습니다. 처음과 끝이고, 둘은 같은 타입이었습니다. 그런데 끝이 꼭 "자리"일 필요는 없습니다. "가리키는 글자가 `\0`이면 끝", "100개를 읽었으면 끝"처럼 **조건**이어도 됩니다. C++20의 레인지는 끝의 타입이 처음과 달라도 되게 했고, 그런 끝을 센티널이라고 부릅니다.
 

@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '깊이 버퍼: 깊이 시험과 비교 방법, 깊이 값이 몰리는 곳, 뒤집은 깊이, 깊이 포맷 고르기, 이른 깊이 시험';
+export const terms = [
+  'VkClearAttachment', 'VkClearRect', 'VkCompareOp', 'vkCmdClearAttachments',
+  'vkCmdSetDepthCompareOp', 'gl_FragDepth',
+];
 
 **깊이 버퍼**는 픽셀마다 지금까지 그려진 것 가운데 가장 가까운 깊이를 적어 두는 첨부물입니다. 새 프래그먼트의 깊이를 적힌 값과 비교해 더 가까울 때만 그리므로(깊이 시험), 물체를 어떤 순서로 그려도 가려지는 관계가 맞습니다. 벌칸의 깊이는 0에서 1 사이이고, 보통은 가까운 면을 0, 먼 면을 1에 두고 `LESS`로 비교합니다. 아래 프로그램은 일부가 겹치는 사각형 둘(N이 가깝고 F가 멂)을 네 가지 설정으로 그립니다. 가운데 겹친 3분의 1에 N이 보여야 맞는 그림입니다.
 

@@ -1,6 +1,11 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '풀: 세트 수와 종류별 디스크립터 수, 넘칠 때의 드라이버 차이, 풀째 비우기, 수명에 따라 풀 나누기';
+export const terms = [
+  'VkDescriptorPool', 'VkDescriptorPoolCreateInfo', 'VkDescriptorPoolSize',
+  'vkCreateDescriptorPool', 'vkDestroyDescriptorPool', 'vkCmdPushDescriptorSet',
+  'vkFreeDescriptorSets', 'vkResetDescriptorPool',
+];
 
 디스크립터 세트는 **디스크립터 풀**에서 받습니다. 풀을 만들 때 내줄 세트 수와 종류별 디스크립터 수를 정해 두면, 세트를 하나씩 만들고 지우는 대신 풀째로 비우거나 없앨 수 있습니다. 그래서 수명이 같은 세트를 한 풀에 모으는 것이 기본 전략입니다. 아래 프로그램은 작은 풀이 넘칠 때 무슨 일이 생기는지 보고, 한 프레임 쓰고 버리는 세트를 내주는 할당기를 만듭니다.
 

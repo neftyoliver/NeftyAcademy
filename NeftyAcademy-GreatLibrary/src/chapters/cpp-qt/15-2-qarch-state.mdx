@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '상태 관리: 상태를 한곳(스토어)에 모으기, 계산되는 상태, 되먹임 막기, QStateMachine으로 모드 다루기';
+export const terms = ['QStateMachine', 'QState'];
 
 앱이 커지면 버그의 상당수가 **상태가 어긋나서** 생깁니다. 저장하고 나서도 창 제목에 `*`가 남아 있거나, 연결이 끊겼는데 버튼은 여전히 "끊기"라고 적혀 있는 식입니다. 원인은 대개 같은 사실을 여러 위젯이 따로 들고 있다가 한쪽만 고치는 데 있습니다. 이 쪽에서는 두 가지 도구를 봅니다. 상태를 한곳에 모으는 **스토어**, 그리고 모드에 따라 동작이 달라질 때 쓰는 **상태 기계**입니다.
 

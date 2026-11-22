@@ -1,6 +1,9 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '조건 변수로 기다리고 깨우기: 일꾼들이 일을 꺼내 가는 줄, cnd_wait를 while 안에서 부르는 까닭';
+export const terms = [
+  'cnd_wait', 'cnd_signal', 'cnd_broadcast', 'cnd_t', 'cnd_init', 'pthread_cond_wait',
+];
 
 [「뮤텍스와 경쟁 상태」](#/read/c-mid/thr-mutex)의 뮤텍스는 "동시에 들어오지 마"를 지켜 줍니다. 그런데 스레드 프로그램에는 다른 종류의 약속도 필요합니다. "일이 생길 때까지 기다렸다가, 생기면 깨워 줘"입니다. 일꾼 스레드가 할 일이 없을 때 반복문을 돌며 줄을 계속 들여다보면 CPU를 헛되이 씁니다. **조건 변수**는 스레드를 재워 두었다가 조건이 바뀌면 깨우는 도구이고, 늘 뮤텍스와 짝으로 씁니다.
 

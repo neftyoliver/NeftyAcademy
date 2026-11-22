@@ -1,6 +1,9 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '동적 상태: 굳히는 상태와 그릴 때 정하는 상태, 1.3에 들어온 것, 지킬 규칙, 파이프라인 수 줄이기';
+export const terms = [
+  'VkFrontFace', 'vkCmdSetCullMode', 'vkCmdSetFrontFace', 'vkCmdSetPrimitiveTopology',
+];
 
 파이프라인은 상태를 굳혀 만든 객체라서, 뒷면을 버릴지 말지 하나만 달라도 파이프라인이 하나 더 필요합니다. 셰이더 조합에 이런 상태 조합이 곱해지면 파이프라인 수가 금방 불어납니다. **동적 상태**는 파이프라인을 만들 때 "이 상태는 굳히지 않는다"고 알려 두고, 그릴 때 커맨드 버퍼의 명령으로 정하는 상태입니다. [「깊이 버퍼」](#/read/cpp-vulkan/tex-depth)에서 깊이 비교를 그렇게 바꿨습니다. 아래 프로그램은 파이프라인 하나로 컬링, 앞면의 방향, 토폴로지를 바꿔 가며 다섯 줄을 그립니다.
 

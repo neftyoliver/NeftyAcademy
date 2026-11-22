@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'WebSocket: 양방향 연결, 메시지 경계가 지켜지는 글·이진 메시지, ping과 pong, 정리 순서';
+export const terms = ['QWebSocket', 'QWebSocketServer'];
 
 [「TCP와 UDP 소켓」](#/read/cpp-qt/qnet-sockets)의 TCP는 경계 없는 바이트 흐름이라 메시지 틀을 직접 만들어야 했습니다. **WebSocket**은 HTTP로 시작해 연결을 업그레이드한 뒤, 그 위에서 **메시지 단위로** 양쪽이 언제든 주고받는 프로토콜입니다. 웹 브라우저가 지원하므로 웹 화면과 Qt 앱, 또는 Qt 앱과 서버가 실시간으로 대화하는 데 잘 맞습니다. Qt WebSockets 모듈이 서버와 클라이언트를 모두 제공합니다.
 

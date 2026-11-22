@@ -1,6 +1,13 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '세트와 레이아웃: 바인딩의 종류·개수·단계, 세트 쓰기, 빈도로 세트 나누기, 파이프라인 레이아웃 호환';
+export const terms = [
+  'VkDescriptorBufferInfo', 'VkDescriptorSet', 'VkDescriptorSetAllocateInfo',
+  'VkDescriptorSetLayout', 'VkDescriptorSetLayoutBinding', 'VkDescriptorSetLayoutCreateInfo',
+  'VkDescriptorType', 'VkWriteDescriptorSet', 'vkAllocateDescriptorSets',
+  'vkCmdBindDescriptorSets', 'vkCreateDescriptorSetLayout', 'vkDestroyDescriptorSetLayout',
+  'vkUpdateDescriptorSets',
+];
 
 셰이더의 `layout(set = S, binding = B)` 자리에 실제 버퍼나 이미지를 이어 주는 것이 **디스크립터**입니다. 자리들의 모양을 적은 것이 **세트 레이아웃**, 그 모양대로 리소스를 끼운 것이 **디스크립터 세트**이고, 세트 레이아웃 여럿을 번호 순으로 묶은 것이 [「그래픽 파이프라인」](#/read/cpp-vulkan/tri-pipeline)에서 비워 두었던 파이프라인 레이아웃입니다. [「인터페이스 블록과 레이아웃」](#/read/cpp-vulkan/glsl-interface)의 도우미는 세트 하나만 다뤘는데, 여기서는 세트를 둘로 나눠 손으로 만듭니다. 아래 프로그램은 화면을 네 칸으로 나눠 단색 파이프라인과 줄무늬 파이프라인으로 번갈아 채웁니다.
 

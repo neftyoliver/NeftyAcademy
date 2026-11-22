@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'SQL Server: ODBC Driver 18과 기본 암호화, OUTPUT INSERTED, NVARCHAR와 UTF-16 바인딩, T-SQL의 사투리';
+export const terms = ['SQL_C_WCHAR', 'SQL_WVARCHAR'];
 
 **SQL Server**는 마이크로소프트의 데이터베이스입니다. 윈도에서 시작했지만 2017년판부터 리눅스에서도 돌고, 클라우드에서는 Azure SQL로 쓰며, 최신판은 2025년 11월에 나온 SQL Server 2025입니다. SQL의 사투리를 T-SQL이라고 부르고, 클라이언트와 서버는 TDS라는 프로토콜로 말합니다. C++에서는 윈도, 리눅스, macOS에서 모두 쓰는 **Microsoft ODBC Driver 18 for SQL Server**로 붙는 것이 가장 흔하고, 윈도에는 OLE DB 드라이버도 있습니다. 개발과 시험에는 무료인 Developer 판이나 공식 컨테이너 이미지를 씁니다([「컨테이너로 띄우기」](#/read/cpp-database/dbtest-container)).
 

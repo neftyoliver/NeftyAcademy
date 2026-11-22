@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '프레임 루프: 이미지 받기·기록·제출·내보내기, 겹쳐 그리는 프레임, 세마포어 둘, 스왑체인 다시 만들기';
+export const terms = ['VkPresentInfoKHR', 'vkQueuePresentKHR'];
 
 화면에 그리는 프로그램은 매 프레임 같은 일을 되풀이합니다. 스왑체인에서 이미지를 받고, 그 이미지에 그리는 명령을 기록해 내고, 다 그려지면 화면으로 내보냅니다. 이 쪽은 지금까지의 조각을 모아 그 고리를 만듭니다. CPU가 GPU를 매번 기다리지 않도록 프레임 두 개를 겹쳐 진행하고, 창 크기가 바뀌면 스왑체인을 다시 만듭니다.
 

@@ -1,6 +1,20 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '그래픽 파이프라인: shaderc로 SPIR-V 만들기, 셰이더 모듈, 고정 기능 상태, 동적 상태, 첫 삼각형';
+export const terms = [
+  'VkPipeline', 'VkPipelineLayout', 'VkCullModeFlags', 'VkDynamicState',
+  'VkGraphicsPipelineCreateInfo', 'VkPipelineDynamicStateCreateInfo',
+  'VkPipelineInputAssemblyStateCreateInfo', 'VkPipelineLayoutCreateInfo',
+  'VkPipelineMultisampleStateCreateInfo', 'VkPipelineRasterizationStateCreateInfo',
+  'VkPipelineRenderingCreateInfo', 'VkPipelineShaderStageCreateInfo',
+  'VkPipelineVertexInputStateCreateInfo', 'VkPipelineViewportStateCreateInfo',
+  'VkPrimitiveTopology', 'VkShaderModule', 'VkShaderModuleCreateInfo', 'VkViewport',
+  'vkCmdBindPipeline', 'vkCmdDraw', 'vkCmdSetScissor', 'vkCmdSetViewport',
+  'vkCreateGraphicsPipelines', 'vkCreatePipelineLayout', 'vkCreateShaderModule',
+  'vkDestroyPipeline', 'vkDestroyPipelineLayout', 'vkDestroyShaderModule', 'vkx::compile',
+  'vkx::make_pipeline', 'vkx::make_shader', 'shaderc_result_get_compilation_status',
+  'shaderc_result_get_error_message', 'shaderc_shader_kind', 'shaderc_vertex_shader',
+];
 
 그래픽 파이프라인은 정점이 픽셀이 되기까지 거치는 모든 단계의 설정을 한 객체로 굳힌 것입니다. 셰이더와 고정 기능 설정을 미리 정해 만들어 두므로, 그리는 순간에 셰이더를 다시 컴파일할 일이 없습니다. 아래 도우미는 GLSL을 SPIR-V로 번역하고, 이 책에서 쓸 설정으로 파이프라인을 만듭니다.
 

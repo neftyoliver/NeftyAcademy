@@ -1,6 +1,9 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '속성: Q_PROPERTY로 읽기·쓰기·알림을 묶기, MEMBER와 CONSTANT, 동적 속성, Qt 6의 QProperty 바인딩';
+export const terms = [
+  'Q_PROPERTY', 'QMetaProperty', 'qBound', 'QProperty', 'Q_OBJECT_BINDABLE_PROPERTY',
+];
 
 [「moc가 하는 일」](#/read/cpp-qt/obj-moc)에서 `property("target")`으로 이름만 가지고 값을 읽었습니다. 그렇게 할 수 있는 것은 `Q_PROPERTY`로 선언한 **속성**입니다. 속성은 "값 하나와 그 값을 읽는 함수, 쓰는 함수, 바뀌었을 때 내는 시그널"을 한 이름으로 묶은 것입니다. QML이 C++ 객체의 값을 화면에 묶고, 애니메이션이 값을 서서히 바꾸고, 편집기가 속성 창을 그리는 것이 모두 이 정보를 씁니다.
 

@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '바이트·코드 포인트·글자의 차이, UTF-8의 모양, 글자 단위로 세고 자르기, 한글 풀기, 문자 타입들';
+export const terms = ['char8_t', 'std::u8string', 'u8string', 'std::u32string'];
 
 [「string과 string_view」](#/read/cpp-syntax/ft-string)에서 `std::string("한글").size()`가 6이라는 것을 보았습니다. `std::string`은 글자가 아니라 **바이트**의 열입니다. 한글을 다루는 프로그램이라면 그 사이를 직접 메워야 합니다.
 

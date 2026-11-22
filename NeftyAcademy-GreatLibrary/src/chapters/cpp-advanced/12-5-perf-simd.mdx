@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '명령 하나로 원소 여럿을 계산한다. 컴파일러가 해 줄 때와 못 할 때, 손으로 쓰는 법, CPU마다 다른 폭';
+export const terms = ['std::simd', 'std::experimental::simd', 'native_simd'];
 
 레지스터 하나에 `float` 넷, 여덟, 열여섯을 나란히 담고 명령 하나로 한꺼번에 계산하는 것이 SIMD(single instruction, multiple data)입니다. [앞의](#/read/cpp-advanced/perf-branch) [두 페이지](#/read/cpp-advanced/perf-inline)에서 컴파일러가 루프를 이것으로 바꿔 놓은 것을 몇 번 지나쳤습니다. 언제 바꿔 주고, 언제 못 하며, 그때 무엇을 할 수 있는지 봅니다.
 

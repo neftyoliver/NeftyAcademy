@@ -1,6 +1,12 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '타입 변환과 NULL: SQLite의 형 친화도와 STRICT, 조용한 변환, 64비트의 끝, BLOB, PostgreSQL의 두 형식';
+export const terms = [
+  'SQLITE_BLOB', 'SQLITE_CONSTRAINT_DATATYPE', 'SQLITE_FLOAT', 'SQLITE_INTEGER', 'SQLITE_TEXT',
+  'sqlite3_bind_blob', 'sqlite3_bind_zeroblob', 'sqlite3_column_blob', 'PGRES_TUPLES_OK',
+  'PG_DIAG_MESSAGE_PRIMARY', 'PG_DIAG_SQLSTATE', 'PGconn', 'PQexec', 'PQfinish',
+  'PQresultErrorField', 'PQresultStatus', 'PQgetlength', 'PQnfields',
+];
 
 DB의 값은 C++ 변수로 건너오면서 한 번 변환됩니다. 그 규칙은 데이터베이스마다 다르고, 정보를 잃어도 대개 말이 없습니다. NULL은 값과 다른 길로 알려 주므로 그 길을 따로 확인해야 합니다.
 

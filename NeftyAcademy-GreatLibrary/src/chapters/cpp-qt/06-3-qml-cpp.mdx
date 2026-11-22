@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'C++ 타입을 QML에 내놓기: 속성·메서드·시그널, 타입 등록과 싱글턴, 역할 이름 모델, QML_ELEMENT';
+export const terms = ['QQmlEngine', 'QML_ELEMENT', 'qmlRegisterType', 'QML_SINGLETON'];
 
 QML은 화면을 그리는 데 뛰어나지만, 파일을 읽고, 장치와 통신하고, 무거운 계산을 하는 일은 C++가 맡는 것이 좋습니다. 둘을 잇는 방법은 하나입니다. C++ 클래스를 QObject로 만들어 속성, 호출 가능 메서드, 시그널을 메타 객체에 올리고([「moc가 하는 일」](#/read/cpp-qt/obj-moc)), 그 타입이나 객체를 QML 엔진에 알려 주는 것입니다. 그러면 QML은 그것을 자기 타입처럼 씁니다.
 

@@ -1,6 +1,11 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '메모리와 객체를 따로 다루는 함수들, construct_at과 destroy, 고정 용량 벡터를 직접 만들어 보기';
+export const terms = [
+  'construct_at', 'destroy_at', 'uninitialized_copy', 'uninitialized_fill', 'uninitialized_move',
+  'uninitialized_default_construct', 'uninitialized_value_construct', 'std::destroy', 'destroy_n',
+  'uninitialized_copy_n',
+];
 
 [「new, delete, placement new」](#/read/cpp-syntax/life-new)에서 "메모리를 얻는 일"과 "객체를 만드는 일"이 따로라는 것을 봤습니다. `vector`의 `reserve`가 얻어 둔 자리처럼 **메모리는 있는데 객체는 아직 없는** 곳을 다루는 함수들이 `<memory>`에 있습니다. 컨테이너를 만드는 쪽에서 쓰는 도구입니다.
 

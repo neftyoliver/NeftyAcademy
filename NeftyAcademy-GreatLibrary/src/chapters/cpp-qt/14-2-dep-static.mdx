@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '정적 빌드: Qt를 실행 파일 하나에 넣기, 정적 플러그인과 Q_IMPORT_PLUGIN, 장단점, LGPL과의 관계';
+export const terms = ['Q_IMPORT_PLUGIN', 'QtPlugin', 'qt_import_plugins'];
 
 [「데스크톱 배포 도구」](#/read/cpp-qt/dep-desktop)는 앱 옆에 Qt 라이브러리와 플러그인 폴더를 함께 놓는 방식이었습니다. 다른 길은 **정적 빌드**입니다. Qt 자체를 정적 라이브러리로 빌드하고 앱에 링크해, 실행 파일 **하나**에 모든 것을 넣습니다. 복사 한 번으로 배포가 끝나고, 시작할 때 라이브러리를 찾느라 쓰는 시간도 줄어듭니다.
 

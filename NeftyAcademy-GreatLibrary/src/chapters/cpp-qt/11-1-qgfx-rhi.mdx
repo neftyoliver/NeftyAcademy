@@ -1,6 +1,9 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'RHI: Vulkan·Metal·Direct3D·OpenGL을 감싸는 Qt의 그래픽 층, 오프스크린 프레임, qsb 셰이더';
+export const terms = [
+  'QRhi', 'QRhiCommandBuffer', 'QRhiBuffer', 'QRhiGraphicsPipeline', 'QRhiTexture',
+];
 
 Qt 6의 Qt Quick은 OpenGL에 묶여 있던 Qt 5와 달리, 플랫폼에 맞는 그래픽 API를 골라 씁니다. Windows에서는 Direct3D, macOS와 iOS에서는 Metal, 리눅스와 안드로이드에서는 Vulkan이나 OpenGL입니다. 이것을 가능하게 하는 것이 **RHI**(Rendering Hardware Interface)입니다. [「그래픽 API 감싸기」](#/read/cpp-game-engine/rend-abstraction)에서 게임 엔진이 하는 일을 Qt가 직접 한 것입니다.
 

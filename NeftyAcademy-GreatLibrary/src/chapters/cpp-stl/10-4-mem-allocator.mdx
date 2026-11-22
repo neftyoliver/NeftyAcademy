@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '스택 버퍼에서 할당받는 컨테이너, 자원을 쌓아 쓰기, 속의 문자열까지 전해지는 자원, 수명 실수';
+export const terms = ['std::allocator'];
 
 [「할당자가 끼어드는 자리」](#/read/cpp-stl/ov-allocator)에서 컨테이너가 메모리를 할당자에게서 받는다는 것과, 그 출처를 바꾸는 길 셋을 봤습니다. 그 가운데 `std::pmr`(`<memory_resource>`)을 실제로 써 봅니다. 자원의 종류는 [「new, delete, placement new」](#/read/cpp-syntax/life-new)에서 한 번 만났습니다.
 

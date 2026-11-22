@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '직렬 포트: QSerialPort로 장치와 대화하기, 속도와 8N1 설정, 줄 단위로 모아 읽기, 포트 목록';
+export const terms = ['QSerialPort', 'QSerialPortInfo', 'QSocketNotifier'];
 
 아두이노, 측정 장비, 산업용 컨트롤러, GPS 수신기 같은 많은 장치가 아직도 **직렬 포트**(UART, RS-232, USB 가상 COM 포트)로 이야기합니다. Qt Serial Port 모듈의 `QSerialPort`는 이것을 [「TCP와 UDP 소켓」](#/read/cpp-qt/qnet-sockets)의 소켓과 같은 방식으로 다루게 해 줍니다. 열고, 쓰고, `readyRead` 시그널이 오면 읽습니다. Windows의 `COM3`이든 Linux의 `/dev/ttyUSB0`이든 코드는 같습니다.
 

@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'tr과 번역 파일: tr로 감싸기, %n 복수형과 %1 자리, lupdate·Linguist·lrelease, QTranslator';
+export const terms = [
+  'tr()', 'QTranslator', 'lupdate', 'lrelease', 'qsTr', 'QCoreApplication::translate',
+  'qt_add_translations',
+];
 
 앱을 여러 언어로 내려면, 화면에 보이는 글을 코드에 박아 두지 않고 **번역 가능**하게 만들어야 합니다. Qt의 방식은 이렇습니다. 원문(보통 영어)을 `tr()`로 감싸 두면, 도구가 그 글들을 뽑아 번역 파일을 만들고, 번역가가 채운 파일을 앱이 실행 중에 불러와 `tr()`이 번역을 돌려주게 합니다.
 

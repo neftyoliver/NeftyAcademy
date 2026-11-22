@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'GPIO 핀의 0과 1, 풀업과 active-low, 리눅스 문자 장치와 libgpiod v2로 LED 깜빡이고 버튼 읽기';
+export const terms = [
+  'gpiod', 'gpiod_chip_open', 'gpiod_line_request', 'gpiod_line_request_set_value',
+  'gpiod_line_request_get_value',
+];
 
 **GPIO**(General-Purpose Input/Output)는 이름 그대로 정해진 쓰임이 없는 핀입니다. 프로그램이 출력으로 정하면 전압을 올리거나 내리고, 입력으로 정하면 바깥 전압이 높은지 낮은지 읽습니다. 「컴퓨터의 입문」의 [「마이크로컨트롤러와 라즈베리파이」](#/read/basics/modern-mcu-sbc)에서 본 라즈베리파이의 40핀 머리가 대부분 이것입니다. 이 쪽은 리눅스에서 C로 GPIO를 다루는 지금의 방법을 봅니다.
 

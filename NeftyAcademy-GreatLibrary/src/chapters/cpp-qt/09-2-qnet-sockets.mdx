@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'TCP와 UDP 소켓: QTcpServer와 QTcpSocket, 메시지 경계와 거래 읽기, QUdpSocket 데이터그램';
+export const terms = ['QTcpSocket', 'QTcpServer', 'QUdpSocket', 'QHostAddress', 'QNetworkDatagram'];
 
 HTTP 위의 API가 아니라 장치나 게임 서버와 직접 이야기해야 할 때는 소켓을 씁니다. Qt의 소켓도 [「HTTP 요청」](#/read/cpp-qt/qnet-http)처럼 막히지 않습니다. 연결되면 `connected`, 데이터가 오면 `readyRead` 시그널이 오고, 우리는 그때 와 있는 만큼 읽습니다. 이 "와 있는 만큼"이 TCP 소켓 프로그래밍의 핵심 문제입니다.
 

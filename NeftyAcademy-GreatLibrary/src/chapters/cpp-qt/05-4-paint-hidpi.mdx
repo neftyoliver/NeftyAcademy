@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '고해상도 화면: 논리 화소와 물리 화소, devicePixelRatio, 선명한 이미지 만들기, 소수 배율과 아이콘';
+export const terms = ['QPixmap', 'QGuiApplication', 'QIcon'];
 
 요즘 노트북과 휴대폰 화면은 1인치에 화소가 아주 많아서, 운영체제가 모든 것을 150%, 200%로 키워 보여 줍니다. 그대로 100×50 화소짜리 버튼을 그리면 손톱만 하게 보일 것입니다. Qt 6은 이것을 기본으로 처리합니다. 코드에서 쓰는 크기와 좌표는 모두 **논리 화소**이고, Qt가 화면의 배율(**devicePixelRatio**)만큼 곱해 실제 **물리 화소**로 그립니다.
 

@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'SPIR-V 모듈의 구조: 머리말 다섯 낱말, 명령의 꼴, 정해진 칸의 순서, SSA 번호, 장식, 구조적 제어 흐름';
+export const terms = ['spvtools::Optimizer', 'spvtools::SpirvTools'];
 
 SPIR-V 모듈은 32비트 낱말의 배열입니다. 앞의 다섯 낱말이 머리말이고, 그 뒤로 명령이 이어집니다. 명령의 첫 낱말은 위 16비트가 이 명령의 낱말 수, 아래 16비트가 명령 번호(opcode)이고, 나머지 낱말이 피연산자입니다. 그래서 드라이버는 낱말 수만큼 건너뛰며 모듈 전체를 훑을 수 있습니다. 아래 프로그램은 콜라츠 한 걸음을 하는 컴퓨트 셰이더를 번역·최적화한 뒤, 머리말을 직접 읽고 명령마다 어느 칸에 속하는지 붙여 찍습니다.
 

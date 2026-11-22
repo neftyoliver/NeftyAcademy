@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '처음 쓸 때 한 번만 만들기, 컴파일러가 넣어 주는 확인, call_once, 방법마다의 값, 사라지는 순서';
+export const terms = ['call_once', 'once_flag'];
 
 "처음 필요할 때, **한 번만**" 만들고 싶은 것이 있습니다. 읽는 데 오래 걸리는 표, 연결, 로그 파일입니다. 스레드가 하나일 때는 `if (!ready) { 만들기; ready = true; }`면 되지만, 둘이 동시에 오면 둘 다 만듭니다. C++에는 이것을 맞게 해 주는 도구가 둘 있고, 하나는 이미 쓰고 있었습니다.
 

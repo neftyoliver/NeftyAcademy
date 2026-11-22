@@ -1,6 +1,9 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '스레드를 만들고 기다리기, join을 잊으면 생기는 일과 jthread, 복사되는 인자, stop_token, 경합';
+export const terms = [
+  'std::thread', '~thread', 'jthread', 'std::this_thread', 'this_thread::sleep_for',
+];
 
 [「실행 정책」](#/read/cpp-stl/alg-parallel)에서는 라이브러리가 스레드를 대신 굴렸습니다. 여기서는 스레드를 직접 만듭니다. 이 챕터는 맛보기입니다. 스레드 하나를 띄우고, 함께 쓰는 자료를 지키고, 결과를 받아 오는 데까지만 다루고, 그 너머는 [C++ 고급](#/read/cpp-advanced/thr-jthread)에서 봅니다.
 

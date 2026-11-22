@@ -1,6 +1,13 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '소유하지 않고 게으른 레인지, 뷰가 일하는 때, 자주 쓰는 뷰들, 글자열 토막 내기';
+export const terms = [
+  'std::views', 'views::filter', 'views::transform', 'views::take', 'views::drop', 'views::iota',
+  'views::zip', 'views::enumerate', 'views::reverse', 'views::split', 'views::chunk',
+  'views::slide', 'views::keys', 'views::values', 'views::take_while', 'views::drop_while',
+  'views::elements', 'views::stride', 'views::adjacent', 'views::repeat', 'ranges::view',
+  'ranges::views',
+];
 
 **뷰**(view)는 다른 레인지를 **가리키기만** 하는 가벼운 레인지입니다. 원소를 복사해 들고 있지 않고, "저 레인지를 이렇게 보겠다"는 방법만 들고 있습니다. `std::string_view`와 `std::span`이 뷰이고, `<ranges>`의 `std::views::` 아래에 걸러 보기, 바꿔 보기, 잘라 보기 같은 뷰가 서른 개쯤 있습니다.
 

@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '연결 풀: 연결의 값, 빌리고 돌려주는 RAII 핸들, 돌려받을 때 정리, 기다림의 끝, 풀 크기와 PgBouncer';
+export const terms = [
+  'CONNECTION_OK', 'PQTRANS_IDLE', 'PQerrorMessage', 'PQstatus', 'PQtransactionStatus',
+  'soci::connection_pool',
+];
 
 연결을 맺는 일은 쿼리 하나보다 훨씬 비쌉니다. TCP 연결, TLS 핸드셰이크, 인증을 거쳐야 하고, PostgreSQL은 연결마다 서버 프로세스를 하나씩 띄웁니다. 이 책의 검사 기계에서 localhost TCP로 연결해 `SELECT 1` 하나를 하고 끊는 데 약 7ms가 걸렸고, 이미 맺어 둔 연결의 `SELECT 1`은 약 0.05ms였습니다. **연결 풀**은 연결 몇 개를 열어 둔 채 일이 있는 스레드에게 빌려 주고 돌려받습니다.
 

@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'SQLite 트랜잭션: 자동 커밋의 비용, 저널 방식과 동기화 수준, DEFERRED의 교착과 IMMEDIATE, 저장점';
+export const terms = ['sqlite3_busy_timeout'];
 
 SQLite에서 `BEGIN` 없이 실행한 문장은 하나하나가 따로 트랜잭션입니다(자동 커밋). 그리고 커밋은 비쌉니다. 커밋이 끝났다고 말하려면 전원이 꺼져도 남도록 저널과 데이터베이스 파일을 디스크에 확실히 써야(`fsync`) 하기 때문입니다.
 

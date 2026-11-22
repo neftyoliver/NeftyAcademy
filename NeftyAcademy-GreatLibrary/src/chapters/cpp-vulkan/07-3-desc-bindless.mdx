@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '바인드리스: 텍스처 전부를 세트 하나의 표에, 길이가 바뀌는 바인딩, 붙인 뒤 고치기, nonuniformEXT';
+export const terms = [
+  'VkDescriptorBindingFlags', 'VkDescriptorSetLayoutBindingFlagsCreateInfo',
+  'VkDescriptorSetVariableDescriptorCountAllocateInfo', 'VkImageSubresourceRange',
+];
 
 재질마다 세트를 만들면 텍스처가 바뀔 때마다 세트를 바꿔 붙여야 하고, 여러 물체를 그리기 한 번으로 묶기도 어렵습니다. **바인드리스**는 텍스처를 모두 세트 하나의 큰 배열에 넣어 두고, 셰이더가 물체 데이터에 적힌 번호로 골라 쓰는 방식입니다. 1.2에서 코어가 된 디스크립터 인덱싱 기능들이 이를 받칩니다. 아래 프로그램은 텍스처 아홉 장을 표에 넣고 물체 열둘을 그리기 한 번으로 그립니다.
 

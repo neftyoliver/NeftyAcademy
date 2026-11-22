@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'ROS 2: 노드와 토픽, 서비스, 액션, rclcpp로 쓴 노드, QoS 맞추기와 늦게 온 구독자, 공장에서 쓸 때';
+export const terms = [
+  'rclcpp::Node', 'rclcpp::Publisher', 'rclcpp::QoS', 'rclcpp::SensorDataQoS',
+  'rclcpp::Subscription', 'rclcpp::init', 'rclcpp::shutdown', 'rclcpp::spin',
+];
 
 **ROS 2**(Robot Operating System 2)는 이름과 달리 운영 체제가 아니라, 로봇 소프트웨어를 여러 프로그램(노드)으로 나누어 서로 이어 주는 미들웨어와 도구, 라이브러리의 묶음입니다. 연구실에서 시작했지만 지금은 이동 로봇과 로봇 팔의 연구와 제품에 널리 쓰이고, 성능이 필요한 노드는 C++ API인 rclcpp로 씁니다. 배포판은 해마다 5월에 나오고 짝수 해의 판이 5년 지원판(LTS)입니다. 2026년 5월에 나온 Lyrical Luth는 2031년 5월까지, Jazzy Jalisco는 2029년 5월까지, Humble Hawksbill은 2027년 5월까지 지원됩니다.
 

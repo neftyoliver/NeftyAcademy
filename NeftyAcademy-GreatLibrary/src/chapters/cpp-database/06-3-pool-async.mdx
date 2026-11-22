@@ -1,6 +1,13 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '비동기 쿼리: 보내 놓고 나중에 받기, 소켓을 poll로, 파이프라인과 동기화 지점, 쿼리 취소';
+export const terms = [
+  'PGRES_FATAL_ERROR', 'PGRES_PIPELINE_ABORTED', 'PGRES_PIPELINE_SYNC', 'PGRES_SINGLE_TUPLE',
+  'PGcancel', 'PQcancel', 'PQcancelBlocking', 'PQcancelCreate', 'PQcancelStart', 'PQconsumeInput',
+  'PQenterPipelineMode', 'PQexitPipelineMode', 'PQfreeCancel', 'PQgetCancel', 'PQgetResult',
+  'PQisBusy', 'PQpipelineSync', 'PQresStatus', 'PQsendQuery', 'PQsendQueryParams',
+  'PQsetChunkedRowsMode', 'PQsetSingleRowMode', 'PQsocket',
+];
 
 `PQexec`는 결과가 다 올 때까지 부른 스레드를 붙잡아 둡니다. 요청을 많이 받는 서버나 화면을 그리는 스레드는 그렇게 멈출 수 없습니다. libpq에는 쿼리를 보내 놓고 바로 돌아온 뒤, 결과가 오면 그때 거두는 비동기 API가 있습니다. 연결의 소켓을 `poll`이나 epoll, Asio, Qt 같은 이벤트 루프에 맡겨 지켜보면 됩니다.
 

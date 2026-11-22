@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'assert가 못 하던 것과 C++26 초안의 계약. 네 가지 평가 방식을 흉내 내어 잰 값, 무엇을 두고 다투는가';
+export const terms = ['contract_assert', '~pre', '~post'];
 
 [「인터페이스 설계」](#/read/cpp-advanced/des-interface)와 [「오류 전달 전략」](#/read/cpp-advanced/des-errors)에서 타입으로 못 막는 조건은 `assert`로 확인하고, 어긴 것은 버그이므로 멈춘다고 했습니다. 계약은 그 `assert`를 언어의 일부로 올린 것입니다. `assert`의 한계부터 봅니다.
 

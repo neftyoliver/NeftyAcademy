@@ -1,6 +1,12 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '한 번만 듣는 setw와 계속 남는 나머지, 서식 상태 되돌리기, 입력 쪽 조작자, format과 견주기';
+export const terms = [
+  'std::setw', 'std::setprecision', 'std::fixed', 'std::hex', 'std::boolalpha', 'std::setfill',
+  'std::scientific', 'std::left', 'std::right', 'std::showbase', 'std::uppercase', 'std::dec',
+  'std::oct', 'std::quoted', 'std::showpos', 'std::internal', 'std::noshowbase',
+  'std::defaultfloat', 'std::put_time', 'std::get_time',
+];
 
 스트림은 "지금 몇 진법으로, 몇 자리로, 어느 쪽에 맞춰 찍는가"를 [자기 안에 상태로](#/read/cpp-stl/io-streams) 가지고 있습니다. `<<`로 흘려 넣어 그 상태를 바꾸는 것이 **조작자**(manipulator)입니다. `std::hex`처럼 인자가 없는 것은 `<ios>`에, `std::setw(8)`처럼 인자가 있는 것은 `<iomanip>`에 있습니다.
 

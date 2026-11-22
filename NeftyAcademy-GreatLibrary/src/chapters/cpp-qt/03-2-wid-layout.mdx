@@ -2,6 +2,7 @@ import { Figure, Note } from 'neftyacademy-paragons-bookshelf';
 import { QtMock } from '../../components/QtMock';
 
 export const summary = '레이아웃: 가로·세로·격자 레이아웃 겹치기, 늘어나는 몫과 빈 공간, 여백과 간격, 크기 정책';
+export const terms = ['QVBoxLayout', 'QHBoxLayout', 'QGridLayout', 'QSizePolicy', 'QSize'];
 
 위젯의 위치를 `setGeometry(10, 42, 294, 192)`처럼 좌표로 정하면, 창 크기가 바뀌거나 글꼴이 커지거나 번역된 글이 길어질 때마다 화면이 깨집니다. Qt에서는 위치를 정하지 않고 **레이아웃**에게 "이것들을 가로로, 이것은 남는 만큼 늘려서"라고 배치 규칙만 알려 줍니다. 실제 좌표는 레이아웃이 창 크기에 맞춰 매번 계산합니다.
 

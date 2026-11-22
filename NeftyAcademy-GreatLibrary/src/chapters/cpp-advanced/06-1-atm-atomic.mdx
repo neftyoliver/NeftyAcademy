@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '쪼개지지 않는 연산의 목록, 기계의 명령과 값, 원자적이 되는 타입, 원자적이어도 틀리는 코드';
+export const terms = ['std::atomic', '~atomic', 'atomic_flag', 'atomic_ref', 'is_always_lock_free'];
 
 수 하나를 여러 스레드가 고칠 때는 [뮤텍스 대신 `std::atomic`](#/read/cpp-stl/conc-mutex)을 쓴다고 했습니다. [뮤텍스 자체도](#/read/cpp-advanced/sync-mutex) 이것으로 만들어집니다. 이 챕터는 그 바닥입니다. 먼저 `std::atomic`이 약속하는 것과 약속하지 않는 것을 가릅니다.
 

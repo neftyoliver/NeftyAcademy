@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'system_clock과 steady_clock을 가르는 기준, 시계가 뛸 때 생기는 일, 눈금과 호출 비용, 그 밖의 시계';
+export const terms = [
+  'steady_clock', 'system_clock', 'high_resolution_clock', 'utc_clock', 'file_clock', 'tai_clock',
+  'gps_clock', 'clock_cast',
+];
 
 [시각](#/read/cpp-stl/chr-duration)은 언제나 어떤 **시계**의 것입니다. 시계는 `now()` 하나를 가진 타입이고, 어느 시계를 고르느냐에 따라 코드가 맞기도 하고 가끔 틀리기도 합니다.
 

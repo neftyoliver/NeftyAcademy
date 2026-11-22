@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '나갈 때 할 일을 그 자리에 적는 가드, 되돌리기와 release, 실패했을 때만 도는 가드, 표준의 후보';
+export const terms = ['scope_exit', 'unique_resource', 'scope_fail', 'scope_success'];
 
 [래퍼 클래스](#/read/cpp-advanced/res-wrapper)는 같은 자원을 여러 곳에서 쥘 때 값을 합니다. 한 함수에서 한 번만 하는 정리(값을 되돌려 놓기, 임시 파일 지우기, 방금 넣은 것 도로 빼기)에 클래스를 하나씩 만들 수는 없습니다. 그럴 때 <strong>"이 범위를 나갈 때 이것을 하라"</strong>를 그 자리에 적는 것이 스코프 가드입니다.
 

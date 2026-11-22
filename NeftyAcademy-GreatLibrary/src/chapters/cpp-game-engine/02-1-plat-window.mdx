@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '창과 입력: 운영체제 이벤트를 엔진의 모양으로, 누름·꾹·뗌, 행동 배치, SDL3 이벤트 루프';
+export const terms = [
+  'SDL_CreateWindow', 'SDL_DestroyWindow', 'SDL_Event', 'SDL_GetError', 'SDL_Init', 'SDL_Log',
+  'SDL_PollEvent', 'SDL_Quit', 'SDL_Scancode', 'SDL_Window',
+];
 
 [「층으로 나눈 구조」](#/read/cpp-game-engine/arch-layers)의 맨 아래 플랫폼 층에서 가장 먼저 만드는 것이 창과 입력입니다. 윈도의 메시지, 리눅스의 Wayland·X11, macOS의 Cocoa는 모두 모양이 다르지만, 엔진의 나머지 부분은 "키가 눌렸다", "창 크기가 바뀌었다"만 알면 됩니다. 이 쪽은 그 변환을 어떻게 짜는지 봅니다.
 

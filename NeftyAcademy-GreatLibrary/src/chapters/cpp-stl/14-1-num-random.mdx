@@ -1,6 +1,11 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '엔진과 분포의 두 조각, %로 범위를 줄이면 안 되는 까닭, 씨앗 주는 법, 섞기와 뽑기, 재현성과 비용';
+export const terms = [
+  'mt19937', 'mt19937_64', 'random_device', 'uniform_int_distribution',
+  'uniform_real_distribution', 'normal_distribution', 'bernoulli_distribution',
+  'discrete_distribution', 'minstd_rand', 'exponential_distribution',
+];
 
 `<random>`은 난수를 두 조각으로 나눕니다. **엔진**이 무작위 비트를 만들고, **분포**가 그 비트를 원하는 범위와 모양의 수로 바꿉니다. `rand() % 6`으로 하던 일을 두 줄로 쓰게 되지만, 그 대가로 치우침이 없고 다시 돌릴 수 있는 난수를 얻습니다.
 

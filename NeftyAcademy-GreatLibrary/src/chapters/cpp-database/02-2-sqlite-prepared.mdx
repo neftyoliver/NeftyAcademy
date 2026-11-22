@@ -1,6 +1,16 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '준비된 문장: 준비, 묶기, 실행, 되돌리기, 정리의 일생, 이름 붙은 매개변수, 다시 준비, 수명 함정';
+export const terms = [
+  'sqlite3_close', 'sqlite3_open', 'SQLITE_ROW', 'sqlite3_column_text', 'sqlite3_finalize',
+  'sqlite3_prepare_v2', 'sqlite3_step', 'sqlite3_stmt_status', 'SQLITE_BUSY', 'SQLITE_DONE',
+  'SQLITE_NULL', 'SQLITE_PREPARE_PERSISTENT', 'SQLITE_SCHEMA', 'SQLITE_STATIC',
+  'SQLITE_STMTSTATUS_REPREPARE', 'SQLITE_TRANSIENT', 'sqlite3_bind_', 'sqlite3_bind_int',
+  'sqlite3_bind_int64', 'sqlite3_bind_null', 'sqlite3_bind_parameter_index', 'sqlite3_bind_text',
+  'sqlite3_clear_bindings', 'sqlite3_column_', 'sqlite3_column_bytes', 'sqlite3_column_int64',
+  'sqlite3_column_type', 'sqlite3_expanded_sql', 'sqlite3_prepare', 'sqlite3_prepare_v3',
+  'sqlite3_reset',
+];
 
 SQLite는 SQL 문장을 받으면 해석해서 내부 가상 기계가 실행할 작은 프로그램(바이트코드)으로 컴파일합니다. **준비된 문장**은 이렇게 컴파일해 둔 문장입니다. 값이 들어갈 자리는 `?` 같은 자리 표시자로 비워 두고, 실행할 때마다 값만 묶어(바인딩) 넣습니다. 해석을 한 번만 하니 빠르고, 값은 SQL로 해석되지 않으니 안전하며([「SQL 주입과 매개변수 바인딩」](#/read/cpp-database/injection)), 정수는 정수로, NULL은 NULL로 정확한 타입을 지킵니다.
 

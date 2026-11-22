@@ -1,6 +1,11 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '번호와 범주로 된 error_code, errc와 견주는 원리, 예외에 싣는 system_error, 내 오류 번호 넣기';
+export const terms = [
+  'std::error_code', '~error_code', 'std::system_error', '~system_error', 'std::errc',
+  'error_category', 'error_condition', 'generic_category', 'system_category', 'make_error_code',
+  'is_error_code_enum', 'io_errc',
+];
 
 [「error_code로 오류 받기」](#/read/cpp-stl/fs-errors)에서 `std::error_code`를 받아 `ec == std::errc::...`로 견줬습니다. 그 타입이 어떻게 생겼는지, 내 라이브러리의 오류를 같은 틀에 어떻게 넣는지를 봅니다. 헤더는 `<system_error>`입니다.
 

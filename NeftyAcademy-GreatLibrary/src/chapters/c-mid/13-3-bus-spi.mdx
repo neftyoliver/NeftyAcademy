@@ -1,6 +1,9 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'SPI 버스: 선 네 개, 칩 선택, 보내며 동시에 받는 밀기 레지스터, 네 가지 모드, 리눅스 spidev';
+export const terms = [
+  'spi_ioc_transfer', 'SPI_IOC_MESSAGE', 'SPI_IOC_WR_MODE', 'SPI_IOC_WR_MAX_SPEED_HZ',
+];
 
 **SPI**(Serial Peripheral Interface)는 빠르고 단순한 직렬 버스입니다. 디스플레이, 플래시 메모리, SD 카드(SPI 모드), ADC(아날로그→디지털 변환기), 무선 모듈이 흔히 SPI로 붙습니다. [「I2C」](#/read/c-mid/bus-i2c)보다 선이 많은 대신 주소도, ACK도 없고 훨씬 빠릅니다(수 MHz~수십 MHz).
 

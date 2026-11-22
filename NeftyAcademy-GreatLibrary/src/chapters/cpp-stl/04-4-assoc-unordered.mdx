@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '버킷과 해시, 다시 해싱되는 때와 reserve, 순서가 없다는 것, 무효화 규칙, 최악의 경우';
+export const terms = ['unordered_map', 'unordered_set'];
 
 `std::unordered_map`과 `std::unordered_set`은 해시 표입니다. [`map`](#/read/cpp-stl/assoc-map)이 열쇠를 **견주어** 자리를 찾는다면, 이쪽은 열쇠로 **숫자를 계산해** 자리로 바로 갑니다. 그래서 찾기가 평균 O(1)이고, 그 값으로 순서를 잃습니다.
 

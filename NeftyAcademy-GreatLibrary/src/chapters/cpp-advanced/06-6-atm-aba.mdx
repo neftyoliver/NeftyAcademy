@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '값이 돌아왔다고 아무 일도 없던 것은 아니다, 번호표로 막기, 언제 지워도 되는가라는 문제와 그 답들';
+export const terms = ['hazard_pointer'];
 
 [비교 후 교환](#/read/cpp-advanced/atm-cas)은 "값이 내가 본 그대로인가"를 묻습니다. 정수를 셀 때는 그것으로 충분합니다. 포인터에서는 다릅니다. 값이 A에서 B로 갔다가 **다시 A로** 돌아와도 CAS는 성공하고, 그사이에 A가 가리키던 세상은 바뀌어 있습니다. 이것이 ABA 문제이고, [마디를 하나씩 떼는 구조](#/read/cpp-advanced/atm-lockfree)를 어렵게 만드는 주범입니다.
 

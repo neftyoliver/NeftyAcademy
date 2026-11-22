@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '예외를 던지는 판과 error_code를 받는 판, filesystem_error에 든 것, 까닭을 견주는 법, 어느 쪽을 쓸까';
+export const terms = ['filesystem_error'];
 
 파일을 다루는 일은 실패가 일상입니다. 파일이 없고, 권한이 없고, 디스크가 차고, 카드가 뽑힙니다. `<filesystem>`의 함수는 거의 모두 **두 가지 판**으로 있어서, 실패를 예외로 받을지 값으로 받을지를 부르는 쪽이 고릅니다.
 

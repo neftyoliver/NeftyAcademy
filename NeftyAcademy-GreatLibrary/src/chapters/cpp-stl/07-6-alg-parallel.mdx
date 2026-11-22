@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '알고리즘의 첫 인자로 병렬을 청하기, GCC에서 TBB가 필요하다는 것, 잰 숫자, 지켜야 할 규칙';
+export const terms = [
+  'execution::par', 'execution::seq', 'execution::par_unseq', 'execution::unseq', 'std::reduce',
+  'transform_reduce',
+];
 
 C++17부터 표준 알고리즘 대부분은 **첫 인자로 실행 정책**을 받습니다. `std::sort(v.begin(), v.end())`를 `std::sort(std::execution::par, v.begin(), v.end())`로 바꾸면 여러 코어로 나눠 정렬해 달라는 뜻이 됩니다. 스레드를 직접 만들지 않고 코어를 쓰는 가장 짧은 길입니다.
 

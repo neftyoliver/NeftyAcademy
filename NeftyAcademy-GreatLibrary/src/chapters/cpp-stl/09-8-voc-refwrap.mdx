@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '복사하고 다시 가리킬 수 있는 참조, 컨테이너에 참조 담기, 값을 복사하는 곳에 참조로 넘기기, 주의할 것';
+export const terms = ['reference_wrapper', 'std::ref', 'std::cref'];
 
 [참조](#/read/cpp-syntax/ref-lvalue)는 한번 묶이면 다른 것을 가리키게 바꿀 수 없고, 컨테이너의 원소가 될 수 없습니다. `std::vector<int&>`는 컴파일되지 않습니다. `std::reference_wrapper<T>`는 참조처럼 쓰이면서 **평범한 값처럼 복사되고 대입되는** 타입입니다. 속은 포인터 하나이고, `std::ref(x)`와 `std::cref(x)`로 만듭니다.
 

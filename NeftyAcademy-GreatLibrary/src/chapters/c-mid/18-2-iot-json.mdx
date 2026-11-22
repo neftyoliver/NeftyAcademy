@@ -1,6 +1,12 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'JSON의 여섯 가지 값, cJSON으로 읽을 때 종류를 확인하는 습관, 만들어 내보내기, 메모리 주인';
+export const terms = [
+  'cJSON', 'cJSON_Parse', 'cJSON_GetObjectItem', 'cJSON_Delete', 'cJSON_Print',
+  'cJSON_CreateObject', 'cJSON_AddNumberToObject', 'cJSON_AddStringToObject',
+  'cJSON_GetObjectItemCaseSensitive', 'cJSON_IsNumber', 'cJSON_IsString',
+  'cJSON_PrintUnformatted',
+];
 
 **JSON**은 서버와 기기가 데이터를 주고받는 가장 흔한 글자 형식입니다. [「HTTP」](#/read/c-mid/http) API의 몸통도, [「MQTT」](#/read/c-mid/iot-mqtt) 메시지의 내용도 대개 JSON입니다. C에는 JSON을 다루는 표준 기능이 없어서, 작고 파일 두 개짜리인 **cJSON**을 많이 씁니다.
 

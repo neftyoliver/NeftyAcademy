@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '복제: 대기 서버, target_session_attrs, 읽기 전용 25006, 복제 지연과 LSN, 동기 복제, 장애 조치';
+export const terms = ['PQport'];
 
 **복제**는 운영 서버(primary)의 변경을 대기 서버(standby, replica)로 계속 보내 같은 데이터를 유지하는 일입니다. 운영 서버가 죽으면 대기 서버를 올려 서비스를 잇고, 읽기 쿼리를 대기 서버로 나눠 운영 서버의 짐을 덜고, 다른 지역에 사본을 둡니다. 실수로 지운 데이터도 그대로 복제되므로 백업을 대신하지는 못합니다([「백업」](#/read/cpp-database/dbops-backup)).
 

@@ -2,6 +2,10 @@ import { Figure, Note } from 'neftyacademy-paragons-bookshelf';
 import { QtMock } from '../../components/QtMock';
 
 export const summary = '기본 위젯: 줄 입력과 검사기, 스핀 상자와 슬라이더, 체크·콤보 상자, 버튼, 위젯끼리 잇기';
+export const terms = [
+  'QLabel', 'QLineEdit', 'QCheckBox', 'QComboBox', 'QSpinBox', 'QPushButton', 'QFormLayout',
+  'QRadioButton', 'QSlider',
+];
 
 위젯 앱의 화면은 대부분 몇 가지 기본 위젯의 조합입니다. 글을 받는 `QLineEdit`, 숫자를 받는 `QSpinBox`와 `QSlider`, 켜고 끄는 `QCheckBox`, 고르는 `QComboBox`, 그리고 `QPushButton`과 `QLabel`입니다. 이 장에서는 이것들로 작은 입력 양식을 만들고, 위젯끼리 시그널로 이어 서로 맞춰 움직이게 합니다.
 

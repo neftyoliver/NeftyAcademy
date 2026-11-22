@@ -1,6 +1,9 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '스테이징: CPU가 쓰는 버퍼에서 GPU 버퍼로 복사, 버퍼 다시 쓰기, vkCmdUpdateBuffer, 되읽기, 전송 큐';
+export const terms = [
+  'VkBufferCopy', 'vkCmdCopyBuffer', 'vkCmdUpdateBuffer', 'vkCopyMemoryToImage',
+];
 
 GPU가 가장 빨리 읽는 DEVICE_LOCAL 메모리는 따로 꽂는 GPU에서 대개 CPU에 보이지 않습니다([「메모리 할당과 VMA」](#/read/cpp-vulkan/buf-alloc)). 그래서 CPU가 쓸 수 있는 **스테이징 버퍼**에 데이터를 적고, GPU에게 복사를 시켜 진짜 버퍼로 옮깁니다. 아래 프로그램은 4KiB짜리 GPU 버퍼를 1KiB 스테이징 버퍼 하나로 네 번에 나눠 채우고, 컴퓨트 셰이더로 값을 바꾼 뒤, 같은 길을 거꾸로 밟아 CPU로 읽어 옵니다. lavapipe에서는 모든 메모리가 CPU에 보이지만, 코드는 `vkx::make_buffer`에 `false`를 주어 받은 버퍼를 매핑하지 않고 따로 꽂는 GPU에서와 같은 길을 갑니다.
 

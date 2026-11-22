@@ -1,6 +1,18 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'glslang과 shaderc: glslangValidator와 glslc, 대상 환경과 SPIR-V 버전, -g와 -O, CMake에 넣기';
+export const terms = [
+  'shaderc_compilation_result_t', 'shaderc_compile_into_spv',
+  'shaderc_compile_options_initialize', 'shaderc_compile_options_release',
+  'shaderc_compile_options_set_target_env', 'shaderc_compile_options_t',
+  'shaderc_compiler_initialize', 'shaderc_compiler_release', 'shaderc_compiler_t',
+  'shaderc_env_version_vulkan_1_3', 'shaderc_result_get_bytes', 'shaderc_result_get_length',
+  'shaderc_result_release', 'shaderc_target_env_vulkan', 'shaderc_compute_shader', 'glslang',
+  'glslangValidator', 'shaderc_compile_options_set_generate_debug_info',
+  'shaderc_compile_options_set_optimization_level', 'shaderc_env_version_vulkan_1_0',
+  'shaderc_env_version_vulkan_1_1', 'shaderc_env_version_vulkan_1_2',
+  'shaderc_optimization_level_performance',
+];
 
 GLSL을 SPIR-V로 바꾸는 도구는 크게 두 갈래입니다. **glslang**은 Khronos가 관리하는 기준 앞단으로, GLSL과 HLSL을 읽는 라이브러리와 명령줄 도구 `glslangValidator`(별칭 `glslang`)가 있습니다. **shaderc**는 Google이 glslang과 SPIRV-Tools를 묶은 것으로, GCC처럼 쓰는 `glslc`와 실행 중에 부르는 라이브러리 `libshaderc`가 있습니다. 둘 다 벌칸 SDK와 리눅스 배포판 꾸러미에 들어 있습니다.
 

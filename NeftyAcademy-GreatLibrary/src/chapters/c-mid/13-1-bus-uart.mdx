@@ -1,6 +1,9 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'UART 직렬 통신: 시작·정지 비트의 틀, baud와 시간, termios로 포트 맞추기';
+export const terms = [
+  'termios', 'tcsetattr()', 'tcgetattr()', 'cfsetispeed()', 'cfsetospeed()', 'cfmakeraw()',
+];
 
 **UART**(Universal Asynchronous Receiver-Transmitter)는 선 두 가닥으로 바이트를 한 비트씩 차례로 보내는 가장 오래되고 단순한 직렬 통신입니다. 마이크로컨트롤러와 PC, GPS 모듈, 블루투스 모듈, 그리고 보드의 "디버그 콘솔"이 거의 다 UART로 말합니다. 이 쪽은 신호의 모양을 보고, 리눅스에서 C로 포트를 여는 법을 가상 터미널로 확인합니다. 다음 두 쪽의 [「I2C」](#/read/c-mid/bus-i2c), [「SPI」](#/read/c-mid/bus-spi)와 견주며 읽으면 좋습니다.
 

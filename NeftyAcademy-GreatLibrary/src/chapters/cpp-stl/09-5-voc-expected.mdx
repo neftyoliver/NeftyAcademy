@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '오류 타입 설계하기, 오류를 위로 올리는 두 가지 꼴, 값이 없는 expected<void, E>, 예외와 만나는 경계';
+export const terms = ['std::expected', '~expected', 'std::unexpected', 'bad_expected_access'];
 
 [「예외 없이 오류 알리기: optional과 expected」](#/read/cpp-syntax/exc-without)에서 `std::expected<T, E>`를 쓰는 법과 `and_then`으로 잇는 법을 보았습니다. 실제 코드에서 이 타입을 쓰기 시작하면 곧 만나는 물음이 셋 있습니다. `E`를 무엇으로 할 것인가, 여러 층을 거쳐 오류를 어떻게 올릴 것인가, 예외를 던지는 코드와 어디서 만날 것인가입니다.
 

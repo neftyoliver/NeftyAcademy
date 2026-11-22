@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '연결과 쿼리: QSqlDatabase와 드라이버, 준비된 문장과 자리표시자, 거래와 되돌리기, 결과 읽기';
+export const terms = ['QSqlDatabase', 'QSqlQuery', 'QSqlError', 'QSQLITE'];
 
 Qt SQL 모듈은 SQLite, PostgreSQL, MySQL/MariaDB, ODBC 같은 데이터베이스를 하나의 API로 다룹니다. 데이터베이스마다 **드라이버** 플러그인이 있고([「Qt의 구성과 라이선스」](#/read/cpp-qt/start-what)에서 SQLite 드라이버가 있는지 확인했습니다), 앱 코드는 `QSqlDatabase`로 연결하고 `QSqlQuery`로 SQL을 실행합니다. 데스크톱 앱의 로컬 저장소로는 서버가 필요 없는 SQLite가 가장 흔합니다.
 

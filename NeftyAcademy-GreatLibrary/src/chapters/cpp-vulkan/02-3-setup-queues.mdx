@@ -1,6 +1,12 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '큐 패밀리: 능력 비트와 큐 개수, 그래픽·비동기 컴퓨트·전송 패밀리, 커맨드 풀과 제출, 소유권';
+export const terms = [
+  'VkDeviceQueueCreateInfo', 'VkQueueFamilyProperties', 'VkQueueFlags',
+  'vkGetPhysicalDeviceQueueFamilyProperties', 'VkCommandPoolCreateInfo', 'VkFenceCreateInfo',
+  'vkCreateCommandPool', 'vkCreateFence', 'vkDestroyCommandPool', 'vkDestroyFence',
+  'vkWaitForFences', 'vkx::Commands', 'vkx::begin', 'vkx::make_commands', 'vkx::submit_and_wait',
+];
 
 GPU에 일을 넣는 창구가 큐입니다. 같은 능력을 가진 큐들이 한 **패밀리**로 묶이고, 장치는 패밀리마다 무엇을 할 수 있는지(능력 비트), 큐가 몇 개인지, 타임스탬프가 몇 비트인지, 이미지를 얼마 단위로 옮길 수 있는지 알려 줍니다. 앞 쪽의 `make_device`는 그래픽과 컴퓨트를 함께 하는 첫 패밀리의 큐 하나만 받았습니다. 아래 프로그램은 패밀리를 나열하고, 따로 된 컴퓨트·전송 패밀리가 있으면 골라내는 함수를 이 기계의 장치와 따로 꽂는 GPU에서 흔한 표에 각각 적용합니다.
 

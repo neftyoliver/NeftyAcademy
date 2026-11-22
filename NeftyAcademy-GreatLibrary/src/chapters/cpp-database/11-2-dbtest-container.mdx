@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '컨테이너로 띄우기: 운영과 같은 판의 서버, compose와 healthcheck, 준비될 때까지 기다리기, 공식 이미지';
+export const terms = ['PQPING_NO_ATTEMPT', 'PQPING_REJECT'];
 
 시험을 운영과 같은 데이터베이스, 같은 판에 대고 돌리려면 그 서버가 필요합니다. 개발자마다 손으로 설치해 두면 판과 설정이 제각각이 되고, CI에서는 깨끗한 서버가 매번 있어야 합니다. 컨테이너는 정해 둔 이미지로 몇 초 만에 서버를 띄우고, 시험이 끝나면 데이터째 버립니다.
 

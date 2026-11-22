@@ -1,6 +1,12 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '정점 버퍼와 인덱스 버퍼: 바인딩과 속성, 버퍼를 나눈 스트림, 정점 재사용, vertexOffset, 인덱스 타입';
+export const terms = [
+  'VkQueryPool', 'VkQueryPoolCreateInfo', 'VkVertexInputAttributeDescription',
+  'VkVertexInputBindingDescription', 'vkCmdBeginQuery', 'vkCmdBindIndexBuffer',
+  'vkCmdBindVertexBuffers', 'vkCmdDrawIndexed', 'vkCmdEndQuery', 'vkCmdResetQueryPool',
+  'vkCreateQueryPool', 'vkDestroyQueryPool', 'vkGetQueryPoolResults',
+];
 
 지금까지의 삼각형은 정점 좌표를 셰이더 안의 배열에 적고 `gl_VertexIndex`로 골랐습니다. 실제 메시는 파일에서 읽어 **정점 버퍼**에 담고, 파이프라인의 정점 입력 상태로 그 버퍼를 어떻게 읽을지 알립니다. **바인딩**은 버퍼 하나를 몇 바이트씩 끊어 읽을지(stride)와 정점마다 넘어갈지 인스턴스마다 넘어갈지(input rate)를, **속성**은 끊은 칸의 어디(offset)를 어떤 포맷으로 몇 번 location에 줄지를 정합니다. **인덱스 버퍼**는 삼각형마다 몇 번 정점을 쓸지 적은 목록이어서, 여러 삼각형이 함께 쓰는 정점을 한 번만 저장하게 해 줍니다. 아래 프로그램은 위치와 밝기를 버퍼 둘에 나눠 담고, 인덱스 18개로 육각형 둘을 그립니다.
 

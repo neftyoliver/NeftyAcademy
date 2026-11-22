@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '순서 바꾸기, 비교자가 정하는 "같다", 엄격한 순서의 규칙, 임시 객체 없이 찾는 투명 비교';
+export const terms = ['std::less', 'std::greater', 'is_transparent'];
 
 `std::map<Key, Value>`의 온전한 모양은 `std::map<Key, Value, Compare, Alloc>`입니다. 셋째 인자 `Compare`가 "무엇이 앞인가"를 정하고, 기본값은 `<`로 견주는 `std::less<Key>`입니다. 이 자리를 바꾸면 순서뿐 아니라 **무엇을 같은 열쇠로 볼지**도 바뀝니다.
 

@@ -1,6 +1,9 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'HTTP/1.1의 생김새: 요청 줄과 머리, 빈 줄, 상태 코드, 소켓으로 직접 짠 서버와 클라이언트, libcurl';
+export const terms = [
+  'curl_easy_init', 'curl_easy_setopt', 'curl_easy_perform', 'curl_easy_cleanup', 'curl',
+];
 
 **HTTP**는 웹의 언어이고, 요즘은 앱과 기기가 서버와 이야기하는 표준 방법(REST API)이기도 합니다. HTTP/1.1은 [「TCP」](#/read/c-mid/net-tcp) 위에 **사람이 읽을 수 있는 글자**로 주고받는 약속이라, 소켓만으로도 직접 짜 볼 수 있습니다.
 

@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '레인지란 무엇인가, std::ranges 알고리즘이 달라진 네 가지, 프로젝션, 결과를 컨테이너로 모으기';
+export const terms = [
+  'std::ranges', 'ranges::begin', 'ranges::end', 'ranges::size', 'ranges::range',
+  'ranges::input_range', 'ranges::subrange',
+];
 
 앞 장에서 `std::ranges::sort(v)`처럼 컨테이너를 통째로 넘기는 알고리즘을 써 왔습니다. [「C++20」](#/read/cpp-syntax/ver-20)에서 맛본 그 레인지입니다. 이 장에서는 그 밑의 생각을 정리하고, 뷰와 파이프로 넘어갑니다.
 

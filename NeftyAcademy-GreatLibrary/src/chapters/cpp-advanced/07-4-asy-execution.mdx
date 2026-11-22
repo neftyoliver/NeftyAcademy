@@ -1,6 +1,11 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '센더·리시버·스케줄러의 역할, 손으로 만든 축소판, C++26 초안의 모습과 지금의 사정';
+export const terms = [
+  'std::execution', 'execution::sender', 'execution::scheduler', 'execution::then',
+  'execution::sync_wait', 'execution::just', 'execution::when_all', 'execution::schedule',
+  'execution::let_value', 'execution::starts_on', 'execution::continues_on', 'stdexec',
+];
 
 [`future`가 못 하는 일](#/read/cpp-advanced/asy-future)은 셋이었습니다. 끝나면 이어서 하기, 여럿 가운데 먼저 끝난 것 고르기, 그만두게 하기입니다. C++26 초안의 `std::execution`은 이어 붙이기와 그만두기를 처음부터 갖춘 틀입니다. 다만 이 페이지는 다른 페이지와 사정이 다릅니다. **표준의 예제를 이 책의 환경에서 돌려 보지 못했습니다.** 그 까닭부터 적습니다.
 

@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'USB의 구조: 호스트가 묻는 버스, 설명자, 끝점과 네 가지 전송, 클래스, libusb로 장치 나열';
+export const terms = [
+  'libusb', 'libusb_init', 'libusb_bulk_transfer', 'libusb_control_transfer',
+  'libusb_claim_interface', 'libusb_get_device_list',
+];
 
 **USB**는 키보드부터 외장 SSD까지 거의 모든 주변기기가 쓰는 버스입니다. [「UART」](#/read/c-mid/bus-uart)나 [「SPI」](#/read/c-mid/bus-spi)와 달리 꽂는 순간 장치가 스스로를 소개하고, 운영체제가 알맞은 드라이버를 붙입니다. 이 쪽은 그 "자기소개"의 생김새와, C에서 USB 장치를 직접 다루는 libusb를 봅니다.
 

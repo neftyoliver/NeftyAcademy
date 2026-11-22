@@ -1,6 +1,13 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '개발 환경과 검증 레이어: 로더·레이어·드라이버, SDK와 소프트웨어 구현, 메신저, VUID, 객체 이름';
+export const terms = [
+  'VkDebugUtilsMessageSeverityFlagBitsEXT', 'VkDebugUtilsMessageTypeFlagsEXT',
+  'VkDebugUtilsMessengerCallbackDataEXT', 'VkDebugUtilsMessengerCreateInfoEXT',
+  'VkDebugUtilsMessengerEXT', 'VkDebugUtilsObjectNameInfoEXT', 'VkValidationFeaturesEXT',
+  'vkCreateBuffer', 'vkCreateDebugUtilsMessengerEXT', 'vkDestroyBuffer',
+  'vkDestroyDebugUtilsMessengerEXT', 'vkGetInstanceProcAddr', 'vkSetDebugUtilsObjectNameEXT',
+];
 
 벌칸 프로그램은 세 겹을 지나 GPU에 닿습니다. 프로그램이 부르는 함수는 먼저 **로더**(리눅스의 `libvulkan.so.1`, 윈도우의 `vulkan-1.dll`)에 들어가고, 로더는 켜 둔 **레이어**를 차례로 거쳐 GPU 회사가 만든 **드라이버**(ICD)에 넘깁니다. 로더는 드라이버와 레이어를 JSON 매니페스트 파일로 찾으므로, 드라이버를 바꾸거나 레이어를 끼우는 데 프로그램을 다시 빌드할 필요가 없습니다.
 

@@ -1,6 +1,13 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
-export const summary = '특성이 만들어지는 원리, 내 타입을 표로 살펴보기, 라이브러리가 특성으로 갈라지는 자리, 헷갈리는 특성들';
+export const summary = '특성이 만들어지는 원리, 내 타입을 표로 살펴보기, 라이브러리가 갈라지는 자리, 헷갈리는 특성들';
+export const terms = [
+  'type_traits', 'is_same', 'is_same_v', 'remove_reference_t', 'remove_cvref_t', 'decay_t',
+  'is_integral_v', 'is_trivially_copyable', 'is_trivially_copyable_v', 'true_type', 'false_type',
+  'is_convertible_v', 'is_constructible_v', 'is_nothrow_move_constructible',
+  'is_trivially_destructible_v', 'is_pointer_v', 'is_array_v', 'is_const_v', 'common_type_t',
+  'common_type', 'is_signed_v', 'is_standard_layout_v', 'is_aggregate_v',
+];
 
 [「static_assert와 타입 특성」](#/read/cpp-syntax/ct-assert)에서 `<type_traits>`의 특성을 표로 훑었습니다. 여기서는 특성이 어떻게 만들어져 있는지, 라이브러리가 어디에 쓰는지, 그리고 이름만 보고 짐작하면 틀리는 것들을 봅니다.
 

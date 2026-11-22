@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '블록 여럿과 블록 목록, 양 끝에 넣어도 원소가 제자리, 속도와 메모리, 쓰는 자리';
+export const terms = ['std::deque', '~deque'];
 
 `std::deque`(덱, double-ended queue)는 **앞에도 뒤에도** O(1)로 넣고 뺄 수 있는 컨테이너입니다. `vector`는 뒤에만 그렇습니다. 첨자 `d[i]`도 O(1)이어서 겉으로는 "앞에도 넣을 수 있는 `vector`"처럼 보이지만 속은 다릅니다.
 

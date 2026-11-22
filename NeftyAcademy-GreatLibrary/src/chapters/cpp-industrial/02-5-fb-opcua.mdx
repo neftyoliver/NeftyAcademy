@@ -1,6 +1,14 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'OPC UA: 노드와 참조로 된 주소 공간, NodeId, 읽기와 구독(샘플링, 데드밴드, 게시), 보안, open62541';
+export const terms = [
+  'UA_Client', 'UA_ClientConfig_setDefault', 'UA_Client_MonitoredItems_createDataChange',
+  'UA_Client_Subscriptions_create', 'UA_Client_connect', 'UA_Client_delete',
+  'UA_Client_getConfig', 'UA_Client_new', 'UA_Client_readValueAttribute', 'UA_Client_run_iterate',
+  'UA_Double', 'UA_NODEID_STRING', 'UA_STATUSCODE_GOOD', 'UA_StatusCode', 'UA_StatusCode_name',
+  'UA_TYPES', 'UA_TYPES_DOUBLE', 'UA_Variant', 'UA_Variant_clear', 'UA_Variant_hasScalarType',
+  'UA_Variant_init',
+];
 
 지금까지 본 프로토콜들은 "레지스터 3번", "객체 6064"처럼 장비마다 다른 번호로 값을 주고받습니다. 번호의 뜻은 설명서에만 있습니다. **OPC UA**(OPC Unified Architecture)는 장비가 자기 데이터를 **이름과 구조, 타입, 단위까지 갖춘 모델**로 내놓게 하는 표준입니다(IEC 62541). PLC, 로봇, MES, 클라우드가 제조사와 운영 체제에 상관없이 같은 방식으로 데이터를 찾고 읽고 구독할 수 있어서, [「자동화 피라미드」](#/read/cpp-industrial/land-pyramid)의 층 사이를 잇는 공용어로 자리 잡았습니다.
 

@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '델리게이트: 뷰의 칸을 그리고 편집하는 객체, 화면 글 바꾸기, 막대 그리기, 편집기와 값 주고받기';
+export const terms = ['QStyledItemDelegate', 'QStyleOptionViewItem'];
 
 뷰는 칸을 어떻게 그리고 어떻게 편집할지를 직접 정하지 않습니다. 그 일은 **델리게이트**에게 맡깁니다. 기본 델리게이트(`QStyledItemDelegate`)는 글을 쓰고, 편집할 때 값의 타입에 맞는 편집기(글이면 줄 입력, 정수면 스핀 상자)를 띄웁니다. 칸을 다르게 그리거나 특별한 편집기를 쓰고 싶으면 델리게이트를 바꿉니다. 모델은 그대로입니다.
 

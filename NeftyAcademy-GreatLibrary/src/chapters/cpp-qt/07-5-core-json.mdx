@@ -1,6 +1,9 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'JSON: QJsonDocument로 읽고 오류 위치 알기, 객체와 배열, operator[]의 함정, 큰 정수, 만들기';
+export const terms = [
+  'QJsonDocument', 'QJsonObject', 'QJsonArray', 'QJsonValue', 'QJsonParseError', 'QCborValue',
+];
 
 웹 API의 응답, 설정 파일, 저장 파일의 상당수가 JSON입니다. Qt Core에는 JSON을 읽고 만드는 클래스가 들어 있어서 따로 라이브러리를 붙일 필요가 없습니다. `QJsonDocument`가 문서 전체를, `QJsonObject`와 `QJsonArray`가 객체와 배열을, `QJsonValue`가 값 하나를 나타냅니다.
 

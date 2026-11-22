@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '정점·프래그먼트 셰이더: 내장 변수, 벌칸의 클립 공간, 보간 한정자(smooth·flat), gl_FragCoord, discard';
+export const terms = [
+  'gl_Position', 'gl_VertexIndex', 'gl_FragCoord', 'gl_InstanceID', 'gl_InstanceIndex',
+  'gl_VertexID',
+];
 
 정점 셰이더는 정점마다 돌아 클립 좌표(`gl_Position`)와 다음 단계로 넘길 값을 내고, 프래그먼트 셰이더는 래스터라이저가 만든 프래그먼트마다 돌아 첨부물에 쓸 값을 냅니다. 둘 사이의 값은 location 번호로 이어지고, 그 사이에서 어떻게 보간할지는 한정자로 정합니다. 아래 프로그램은 삼각형 하나를 인스턴스 셋으로 나란히 그려, 보간 방식과 버리기를 비교합니다.
 

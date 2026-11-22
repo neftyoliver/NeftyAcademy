@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '이벤트 루프: postEvent와 sendEvent, event() 재정의와 이벤트 필터, 타이머, 루프를 막으면 생기는 일';
+export const terms = ['QTimer', 'QEvent'];
 
 [「첫 창」](#/read/cpp-qt/start-window)에서 `app.exec()`가 이벤트 루프를 돌린다고 했습니다. Qt 앱의 모든 일은 결국 이 루프가 큐에서 **이벤트**를 하나씩 꺼내 해당 객체에 전달하는 것입니다. 마우스 클릭, 키 입력, 창 다시 그리기, 타이머, 네트워크 데이터 도착, 다른 스레드에서 온 시그널까지 모두 이벤트로 들어옵니다. 시그널과 슬롯이 객체 사이의 약속이라면, 이벤트는 운영체제와 Qt가 객체에게 "이런 일이 있었다"고 알리는 우편입니다.
 

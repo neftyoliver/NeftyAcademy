@@ -1,6 +1,11 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '로깅 범주: 로그에 이름 붙이기, 수준별로 켜고 끄는 규칙, 메시지 처리기, Qt 내부 범주';
+export const terms = [
+  'qDebug', 'qCDebug', 'qCInfo', 'qCWarning', 'QLoggingCategory', 'Q_LOGGING_CATEGORY',
+  'qInstallMessageHandler', 'QtMsgType', 'QMessageLogContext', 'QT_LOGGING_RULES',
+  'qSetMessagePattern', 'Q_DECLARE_LOGGING_CATEGORY', 'qCCritical', 'QT_MESSAGE_PATTERN',
+];
 
 `qDebug() << "여기까지 옴"`은 편하지만, 앱이 커지면 로그가 쏟아져 필요한 것을 찾을 수 없고, 출시판에서 끄려면 코드를 고쳐야 합니다. **로깅 범주**는 로그마다 `app.net`, `app.db` 같은 이름을 붙이고, 범주와 수준(debug, info, warning, critical)별로 **실행 중에** 켜고 끄게 해 줍니다. Qt 자신도 내부 로그를 `qt.network.ssl`, `qt.qpa.xcb` 같은 범주로 냅니다.
 

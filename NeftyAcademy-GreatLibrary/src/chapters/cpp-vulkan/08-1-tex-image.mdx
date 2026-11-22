@@ -1,6 +1,12 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '이미지, 뷰, 샘플러: 텍스처 올리기, 뷰의 범위와 성분 바꿔치기, 필터와 주소 모드, UNORM과 SRGB';
+export const terms = [
+  'VkImageView', 'VkImageViewCreateInfo', 'vkCreateImageView', 'vkDestroyImageView',
+  'VkBufferImageCopy', 'VkSampler', 'vkCmdCopyBufferToImage', 'VkSamplerCreateInfo',
+  'vkCreateSampler', 'vkDestroySampler', 'VkFilter', 'VkSamplerAddressMode',
+  'VkSamplerMipmapMode', 'vkx::bind_image', 'vkx::make_sampler', 'vkx::make_texture',
+];
 
 텍스처 하나를 셰이더에서 읽으려면 객체 셋이 필요합니다. **이미지**는 텍셀을 담은 메모리이고(차원, 포맷, 크기, 밉 수, 층 수, 쓰임새), **뷰**는 그 이미지의 어느 부분을 어떤 종류로 볼지 정하며, **샘플러**는 좌표로 텍셀을 고르고 섞는 방법입니다. 지금까지는 이미지를 렌더 타깃으로만 썼는데([「렌더 패스와 동적 렌더링」](#/read/cpp-vulkan/tri-renderpass)), 이 쪽의 `vkx_texture.hpp`는 CPU의 픽셀을 올려 텍스처로 만들고 샘플러를 만듭니다.
 

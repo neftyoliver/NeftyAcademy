@@ -1,6 +1,16 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '표면과 스왑체인: 창을 잇는 표면, 크기·포맷·내보내기 방식, 이미지와 뷰, 이미지 받기, vkx_swapchain';
+export const terms = [
+  'VkSwapchainKHR', 'vkGetPhysicalDeviceSurfaceSupportKHR', 'VkHeadlessSurfaceCreateInfoEXT',
+  'VkImage', 'VkPresentModeKHR', 'VkSurfaceCapabilitiesKHR', 'VkSurfaceFormatKHR', 'VkSurfaceKHR',
+  'VkSwapchainCreateInfoKHR', 'vkAcquireNextImageKHR', 'vkCreateHeadlessSurfaceEXT',
+  'vkCreateSwapchainKHR', 'vkCreateWin32SurfaceKHR', 'vkDestroySurfaceKHR',
+  'vkDestroySwapchainKHR', 'vkGetPhysicalDeviceSurfaceCapabilitiesKHR',
+  'vkGetPhysicalDeviceSurfaceFormatsKHR', 'vkGetPhysicalDeviceSurfacePresentModesKHR',
+  'vkGetSwapchainImagesKHR', 'vkx::Swapchain', 'vkx::make_headless_surface',
+  'vkx::make_swapchain',
+];
 
 벌칸에는 "화면"이라는 개념이 핵심에 없습니다. 창은 **표면**(`VkSurfaceKHR`)이라는 인스턴스 객체로 이어 붙이고, 화면에 내보낼 이미지 몇 장은 **스왑체인**(`VkSwapchainKHR`)이 가집니다. 프로그램은 스왑체인에서 이미지 한 장을 받아(acquire) 그리고, 다 그리면 돌려주며 내보내 달라고(present) 합니다. 이 쪽의 `vkx_swapchain.hpp`는 창 없이도 돌도록 헤드리스 표면을 쓰고, 표면에 맞춰 스왑체인과 이미지 뷰를 만듭니다.
 

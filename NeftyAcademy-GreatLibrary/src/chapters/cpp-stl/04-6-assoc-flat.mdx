@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '정렬된 배열로 만든 map, 메모리와 속도의 숫자, 직접 만드는 법, C++23의 flat_map과 지원 상황';
+export const terms = ['flat_map', 'flat_set', 'std::sorted_unique', 'sorted_unique'];
 
 [`map`](#/read/cpp-stl/assoc-map)은 원소마다 노드를 따로 잡습니다. 넣고 지우기는 싸지만 메모리가 많이 들고 찾을 때 흩어진 노드를 따라갑니다. 열쇠를 **정렬된 배열**에 담고 이진 탐색으로 찾으면 그 반대가 됩니다. C++23은 이 구조를 `std::flat_map`과 `std::flat_set`이라는 이름으로 넣었습니다.
 

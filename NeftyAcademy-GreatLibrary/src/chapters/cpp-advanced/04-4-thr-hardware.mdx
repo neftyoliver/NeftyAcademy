@@ -1,6 +1,9 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '코어 수를 묻는 세 가지 답, 스레드를 더 만들어도 빨라지지 않는 지점, 캐시 줄의 크기, 코어에 묶기';
+export const terms = [
+  'hardware_concurrency', 'pthread_setaffinity_np', 'sched_getcpu', 'SetThreadAffinityMask',
+];
 
 스레드를 몇 개 만들지는 코드가 아니라 **기계**가 정합니다. 코어가 몇 개인지, 그 가운데 내 프로그램이 쓸 수 있는 것이 몇 개인지, 어느 스레드가 어느 코어에서 도는지를 묻고 정하는 방법을 봅니다. 표준이 주는 것은 숫자 하나뿐이고 나머지는 운영체제의 일입니다.
 

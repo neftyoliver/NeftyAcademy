@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'regex_match와 regex_search, 묶음 꺼내기, 모두 찾기와 바꾸기, 느린 까닭과 대신 쓸 것';
+export const terms = [
+  'std::regex', 'std::regex_match', 'std::regex_search', 'std::regex_replace', 'std::smatch',
+  'std::sregex_iterator', 'std::regex_error',
+];
 
 로그 한 줄에서 날짜와 등급과 값을 꺼내는 일처럼, 글의 **모양**을 적어 두고 맞춰 보는 도구가 정규식입니다. `<regex>` 헤더에 있습니다. 편하지만 표준 라이브러리에서 값이 가장 비싼 축에 드는 도구이기도 합니다.
 

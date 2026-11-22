@@ -1,6 +1,12 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '날짜 타입과 / 로 조립하기, 날수와 달력 사이를 오가기, 없는 날짜와 달 더하기, 시간대와 서머타임의 틈';
+export const terms = [
+  'year_month_day', 'zoned_time', 'chrono::sys_days', 'chrono::local_days', 'current_zone',
+  'chrono::year', 'chrono::month', 'chrono::weekday', 'chrono::hh_mm_ss', 'hh_mm_ss',
+  'chrono::last', 'chrono::sys_seconds', 'chrono::local_time', 'chrono::sys_time',
+  'chrono::local_seconds',
+];
 
 [`system_clock`의 시각](#/read/cpp-stl/chr-clocks)은 1970년부터 흐른 시간일 뿐, 그것이 몇 월 며칠인지는 따로 계산해야 합니다. C++20의 `<chrono>`에 그 계산이 들어 있습니다. 윤년, 달마다 다른 날수, 요일, 시간대를 직접 짤 까닭이 없습니다.
 

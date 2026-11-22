@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '벌칸의 설계: 드러내 놓고 하는 API, 객체와 수명, sType과 pNext 사슬, 판과 확장, 검사 없는 드라이버';
+export const terms = [
+  'VkCommandPool', 'VkPhysicalDeviceDriverProperties', 'VkPhysicalDeviceProperties2',
+  'VkPhysicalDeviceSubgroupProperties', 'VkQueue', 'vkGetPhysicalDeviceProperties2',
+];
 
 벌칸은 Khronos가 2016년에 내놓은 그래픽·컴퓨트 API입니다. OpenGL 드라이버가 뒤에서 몰래 하던 일, 곧 메모리 배치, 작업 사이의 동기화, 상태가 맞는지 검사하기, 셰이더를 언제 컴파일할지를 프로그램이 직접 정하게 했습니다. 코드는 길어지지만 드라이버가 얇아져서, 언제 무엇이 일어나는지 예측할 수 있고 여러 스레드에서 나눠 일할 수 있습니다.
 

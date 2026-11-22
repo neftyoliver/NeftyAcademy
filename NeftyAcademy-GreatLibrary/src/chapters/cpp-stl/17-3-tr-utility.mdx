@@ -1,6 +1,12 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '값 없이 타입을 묻는 declval, 값의 종류를 지키는 forward_like, 묶음에 번호를 붙이는 index_sequence';
+export const terms = [
+  'std::declval', '~declval', 'std::forward', '~forward', 'integer_sequence', 'index_sequence',
+  'make_index_sequence', 'index_sequence_for', 'std::as_const', 'std::to_underlying',
+  'std::unreachable', 'std::exchange', 'std::cmp_less', 'cmp_less', 'std::in_range',
+  'std::forward_like', 'std::move_if_noexcept',
+];
 
 `<utility>`에는 `std::pair`와 `std::move` 말고도, 템플릿 코드를 쓸 때 연장 노릇을 하는 작은 것들이 있습니다. 혼자서는 하는 일이 없어 보이지만 [`std::apply`](#/read/cpp-stl/voc-pair)나 `std::make_unique` 같은 것이 이들로 만들어져 있습니다.
 

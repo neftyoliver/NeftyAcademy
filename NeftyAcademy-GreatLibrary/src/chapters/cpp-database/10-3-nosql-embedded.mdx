@@ -1,6 +1,14 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '내장 키-값 저장소: 바이트 키의 순서, 큰 끝 정수, 가리키기만 하는 값, LMDB의 MVCC, RocksDB 일괄 쓰기';
+export const terms = [
+  'MDB_CREATE', 'MDB_FIRST', 'MDB_MAP_FULL', 'MDB_NEXT', 'MDB_RDONLY', 'MDB_cursor', 'MDB_dbi',
+  'MDB_env', 'MDB_txn', 'MDB_val', 'mdb_cursor_close', 'mdb_cursor_get', 'mdb_cursor_open',
+  'mdb_dbi_open', 'mdb_env_close', 'mdb_env_create', 'mdb_env_open', 'mdb_env_set_mapsize',
+  'mdb_env_set_maxdbs', 'mdb_get', 'mdb_put', 'mdb_txn_abort', 'mdb_txn_begin', 'mdb_txn_commit',
+  'rocksdb::DB', 'rocksdb::Iterator', 'rocksdb::Options', 'rocksdb::Status',
+  'rocksdb::WriteBatch',
+];
 
 SQLite처럼 프로그램 안에 라이브러리로 들어가지만, SQL 없이 바이트열 키와 값만 다루는 저장소들이 있습니다. 키는 정렬된 채로 저장되어서, 키 하나로 찾는 것 말고도 키 순서대로 훑거나 앞부분이 같은 키들을 모아 읽을 수 있습니다. 캐시, 메타데이터, 큰 시스템의 저장 엔진으로 많이 쓰입니다. 읽기에 강한 B+트리 계열의 **LMDB**와 쓰기에 강한 LSM 트리 계열의 **LevelDB**, **RocksDB**를 봅니다.
 

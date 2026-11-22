@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'QString과 유니코드: UTF-16 단위와 사람이 보는 글자, 한글 정규화, arg 서식, 로캘별 숫자, QStringView';
+export const terms = ['QString', 'qPrintable', 'QStringView'];
 
 Qt의 문자열 `QString`은 유니코드 문자열입니다. 화면에 보이는 모든 글, 파일 이름, 설정 값이 `QString`으로 오갑니다. 안을 UTF-16으로 저장하기 때문에, `std::string`(보통 UTF-8 바이트)과는 길이를 세는 방법부터 다릅니다. 한글과 이모지가 섞인 글을 다루면 이 차이가 바로 드러납니다.
 

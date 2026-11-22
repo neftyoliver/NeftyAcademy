@@ -1,6 +1,12 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '다른 API와 견주기: 상태 기계와 커맨드 버퍼, 같은 셰이더의 세 언어, 개념 대응표, 서로 위에 얹기';
+export const terms = [
+  'VkFence', 'shaderc_compilation_status_success', 'shaderc_fragment_shader', 'spvc_backend',
+  'spvc_compiler_compile', 'spvc_compiler_create_compiler_options',
+  'spvc_compiler_install_compiler_options', 'spvc_compiler_options',
+  'spvc_compiler_options_set_uint',
+];
 
 벌칸 말고도 GPU를 부리는 API는 여럿입니다. OpenGL과 Direct3D 11은 드라이버가 많은 일을 대신하는 앞 세대이고, Direct3D 12와 Metal은 벌칸과 같은 시기에 나온 명시적 API입니다. 이름은 달라도 개념이 거의 그대로 대응하므로, 벌칸을 익히면 나머지도 빨리 읽힙니다.
 

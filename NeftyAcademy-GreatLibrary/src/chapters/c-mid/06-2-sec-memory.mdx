@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'OS와 컴파일러가 메모리를 지키는 장치: ASLR과 PIE, 실행 금지(NX), 읽기 전용 페이지, 비밀 지우기';
+export const terms = ['mprotect()', 'mmap()'];
 
 [「의도하지 않은 코드 실행」](#/read/c-mid/hack-code-exec)의 표에서 쓰기와 실행 나누기(NX)와 주소 흩어 놓기(ASLR)는 다음으로 미뤘습니다. 이 쪽은 그 둘을 포함해, OS와 컴파일러가 프로그램의 메모리를 지키는 장치를 하나씩 확인합니다. 어떤 것은 저절로 켜져 있고, 어떤 것은 프로그래머가 직접 써야 합니다.
 

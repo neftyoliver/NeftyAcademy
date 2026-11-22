@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '읽는 쪽은 함께 쓰는 쪽은 혼자, 이득이 나는 조건, 굶는 쓰는 쪽, 올려 잠그기가 없는 까닭, 스냅숏';
+export const terms = ['shared_mutex', 'shared_lock'];
 
 설정, 경로표, 캐시처럼 **읽기는 잦고 쓰기는 드문** 자료가 있습니다. 읽기만 하는 스레드끼리는 서로를 막을 까닭이 없습니다. `std::shared_mutex`는 잠금을 두 가지로 나눠서, 읽는 쪽은 여럿이 함께 들어오고 쓰는 쪽은 혼자 들어오게 합니다.
 

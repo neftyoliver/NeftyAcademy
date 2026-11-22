@@ -1,6 +1,9 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '다중 샘플링: 픽셀마다 샘플 여러 개, 리졸브 첨부물, 도형의 가장자리만 고쳐지는 까닭, 샘플마다 셰이딩';
+export const terms = [
+  'VkSampleCountFlagBits', 'VkPhysicalDeviceLimits', 'gl_SampleID', 'gl_SamplePosition',
+];
 
 픽셀의 한가운데가 삼각형 안에 있는지만 따지면 비스듬한 변이 계단처럼 보입니다. **다중 샘플링**(MSAA)은 픽셀 안의 여러 자리(샘플)에서 덮였는지를 따로 판정하고, 색과 깊이도 샘플마다 둡니다. 그리기가 끝나면 샘플들을 평균해 픽셀 하나의 값으로 만드는데, 이것이 **리졸브**입니다. 아래 프로그램은 같은 사각형을 세 가지로 그려 견줍니다. 사각형의 왼쪽 변은 도형의 가장자리이고, 오른쪽 경계는 프래그먼트 셰이더가 계산으로 만든 것입니다.
 

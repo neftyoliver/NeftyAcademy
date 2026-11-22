@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'new 식이 부르는 함수들, 전역 operator new를 바꿔 할당 장부 달기, 지킬 규칙, malloc의 값';
+export const terms = ['std::nothrow', 'align_val_t'];
 
 이 책은 "할당이 몇 번 일어났는가"를 여러 번 세었습니다. 그때마다 예제 맨 위에 있던 `void* operator new(std::size_t)`가 그 장치입니다. 프로그램이 정의하면 **표준 라이브러리의 것을 대신하는** 드문 함수입니다. 이 페이지에서 그것을 제대로 봅니다. [`new`가 하는 두 가지 일](#/read/cpp-syntax/life-new) 가운데 메모리를 잡는 쪽입니다.
 

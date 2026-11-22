@@ -1,6 +1,7 @@
 import { Figure, Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'QPainter: 펜과 붓, 좌표 변환과 save/restore, 경로와 곡선, 안티에일리어싱, 화소로 확인하기';
+export const terms = ['QPainter', 'QPen', 'QImage', 'QColor', 'QPointF', 'QPainterPath'];
 
 Qt의 2D 그리기는 모두 `QPainter` 하나로 합니다. 그릴 대상은 `QImage`, 위젯, PDF 파일(`QPdfWriter`), 프린터, SVG 생성기 등 무엇이든 될 수 있고, 그리는 코드는 같습니다. 직접 만든 위젯도, 앞 장의 델리게이트도, 차트 라이브러리도 결국 이 API로 그립니다.
 

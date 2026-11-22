@@ -1,6 +1,10 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'C23 표준 라이브러리의 헤더 31개를 쓰임별로 훑고, 넘침 검사·비트 세기·이진 탐색·날짜를 써 보기';
+export const terms = [
+  'bsearch()', 'signal()', 'setjmp()', 'longjmp()', 'rand()', 'time()', 'assert()', 'strtok()',
+  'va_list', 'va_arg()', 'errno', 'timespec_get()', 'setlocale()',
+];
 
 「컴퓨터 프로그래밍 초급」의 [「먼저 알아 둘 표준 라이브러리」](#/read/c-basic/stdlib-first)에서는 `stdio.h`, `stdlib.h`, `string.h`처럼 날마다 쓰는 헤더 아홉 개를 봤습니다. C23 표준이 정한 헤더는 모두 31개입니다. 이 쪽은 나머지를 포함해 전체를 한 번 훑어서, 필요할 때 "표준에 이런 게 있었지" 하고 떠올릴 수 있게 하는 것이 목표입니다. 어느 OS에서든 쓸 수 있는 것은 여기까지이고, 그 바깥은 [「POSIX와 ISO C」](#/read/basics/std-posix-c)에서 본 POSIX나 OS의 API입니다.
 

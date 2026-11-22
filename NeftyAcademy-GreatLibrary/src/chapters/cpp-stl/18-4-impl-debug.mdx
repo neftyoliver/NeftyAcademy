@@ -1,6 +1,7 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = '검사를 켜는 세 단계, 각 단계가 잡는 것과 재어 본 값, 타입을 바꾸는 디버그 모드, libc++와 -fhardened';
+export const terms = ['_GLIBCXX_ASSERTIONS', '_LIBCPP_HARDENING_MODE', '_ITERATOR_DEBUG_LEVEL'];
 
 `v[10]`이 범위를 벗어나도 표준 라이브러리는 기본적으로 **검사하지 않습니다.** 검사를 넣으면 느려진다는 까닭입니다. 그 대신 구현마다 검사를 켜는 스위치를 두었습니다. 이 책 여러 곳에서 "`-D_GLIBCXX_ASSERTIONS`로 빌드하면 멈춥니다"라고 미뤄 둔 것을 여기서 모읍니다. [「새니타이저와 경고」](#/read/cpp-syntax/ubc-tools)가 도구 전체의 지도였다면, 이 페이지는 라이브러리 쪽 스위치를 자세히 봅니다.
 

@@ -1,6 +1,15 @@
 import { Note } from 'neftyacademy-paragons-bookshelf';
 
 export const summary = 'ODBC: 드라이버 관리자와 드라이버, 핸들의 흐름, 같은 코드로 두 데이터베이스에, SQLSTATE와 이스케이프';
+export const terms = [
+  'SQLAllocHandle', 'SQLBindParameter', 'SQLDisconnect', 'SQLDriverConnect', 'SQLDriverConnectW',
+  'SQLExecDirect', 'SQLExecute', 'SQLFetch', 'SQLFreeHandle', 'SQLFreeStmt', 'SQLGetData',
+  'SQLGetDiagRec', 'SQLGetInfo', 'SQLPrepare', 'SQLSetEnvAttr', 'SQL_ATTR_ODBC_VERSION',
+  'SQL_C_CHAR', 'SQL_C_SLONG', 'SQL_DBMS_NAME', 'SQL_DRIVER_NAME', 'SQL_DRIVER_NOPROMPT',
+  'SQL_HANDLE_DBC', 'SQL_HANDLE_ENV', 'SQL_HANDLE_STMT', 'SQL_INTEGER', 'SQL_NTS',
+  'SQL_NULL_DATA', 'SQL_NULL_HANDLE', 'SQL_OV_ODBC3', 'SQL_PARAM_INPUT', 'SQL_RESET_PARAMS',
+  'SQL_SUCCEEDED', 'SQL_VARCHAR',
+];
 
 **ODBC**(Open Database Connectivity)는 1992년에 마이크로소프트가 내놓은, 데이터베이스에 붙는 표준 C API입니다. 프로그램은 **드라이버 관리자**(윈도에는 들어 있고, 리눅스와 macOS에서는 unixODBC나 iODBC)를 부르고, 드라이버 관리자가 연결 문자열에 적힌 데이터베이스별 **드라이버**를 불러옵니다. 그래서 같은 코드로 여러 데이터베이스에 붙을 수 있고, 엑셀, BI 도구, SCADA의 이력 저장소 같은 많은 프로그램이 ODBC로 데이터베이스를 읽습니다. 자바의 JDBC도 ODBC를 본떠 만들어졌습니다.
 
