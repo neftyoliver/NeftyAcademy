@@ -1,0 +1,180 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '샌드박스: 나눈 프로세스의 권한 줄이기, 기본 금지와 본체의 대행, 사용자가 고른 파일, 자원 한도';
+export const terms = ['SCM_RIGHTS', 'PR_SET_NO_NEW_PRIVS', 'RLIMIT_AS'];
+
+[「프로세스와 모듈」](#/read/cpp-complex-app/ana-modules)에서 플러그인을 다른 프로세스로 떼어 내면 플러그인이 죽어도 본체가 산다는 것을 봤습니다. 하지만 그 프로세스는 여전히 사용자의 권한으로 돕니다. 사용자의 파일을 읽을 수 있고 네트워크로 내보낼 수도 있습니다. 샌드박스는 그 권한을 줄이는 일입니다. 예제는 리눅스의 Landlock으로 플러그인 프로세스를 가두고, 필요한 파일은 본체가 대신 열어 줍니다.
+
+```cpp nosan
+// 샌드박스: 권한을 내려놓은 플러그인 프로세스와, 허락된 파일만 대신 열어 주는 본체
+#include <arpa/inet.h>
+#include <cerrno>
+#include <csignal>
+#include <cstdlib>
+#include <cstring>
+#include <fcntl.h>
+#include <linux/landlock.h>
+#include <poll.h>
+#include <print>
+#include <set>
+#include <string>
+#include <sys/prctl.h>
+#include <sys/resource.h>
+#include <sys/socket.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+struct Packet {                               // 글에 fd 하나를 실어 보낼 수 있다
+    char text[200]{};
+    alignas(cmsghdr) char control[CMSG_SPACE(sizeof(int))]{};
+    iovec io{text, sizeof text};
+    msghdr msg{nullptr, 0, &io, 1, control, sizeof control, 0};
+};
+void send_text(int sock, const std::string& text, int fd = -1) {
+    Packet p;
+    p.io.iov_len = text.copy(p.text, sizeof p.text);
+    cmsghdr* c = CMSG_FIRSTHDR(&p.msg);
+    *c = {CMSG_LEN(sizeof fd), SOL_SOCKET, SCM_RIGHTS};
+    std::memcpy(CMSG_DATA(c), &fd, sizeof fd);
+    if (fd < 0) p.msg.msg_controllen = 0;
+    sendmsg(sock, &p.msg, 0);
+}
+std::string recv_text(int sock, int* fd = nullptr) {
+    Packet p;
+    ssize_t n = recvmsg(sock, &p.msg, 0);
+    if (fd && p.msg.msg_controllen)
+        std::memcpy(fd, CMSG_DATA(CMSG_FIRSTHDR(&p.msg)), sizeof *fd);
+    return {p.text, n > 0 ? static_cast<std::size_t>(n) : 0};
+}
+
+bool drop_rights() {                          // 한번 내려놓으면 되찾을 수 없다
+    long abi = syscall(SYS_landlock_create_ruleset, nullptr, 0,
+                       LANDLOCK_CREATE_RULESET_VERSION);
+    if (abi < 4) return false;                // TCP까지 다루는 것은 ABI 4부터
+    landlock_ruleset_attr deny{};             // 다룬다고 적고 규칙이 없으면 금지
+    deny.handled_access_fs = (LANDLOCK_ACCESS_FS_TRUNCATE << 1) - 1;
+    deny.handled_access_net = LANDLOCK_ACCESS_NET_BIND_TCP |
+                              LANDLOCK_ACCESS_NET_CONNECT_TCP;
+    long rules = syscall(SYS_landlock_create_ruleset, &deny, sizeof deny, 0);
+    rlimit memory{256u << 20, 256u << 20};    // 주소 공간은 256MB까지
+    return prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 &&
+           syscall(SYS_landlock_restrict_self, rules, 0) == 0 &&
+           setrlimit(RLIMIT_AS, &memory) == 0;
+}
+
+[[noreturn]] void plugin(int sock) {          // 플러그인 프로세스. 남의 코드다
+    auto say = [&](const std::string& s) { send_text(sock, "log " + s); };
+    if (!drop_rights()) say("이 커널로는 가둘 수 없다"), _exit(1);
+    bool opened = open("/etc/hostname", O_RDONLY) >= 0;
+    say(opened ? "직접 열기 -> 열림" : "직접 열기 -> 막힘");
+    for (std::string path : {"notes.txt", "/etc/hostname"}) {
+        send_text(sock, "open " + path);
+        int fd = -1;
+        char data[64]{};
+        std::string answer = recv_text(sock, &fd);
+        if (fd >= 0 && read(fd, data, sizeof data - 1) > 0)
+            answer += std::string(", 읽은 것: ") + data;
+        say(path + " 부탁 -> " + answer);
+    }
+    sockaddr_in to{AF_INET, htons(80), {htonl(INADDR_LOOPBACK)}, {}};
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    bool blocked = connect(s, reinterpret_cast<sockaddr*>(&to), sizeof to) < 0 &&
+                   errno == EACCES;
+    say(blocked ? "TCP 연결 -> 막힘" : "TCP 연결 -> 나감");
+    void* volatile big = std::malloc(1u << 30);
+    say(big ? "1GB 할당 -> 됨" : "1GB 할당 -> 실패");
+    for (;;) pause();                         // 대답 없이 멈춘 플러그인
+}
+
+int main() {
+    const std::set<std::string> granted{"notes.txt"};   // 사용자가 허락한 것
+    int file = open("notes.txt", O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    if (write(file, "장 볼 것", 11) < 0 || close(file) < 0) return 1;
+    int pair[2];
+    socketpair(AF_UNIX, SOCK_SEQPACKET, 0, pair);
+    pid_t child = fork();
+    if (child == 0) plugin(pair[1]);
+    close(pair[1]);
+    for (pollfd p{pair[0], POLLIN, 0}; poll(&p, 1, 500) > 0;) {  // 0.5초를 기다린다
+        std::string m = recv_text(pair[0]);
+        if (m.starts_with("log ")) {
+            std::println("플러그인: {}", m.substr(4));
+            continue;
+        }
+        if (!m.starts_with("open ")) break;   // 연결이 끊겼다
+        std::string path = m.substr(5);
+        bool ok = granted.contains(path);
+        int fd = ok ? open(path.c_str(), O_RDONLY) : -1;
+        std::println("본체: {} 요청 -> {}", path, ok ? "열어서 fd를 건넴" : "거절");
+        send_text(pair[0], ok ? "받음" : "거절", fd);
+        if (fd >= 0) close(fd);
+    }
+    kill(child, SIGKILL);
+    int status = 0;
+    waitpid(child, &status, 0);
+    bool killed = WIFSIGNALED(status);
+    std::println("본체: {}. 본체는 계속 돈다",
+                 killed ? "대답이 없어 플러그인을 끝냄" : "플러그인이 끝남");
+    unlink("notes.txt");
+}
+```
+
+```text
+플러그인: 직접 열기 -> 막힘
+본체: notes.txt 요청 -> 열어서 fd를 건넴
+플러그인: notes.txt 부탁 -> 받음, 읽은 것: 장 볼 것
+본체: /etc/hostname 요청 -> 거절
+플러그인: /etc/hostname 부탁 -> 거절
+플러그인: TCP 연결 -> 막힘
+플러그인: 1GB 할당 -> 실패
+본체: 대답이 없어 플러그인을 끝냄. 본체는 계속 돈다
+```
+
+- **스스로 내려놓는다**: 플러그인 프로세스는 남의 코드를 돌리기 전에 `drop_rights`를 부릅니다. Landlock에 파일과 TCP를 다루겠다고 적고 허락하는 규칙은 하나도 주지 않았으므로 모두 금지입니다. 한번 걸면 풀 수 없고 자식 프로세스도 물려받습니다. 누구나 읽을 수 있는 `/etc/hostname`도 열지 못했습니다
+- **커널에도 판을 묻는다**: Landlock이 다루는 권한은 커널이 새로워질 때마다 늘어납니다. TCP는 ABI 4부터, UDP는 10부터입니다. 그래서 먼저 판을 묻고 그 판이 아는 것만 적습니다. [「ABI가 안정된 인터페이스」](#/read/cpp-complex-app/plg-abi)에서 플러그인과 본체가 하던 일과 같습니다. 예제는 UDP를 다루지 않았으므로 그쪽은 열려 있습니다
+- **본체가 대신 연다**: 플러그인은 경로를 보내고, 본체는 허락 목록과 견준 뒤 자기가 열어서 fd를 `SCM_RIGHTS`로 건넵니다. Landlock은 여는 순간을 검사하므로 받은 fd로는 읽을 수 있습니다. 플러그인이 갖는 것은 경로가 아니라 열린 파일 하나입니다. `/etc/hostname`은 목록에 없어서 거절했습니다. 실제로는 `..`과 심볼릭 링크를 푼 경로로 견줍니다
+- **검사는 본체 안에서**: 플러그인 프로세스 안에 둔 검사는 플러그인이 건너뛸 수 있습니다. 본체는 플러그인이 보낸 경로, 길이, 차례를 모두 의심합니다
+- **자원에도 한도를**: `RLIMIT_AS`로 주소 공간을 256MB로 묶어서 1GB 할당이 실패했습니다. 대답 없이 멈춘 플러그인은 본체가 0.5초를 기다린 뒤 끝냈습니다. CPU를 쓰지 않고 멈춘 것은 CPU 한도에 걸리지 않으므로 본체가 시계로 지켜봅니다
+
+## 가두는 층
+
+| 층 | 막는 것 | 못 막는 것 |
+| --- | --- | --- |
+| 언어와 바이트코드 | 내주지 않은 함수를 부르는 것 | 인터프리터의 버그, 끝없는 루프 |
+| 다른 프로세스 | 충돌과 메모리 훼손이 본체로 번지는 것 | 사용자의 권한으로 하는 모든 일 |
+| OS의 정책 | 파일, 네트워크, 다른 프로세스에 닿는 것 | 허락된 통로로 하는 나쁜 일 |
+| 자원 한도 | 메모리와 시간을 독차지하는 것 | 한도 안에서 하는 일 |
+
+- **프로세스만 나눈 것**: VS Code의 확장 호스트는 VS Code와 같은 권한을 갖습니다. 확장은 파일을 읽고 쓰고, 네트워크에 나가고, 다른 프로그램을 띄울 수 있습니다. 지키는 것은 마켓플레이스의 검사와 서명, 게시자를 믿을지 묻는 창입니다
+- **Chromium**: 권한을 가진 브로커(브라우저 프로세스)와 갇힌 대상(렌더러)으로 나눕니다. 대상의 요청은 브로커가 정책과 견준 뒤 대신 해 주고 결과를 돌려줍니다. 설계 원칙의 하나가 갇힌 코드를 악의적이라고 가정하는 것입니다
+- **고른 것이 허락이다**: macOS의 앱 샌드박스에서는 열기 패널을 시스템이 다른 프로세스에서 띄우고, 사용자가 고른 파일까지 앱의 샌드박스를 넓힙니다. Flatpak의 포털도 파일을 고른 것을 그 파일에 대한 허락으로 봅니다. 권한을 묻는 창을 따로 띄우지 않습니다
+- **Windows**: AppContainer는 파일, 네트워크, 장치, 창을 따로 가두고 필요한 만큼만 내줍니다
+- **WASI**: 웹어셈블리 모듈은 바깥에 닿을 길 없이 시작하고, 호스트가 건넨 것(미리 열어 준 폴더 같은 것)으로만 일합니다. 앞 쪽에서 Lua의 `dofile`을 지운 것과 같은 생각입니다
+
+## 플러그인 체계에 넣을 때
+
+- **선언이 정책이 된다**: [「확장 지점」](#/read/cpp-complex-app/plg-points)의 선언에 필요한 권한을 적게 하고, 설치할 때 보여 주고, 본체가 그 목록으로 요청을 검사합니다
+- **올리는 차례**: 권한을 내려놓은 뒤에 플러그인의 코드를 올립니다. 그러려면 플러그인이 든 폴더만은 읽고 실행할 수 있게 규칙으로 허락해 둡니다
+- **왕복의 값**: 갇힌 플러그인은 본체를 부를 때마다 프로세스 사이를 오갑니다. 붓질의 점마다 부르는 필터는 이렇게 둘 수 없습니다. 큰 데이터는 공유 메모리로 넘기고 호출은 덩어리로 묶습니다
+- **플랫폼마다 다시 쓴다**: 가두는 방법은 운영체제마다 다릅니다. 본체와 주고받는 규약과 정책은 함께 쓰고, 권한을 내려놓는 함수만 플랫폼별로 둡니다
+
+<Note>
+주소 공간 한도가 ASan과 맞지 않아 이 예제는 새니타이저 없이 돌렸습니다. 샌드박스는 한 겹의 벽이고, 운영체제의 버그나 본체의 검사 실수 하나로 뚫립니다. 그래서 언어, 프로세스, OS 정책을 겹쳐 씁니다. 같은 프로세스에 올리는 C++ 플러그인은 가둘 수 없으므로, 서명과 검수로 믿을 수 있는 것만 받습니다([「코드 서명」](#/read/cpp-complex-app/shp-signing)).
+</Note>
+
+## 정리
+
+- 프로세스를 나누면 충돌이 번지지 않을 뿐이다. 권한은 그 프로세스가 스스로 내려놓게 하고, 기본을 금지로 둔다
+- 갇힌 플러그인에게 필요한 것은 본체가 정책과 견줘 대신 해 준다. 사용자가 고른 파일은 그 자체가 허락이다
+- 메모리와 시간에도 한도를 두고, 언어, 프로세스, OS 정책을 겹쳐 쓴다
+
+## 참고 문서
+
+- [Linux 커널 문서: Landlock(스스로 거는 제한, ABI 판별, 규칙의 종류, 열려 있던 파일과 건네받은 fd)](https://docs.kernel.org/userspace-api/landlock.html)
+- [Chromium: Sandbox(설계 원칙, 브로커와 대상, 정책에 맞는 호출을 브로커가 대신 실행)](https://chromium.googlesource.com/chromium/src/+/main/docs/design/sandbox.md)
+- [VS Code: Extension runtime security(확장 호스트의 권한, 마켓플레이스의 보호 수단)](https://code.visualstudio.com/docs/configure/extensions/extension-runtime-security)
+- [Apple: Accessing files from the macOS App Sandbox(다른 프로세스가 띄우는 열기 패널, 고른 파일로 넓어지는 샌드박스)](https://developer.apple.com/documentation/security/accessing-files-from-the-macos-app-sandbox)
+- [Flatpak: Sandbox Permissions(기본 제한, 선언하는 권한, 포털과 파일 고르기)](https://docs.flatpak.org/en/latest/sandbox-permissions.html)
+- [Microsoft Learn: AppContainer Isolation(자격 증명, 장치, 파일, 네트워크, 프로세스, 창의 격리)](https://learn.microsoft.com/en-us/windows/win32/secauthz/appcontainer-isolation)
+- [WASI: Security(주어진 것만 쓰는 모듈, 미리 열어 준 파일 설명자)](https://wasi.dev/security)
