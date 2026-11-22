@@ -1,0 +1,149 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'SD카드가 깨지는 까닭과 닳는 까닭, 쓰는 양 재기, 덜 쓰게 하는 설정, 파일을 안전하게 바꿔 쓰는 법';
+export const terms = ['noatime', 'O_TRUNC', 'RuntimeMaxUse'];
+
+보드에서 가장 먼저 탈이 나는 부품은 대개 SD카드입니다. 탈에는 두 가지가 있습니다. 쓰는 도중에 전원이 끊겨 내용이 어긋나는 것과, 오래 써서 닳는 것입니다. 까닭이 다르므로 막는 법도 다릅니다.
+
+## 두 가지 탈
+
+| 탈 | 까닭 | 나타나는 모습 |
+| --- | --- | --- |
+| 깨짐 | 쓰는 도중에 전원이 끊기거나 전압이 내려앉는다 | 켜지지 않는다. 파일이 반쯤만 있다. 갑자기 쓰기가 안 된다 |
+| 닳음 | 플래시가 견디는 쓰기 횟수가 정해져 있다 | 몇 달이나 몇 해 뒤에 아무 파일이나 망가진다 |
+
+## 깨지는 까닭
+
+- **쓰기는 모아서 한다**: 리눅스는 쓰라는 요청을 램에 모아 두었다가 보통 5초쯤마다 저장 장치로 내려보냅니다. 그 사이에 전원이 끊기면 아직 램에 있던 것이 사라집니다
+- **카드도 시간이 걸린다**: 내려보낸 데이터를 카드가 실제로 적는 데에도 시간이 듭니다. 그 틈에 끊기면 적던 자리가 망가집니다
+- **저널은 장부를 지킨다**: 루트 파티션의 ext4는 무엇을 바꿀지 먼저 적어 두는 저널이 있어서 파일 시스템의 구조는 대개 되살아납니다. 쓰고 있던 파일의 내용까지 지켜 주지는 않습니다
+- **부트 파티션은 저널이 없다**: `config.txt`와 커널이 든 부트 파티션은 FAT이라 더 약합니다. 갱신하는 도중에 끊기는 것이 가장 나쁩니다
+- **전원이 나빠도 같은 일이 난다**: 전압이 순간적으로 내려앉으면 카드에게는 전원이 끊긴 것과 같습니다([「전원: 5V 5A와 USB-PD」](#/read/sbc-start/prt-power))
+- **갑자기 읽기 전용이 될 때**: ext4는 어긋난 것을 알아채면 더 망가지지 않게 읽기 전용으로 다시 붙입니다. 돌던 프로그램이 한꺼번에 쓰기에 실패한다면 `dmesg`에서 EXT4라는 낱말을 찾아봅니다
+
+## 닳는 까닭
+
+- **횟수에 끝이 있다**: 플래시 메모리의 칸은 지우고 쓰는 횟수에 한계가 있습니다. 카드 안의 제어기가 쓰기를 여러 칸에 골고루 돌리지만 끝은 옵니다. 라즈베리파이의 백서는 쓰는 양에 따라 몇 달에서 몇 해라고 적습니다
+- **가만히 있어도 쓴다**: 내 프로그램이 아무것도 쓰지 않아도 OS는 기록을 계속 남깁니다
+- **센서 기록이 카드를 닳게 한다**: 1초마다 한 줄씩 적고 그때마다 저장 장치까지 내려보내면 하루에 86,400번을 씁니다
+- **미리 바꾼다**: 백서는 카드가 끝에 이르기 전에 바꾸는 주기를 정해 두기를 권합니다. 이름 있는 회사의 카드를 쓰라는 것도 그 권고에 들어 있습니다
+
+## 얼마나 쓰는지 재기
+
+```sh
+awk '{printf "%.0f MB\n", $7 * 512 / 1e6}' /sys/block/mmcblk0/stat
+```
+
+- **켠 뒤로 쓴 양**: 이 파일의 일곱째 숫자가 켠 뒤로 쓴 섹터의 수이고 섹터 하나가 512바이트입니다. 하루 간격으로 두 번 재서 빼면 하루에 쓰는 양이 나옵니다
+- **누가 쓰는지**: `sudo iotop`이나 `sudo fatrace`가 쓰는 프로그램을 보여 줍니다. 둘 다 `apt`로 깔아야 합니다
+
+## 덜 쓰게 하기
+
+```text
+[Journal]
+Storage=volatile
+RuntimeMaxUse=16M
+```
+
+- **기록을 램에 둔다**: 위 내용을 `/etc/systemd/journald.conf.d/volatile.conf`에 두면 시스템의 기록이 카드가 아니라 램에 쌓입니다. 다시 켜면 사라지므로, 탈이 났을 때 지난 기록을 볼 수 없게 됩니다
+- **모았다가 쓰는 간격을 늘린다**: `/etc/fstab`의 루트 줄에서 옵션을 `defaults,noatime,commit=30`으로 두면 5초 대신 30초마다 내려보냅니다. 끊겼을 때 잃는 것도 30초 치로 늘어납니다
+- **`noatime`**: 파일을 읽을 때마다 읽은 시각을 적는 일을 끕니다
+- **읽기 전용으로 돌린다**: 현장에 두는 장치는 루트를 읽기 전용으로 두고, 남길 데이터만 작은 파티션에 따로 씁니다([「전원을 뽑기 전에」](#/read/sbc-start/care-shutdown))
+- **카드를 벗어난다**: 기록을 많이 쌓는 장치라면 SSD가 답입니다([「microSD와 NVMe」](#/read/sbc-start/prt-storage))
+
+## 파일을 안전하게 바꿔 쓰기
+
+설정이나 상태를 담은 파일을 고칠 때 그 자리에 덮어쓰면, 쓰는 도중에 끊겼을 때 옛 내용도 새 내용도 아닌 것이 남습니다. 옆에 새 파일을 다 쓰고 이름을 바꿔치기하면 옛것과 새것 가운데 하나가 반드시 남습니다. 아래 예제가 두 방법을 견줍니다.
+
+```c
+// 설정 파일을 안전하게 바꾸는 법: 옆에 새 파일을 다 쓴 다음 이름을 바꿔치기한다
+#define _POSIX_C_SOURCE 200809L
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+// path에 text를 쓰고 저장 장치까지 내려보낸다
+// half가 참이면 반만 쓰고 멈춘다. 쓰는 도중에 전원이 끊긴 셈이다
+static bool write_all(const char* path, const char* text, bool half) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);   // 열면서 비운다
+    if (fd < 0) return false;
+    size_t n = strlen(text);
+    if (half) n /= 2;
+    bool ok = write(fd, text, n) == (ssize_t)n && fsync(fd) == 0;
+    close(fd);
+    return ok && !half;
+}
+
+// 안전한 방법: 임시 파일에 다 쓰고, 그 이름을 본래 이름으로 바꾼다
+static void replace(const char* path, const char* text, bool cut) {
+    char tmp[64];
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    if (!write_all(tmp, text, cut)) return;  // 끊겨도 본래 파일은 그대로다
+    rename(tmp, path);                       // 옛것 아니면 새것, 중간은 없다
+    int dir = open(".", O_RDONLY);
+    fsync(dir);                              // 이름이 바뀐 것도 내려보낸다
+    close(dir);
+}
+
+static void show(const char* when, const char* path) {
+    char line[64] = "";
+    FILE* f = fopen(path, "r");
+    if (f) {
+        if (!fgets(line, sizeof line, f)) line[0] = 0;
+        fclose(f);
+    }
+    line[strcspn(line, "\n")] = 0;
+    printf("%s\n  %s\n", when, line);
+}
+
+int main(void) {
+    const char* path = "config.json";
+    const char* old_text = "{\"interval\": 60}\n";
+    const char* new_text = "{\"interval\": 10}\n";
+
+    write_all(path, old_text, false);
+    show("처음", path);
+
+    write_all(path, new_text, true);         // 위험한 방법: 그 자리에 덮어쓴다
+    show("그 자리에 덮어쓰다가 끊겼을 때", path);
+
+    write_all(path, old_text, false);        // 처음으로 되돌리고
+    replace(path, new_text, true);
+    show("임시 파일에 쓰다가 끊겼을 때", path);
+
+    replace(path, new_text, false);
+    show("바꿔치기를 끝까지 마쳤을 때", path);
+}
+```
+
+```text
+처음
+  {"interval": 60}
+그 자리에 덮어쓰다가 끊겼을 때
+  {"interv
+임시 파일에 쓰다가 끊겼을 때
+  {"interval": 60}
+바꿔치기를 끝까지 마쳤을 때
+  {"interval": 10}
+```
+
+- **`rename`은 한 번에 된다**: 같은 폴더 안에서 이름을 바꾸는 일은 중간 상태가 없습니다. 임시 파일을 같은 폴더에 만드는 까닭입니다
+- **`fsync`가 빠지면 소용없다**: 임시 파일이 저장 장치까지 내려가기 전에 이름부터 바뀌면, 끊긴 뒤에 빈 파일이 새 이름을 달고 남을 수 있습니다. 백서도 이 호출이 꼭 있어야 한다고 적습니다
+- **남은 임시 파일**: 끊긴 뒤에는 `.tmp`가 남아 있을 수 있습니다. 프로그램을 시작할 때 지웁니다
+- **줄을 덧붙이는 기록**: 센서 값처럼 계속 쌓는 것은 한 줄씩 덧붙이고, 몇 초나 몇십 줄마다 한 번 `fsync`합니다. 잃어도 되는 양과 카드가 닳는 정도를 맞바꾸는 자리입니다
+- **직접 하지 않는 길**: 이 서가의 「SQLite」가 다루는 데이터베이스는 이 일을 대신 해 줍니다
+
+<Note>
+깨지는 까닭과 줄이는 설정은 라즈베리파이의 백서 Making a more resilient file system(2026년 8월 판)에서 옮겼습니다. 백서는 카드의 수명을 숫자로 적지 않습니다. 예제는 검사 환경의 파일 시스템에서 돌렸고, 전원이 끊기는 것은 반만 쓰고 멈추는 것으로 흉내 냈습니다. 진짜 전원 차단에서는 반만 쓴 것조차 남지 않을 수 있습니다. `/sys/block`의 숫자 뜻은 리눅스 커널의 규칙이고, 보드에서 재 보지는 못했습니다.
+</Note>
+
+## 정리
+
+- 카드의 탈은 쓰는 도중에 끊겨 깨지는 것과 오래 써서 닳는 것, 두 가지다
+- 기록을 램에 두고 내려보내는 간격을 늘리면 덜 쓰고, 현장의 장치는 읽기 전용 루트에 작은 데이터 파티션을 둔다
+- 파일을 고칠 때에는 임시 파일에 쓰고 `fsync`한 다음 `rename`으로 바꿔치기한다
+
+## 참고 문서
+
+- [Raspberry Pi 백서: Making a more resilient file system(쓰기 캐시와 전원 차단, 카드의 수명, ext4의 저널과 commit, journald를 램에, 읽기 전용 루트, 임시 파일과 fsync와 rename)](https://pip-assets.raspberrypi.com/categories/685-app-notes-guides-whitepapers/documents/RP-003610-WP-3-Making%20a%20more%20resilient%20file%20system.pdf)
