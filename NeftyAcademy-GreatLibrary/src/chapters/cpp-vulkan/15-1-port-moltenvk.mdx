@@ -1,0 +1,132 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'MoltenVK: Metal 위의 벌칸, 이식성 드라이버와 로더, 부분집합, 실행 중 셰이더 번역, KosmicKrisp';
+export const terms = [
+  'VkPhysicalDevicePortabilitySubsetFeaturesKHR', 'minVertexInputBindingStrideAlignment',
+];
+
+애플의 기기에는 벌칸 드라이버가 없습니다. 애플이 다른 저수준 그래픽 드라이버를 꽂을 길을 열어 두지 않아서, 벌칸은 Metal 위에 구현한 층으로 돕니다([「OpenGL, Direct3D, Metal과 견주기」](#/read/cpp-vulkan/vk-others)). 그 가운데 먼저 나와 널리 쓰인 것이 MoltenVK입니다. 벌칸 1.4까지 구현했지만 적합성 시험을 다 통과하지는 못한 드라이버라서 로더가 따로 다룹니다. 아래 프로그램은 맥에서 벌어지는 그 일을 이 책의 리눅스 기계에서 재현합니다.
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp
+// portability_subset의 구조체는 베타 머리 파일에 있어서, 이 매크로가 있어야 보인다
+#define VK_ENABLE_BETA_EXTENSIONS
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <string>
+#include "vkx_device.hpp"
+
+// 인스턴스를 만들어 본다. portable이면 이식성 드라이버도 보겠다고 밝힌다
+VkResult try_instance(bool portable, VkInstance* instance) {
+    const char* extension = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+    VkApplicationInfo app{.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+                          .apiVersion = VK_API_VERSION_1_3};
+    VkInstanceCreateInfo ci{.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+                            .pApplicationInfo = &app};
+    if (portable) {
+        ci.flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+        ci.enabledExtensionCount = 1;
+        ci.ppEnabledExtensionNames = &extension;
+    }
+    return vkCreateInstance(&ci, nullptr, instance);
+}
+
+int main() {
+    // 이 기계의 lavapipe 매니페스트를 베끼고, MoltenVK의 매니페스트에 있는
+    // 한 줄을 더한다
+    std::ifstream in("/usr/share/vulkan/icd.d/lvp_icd.json");
+    std::string text{std::istreambuf_iterator<char>(in), {}};
+    text.erase(text.find_last_not_of('\n') + 1);
+    const std::string icd = "\"ICD\": {";
+    text.insert(text.find(icd) + icd.size(),
+                "\n        \"is_portability_driver\": true,");
+    const auto manifest = std::filesystem::absolute("portability_icd.json");
+    std::ofstream(manifest) << text;
+    setenv("VK_DRIVER_FILES", manifest.c_str(), 1);   // 로더가 이것만 보게 한다
+    std::puts(text.c_str());
+
+    VkInstance instance = VK_NULL_HANDLE;
+    const VkResult plain = try_instance(false, &instance);
+    std::printf("그냥 만들기: %s\n",
+                plain == VK_SUCCESS ? "됨"
+                : plain == VK_ERROR_INCOMPATIBLE_DRIVER
+                    ? "VK_ERROR_INCOMPATIBLE_DRIVER" : "다른 오류");
+    if (plain == VK_SUCCESS) vkDestroyInstance(instance, nullptr);
+    vkx::check(try_instance(true, &instance), "이식성 드라이버까지 보는 인스턴스");
+    uint32_t count = 0;
+    vkEnumeratePhysicalDevices(instance, &count, nullptr);
+    std::printf("이식성 드라이버도 보겠다고 밝히고 만들기: 됨, 장치 %u개\n", count);
+
+    // 장치가 부분집합이라고 알리면 그 확장을 켜야 하고(make_device가 한다),
+    // 무엇이 빠졌는지 묻는다
+    vkx::Device dev = vkx::make_device(instance);
+    if (vkx::has_device_extension(dev.gpu, "VK_KHR_portability_subset")) {
+        const auto TYPE =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR;
+        VkPhysicalDevicePortabilitySubsetFeaturesKHR sub{.sType = TYPE};
+        VkPhysicalDeviceFeatures2 f{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &sub};
+        vkGetPhysicalDeviceFeatures2(dev.gpu, &f);
+        std::printf("VK_KHR_portability_subset: 있음. 삼각형 부채 %d, 이벤트 %d, "
+                    "뷰의 성분 바꾸기 %d, 샘플러 LOD 바이어스 %d\n",
+                    sub.triangleFans, sub.events, sub.imageViewFormatSwizzle,
+                    sub.samplerMipLodBias);
+    } else {
+        std::puts("VK_KHR_portability_subset: 없음(빠진 기능이 없다는 뜻)");
+    }
+    vkx::destroy(dev);
+    vkDestroyInstance(instance, nullptr);
+    std::filesystem::remove(manifest);
+}
+```
+
+```text
+{
+    "ICD": {
+        "is_portability_driver": true,
+        "api_version": "1.4.318",
+        "library_path": "libvulkan_lvp.so"
+    },
+    "file_format_version": "1.0.1"
+}
+그냥 만들기: VK_ERROR_INCOMPATIBLE_DRIVER
+이식성 드라이버도 보겠다고 밝히고 만들기: 됨, 장치 1개
+VK_KHR_portability_subset: 없음(빠진 기능이 없다는 뜻)
+```
+
+- **매니페스트의 한 줄**: 로더는 드라이버를 매니페스트(JSON 파일)로 찾습니다. 거기에 `is_portability_driver`가 참으로 적혀 있으면, 프로그램이 `VK_KHR_portability_enumeration`을 켜고 `ENUMERATE_PORTABILITY` 플래그를 주지 않는 한 그 드라이버를 올리지 않습니다. MoltenVK의 매니페스트에 이 줄이 있습니다. 드라이버가 하나도 남지 않으면 인스턴스부터 `VK_ERROR_INCOMPATIBLE_DRIVER`로 실패하는데, 맥에서 처음 만나는 오류가 대개 이것입니다([「인스턴스와 확장」](#/read/cpp-vulkan/setup-instance))
+- **왜 감추는가**: 이런 장치는 벌칸 표준을 온전히 채우지 못합니다. 그 사실을 모르는 프로그램이 모르고 쓰는 일을 막으려고, 보겠다고 밝힌 프로그램에만 보여 줍니다
+- **부분집합**: 그런 장치는 `VK_KHR_portability_subset` 확장을 알리고, 프로그램은 장치를 만들 때 이 확장을 반드시 켜야 합니다([「물리 장치와 논리 장치」](#/read/cpp-vulkan/setup-device)). `VkPhysicalDevicePortabilitySubsetFeaturesKHR`의 비트 15개가 없을 수 있는 기능입니다. 삼각형 부채, 점으로 그리는 다각형, 이벤트, 뷰에서 성분 바꾸기, 샘플러의 LOD 바이어스, 앞뒤 면에 다른 스텐실 기준값 같은 것들이고, 정점 스트라이드가 지켜야 할 정렬(`minVertexInputBindingStrideAlignment`)도 따로 알려 줍니다. lavapipe는 온전한 드라이버라 이 확장이 없습니다
+- **쓰려면 켠다**: 이 비트들은 묻는 데서 끝나지 않습니다. 지원하는 것을 쓰려면 그 비트를 켠 구조체를 장치를 만들 때 넘겨야 합니다. 이 책에서는 뷰의 성분 바꾸기([「이미지, 뷰, 샘플러」](#/read/cpp-vulkan/tex-image))와 이벤트([「파이프라인 배리어」](#/read/cpp-vulkan/vsync-barriers))가 여기에 걸리므로, 맥에서 돌릴 때는 `make_device`의 `extra`로 넘깁니다
+
+## Metal 위에서 달라지는 것
+
+- **셰이더는 실행 중에 번역된다**: MoltenVK는 `vkCreateShaderModule`에서 SPIR-V를 SPIRV-Cross로 MSL로 바꿉니다. 셰이더를 올리는 시간에서 이 번역이 가장 큽니다. 파이프라인 캐시에는 번역된 MSL이 들어가므로, 캐시를 파일에 두었다가 다음 실행에 넘기면 번역을 건너뜁니다([「파이프라인 캐시」](#/read/cpp-vulkan/ps-cache)). `MVK_CONFIG_DEBUG`를 켜면 받은 SPIR-V와 만든 MSL을 로그에 적어 줍니다
+- **없는 것들**: 파이프라인 통계 쿼리 풀은 만들 수 없고, 프로그램이 넘긴 `VkAllocationCallbacks`는 무시됩니다. 확장마다 필요한 Metal 판이 달라서, 기능은 늘 물어보고 씁니다([「장치 기능에 따라 가르기」](#/read/cpp-vulkan/port-features)). 인텔 맥처럼 애플 실리콘이 아닌 GPU에서는 전원 상태에 따라 `timestampPeriod`가 바뀔 수 있으므로 시간을 잴 때 다시 묻습니다([「GPU 프로파일링」](#/read/cpp-vulkan/vdbg-profile))
+- **설정과 도구**: 설정은 `VK_EXT_layer_settings`에 레이어 이름 "MoltenVK"로 넘기거나 `MVK_CONFIG_`로 시작하는 환경 변수로 합니다. 검증 레이어는 SDK의 로더를 거치면 그대로 쓸 수 있습니다. 프레임을 잡아 볼 때는 Xcode의 Metal 프레임 캡처를 씁니다. `METAL_CAPTURE_ENABLED=1`과 `MVK_CONFIG_AUTO_GPU_CAPTURE_SCOPE`로 캡처 파일을 남겨 Xcode에서 엽니다
+- **함께 싣는다**: 맥에서는 시스템에 깔린 로더에 기대지 않고, 로더와 드라이버 라이브러리와 매니페스트를 앱 묶음 안에 넣어 배포하기를 권합니다. iOS에서는 이것들을 프레임워크로 넣습니다. 창은 `VK_EXT_metal_surface`로 `CAMetalLayer`에 잇습니다([「표면과 스왑체인」](#/read/cpp-vulkan/setup-swapchain))
+
+## 온전한 드라이버, KosmicKrisp
+
+LunarG가 Mesa 위에서 만든 또 하나의 Metal 층 KosmicKrisp는 2026년 10월에 벌칸 1.4 적합성 시험을 통과했습니다. 부분집합이 아닌 온전한 구현이라 위의 플래그와 확장이 필요 없습니다. 다만 Metal 4가 있어야 해서 애플 실리콘과 macOS 26 이상에서만 돕니다. Vulkan SDK에는 둘이 함께 들어 있고, 어느 매니페스트를 넣느냐로 고릅니다. 인텔 맥과 옛 macOS, iOS에서는 MoltenVK를 씁니다.
+
+<Note>
+이 프로그램은 로더의 동작만 재현한 것이고, MoltenVK 자체는 이 책의 기계에서 돌려 보지 못했습니다. 이 쪽의 나머지 내용은 MoltenVK와 LunarG의 문서에서 확인한 것입니다. 어느 구현이 올라왔는지는 `VkPhysicalDeviceDriverProperties`의 이름으로 알 수 있으니([「벌칸의 설계」](#/read/cpp-vulkan/vk-design)), 맥에서만 생기는 문제는 그것부터 확인합니다.
+</Note>
+
+## 정리
+
+- 애플 기기의 벌칸은 Metal 위에 구현한 층(MoltenVK, KosmicKrisp)이고, 로더와 드라이버를 앱에 함께 싣는다
+- 이식성 드라이버는 ENUMERATE_PORTABILITY 플래그를 준 프로그램에만 보이고, 장치는 VK_KHR_portability_subset을 켠 뒤 빠진 기능을 물어서 쓴다
+- MoltenVK는 셰이더를 실행 중에 MSL로 번역하므로 파이프라인 캐시로 로딩 시간을 줄이고, 통계 쿼리처럼 없는 기능은 기능 비트로 가른다
+
+## 참고 문서
+
+- [MoltenVK Runtime User Guide(셰이더 번역, 성능, 알려진 한계, 설정)](https://github.com/KhronosGroup/MoltenVK/blob/main/Docs/MoltenVK_Runtime_UserGuide.md)
+- [MoltenVK_icd.json(is_portability_driver가 적힌 매니페스트)](https://github.com/KhronosGroup/MoltenVK/blob/main/MoltenVK/icd/MoltenVK_icd.json)
+- [Vulkan Loader: Driver interface(매니페스트와 이식성 드라이버)](https://vulkan.lunarg.com/doc/view/latest/mac/LoaderDriverInterface.html)
+- [Vulkan 레퍼런스: VK_KHR_portability_enumeration(감추는 까닭)](https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_portability_enumeration.html)
+- [Vulkan 레퍼런스: VkPhysicalDevicePortabilitySubsetFeaturesKHR(비트 15개)](https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDevicePortabilitySubsetFeaturesKHR.html)
+- [LunarG: The State of Vulkan on Apple(두 구현, SDK, 앱에 싣기)](https://www.lunarg.com/?p=4048)
+- [Khronos: KosmicKrisp Achieves Vulkan 1.4 Conformance on Apple Silicon](https://www.khronos.org/news/permalink/kosmickrisp-achieves-vulkan-1.4-conformance-on-apple-silicon)
