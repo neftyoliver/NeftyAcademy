@@ -1,0 +1,264 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'RenderDoc: 프레임을 잡아 고른 이벤트까지 다시 실행하기, 이벤트와 액션, 그때의 상태, 창 없이 잡기';
+export const terms = [
+  'RENDERDOC_GetAPI', 'RENDERDOC_API_1_1_2', 'pRENDERDOC_GetAPI',
+  'RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE', 'StartFrameCapture', 'EndFrameCapture',
+];
+
+검증 레이어가 조용한데도 그림이 틀릴 때가 있습니다. 규칙은 지켰지만 뜻한 대로 그리지 않은 것입니다([「검증 레이어 읽기」](#/read/cpp-vulkan/vdbg-validation)). 이때는 프레임 하나의 호출을 통째로 잡아 두고, 고른 호출까지만 다시 실행해 그때의 그림과 상태를 봅니다. 프레임 디버거 RenderDoc이 하는 일이고, 아래 프로그램이 그 일을 작게 흉내 냅니다. 프레임의 호출을 목록에 적어 두었다가 고른 번호까지만 실행합니다.
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp,vkx_cmd.hpp,vkx_resource.hpp,vkx_bind.hpp,vkx_pipeline.hpp,vkx_draw.hpp
+#include <functional>
+#include <string>
+#include "vkx_bind.hpp"
+#include "vkx_cmd.hpp"
+#include "vkx_draw.hpp"
+#include "vkx_pipeline.hpp"
+
+// 가로 범위 [left, right]를 밝기 shade로 칠하는 사각형. 셋 다 푸시 상수로 받는다
+const char* VS = R"(#version 450
+layout(push_constant) uniform Push { float left, right, shade; };
+void main() {
+    gl_Position = vec4((gl_VertexIndex & 1) == 0 ? left : right,
+                       (gl_VertexIndex & 2) == 0 ? -1.0 : 1.0, 0.0, 1.0);
+})";
+const char* FS = R"(#version 450
+layout(push_constant) uniform Push { float left, right, shade; };
+layout(location = 0) out float value;
+void main() { value = shade; })";
+
+struct State {                  // 어느 이벤트까지 실행했을 때의 상태
+    VkRect2D scissor{};
+    uint32_t scissor_eid = 0;   // 시저를 마지막으로 정한 이벤트
+    int open = 0;               // 열려 있는 구간 수
+};
+struct Event {                  // 프레임 안의 호출 하나
+    std::string text;
+    char kind;                  // '[' 구간 열기, ']' 구간 닫기, 's' 상태, 'a' 액션
+    std::function<void(VkCommandBuffer, State&)> call;
+};
+
+int main() {
+    vkx::Instance inst = vkx::make_instance();
+    vkx::Device dev = vkx::make_device(inst.handle);
+    vkx::Commands cmds = vkx::make_commands(dev);
+    const uint32_t W = 32;      // 렌더 타깃은 가로 32픽셀, 세로 1픽셀
+    vkx::Image target = vkx::make_image(
+        dev, {W, 1}, VK_FORMAT_R32_SFLOAT,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    vkx::Buffer pixels =
+        vkx::make_buffer(dev, W * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+    VkPipelineLayout layout = vkx::make_layout(dev, {}, 12);
+    auto vs = vkx::make_shader(dev, vkx::compile(VS, shaderc_vertex_shader));
+    auto fs = vkx::make_shader(dev, vkx::compile(FS, shaderc_fragment_shader));
+    VkPipeline pipeline = vkx::make_pipeline(
+        dev, {.vertex = vs, .fragment = fs, .layout = layout,
+              .color = target.format,
+              .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP});
+    // 꼬리표 함수. VK_EXT_debug_utils가 꺼져 있으면 nullptr이라 건너뛴다
+    auto open_label = reinterpret_cast<PFN_vkCmdBeginDebugUtilsLabelEXT>(
+        vkGetInstanceProcAddr(inst.handle, "vkCmdBeginDebugUtilsLabelEXT"));
+    auto close_label = reinterpret_cast<PFN_vkCmdEndDebugUtilsLabelEXT>(
+        vkGetInstanceProcAddr(inst.handle, "vkCmdEndDebugUtilsLabelEXT"));
+
+    // 프레임의 호출을 곧바로 기록하지 않고 차례로 적어 둔다. 번호(EID)는 자리 + 1
+    std::vector<Event> frame;
+    auto region = [&](const char* text, float r, float g, float b) {
+        frame.push_back({text, '[', [=](VkCommandBuffer cmd, State& s) {
+            VkDebugUtilsLabelEXT label{
+                .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT,
+                .pLabelName = text, .color = {r, g, b, 1.0f}};
+            if (open_label) open_label(cmd, &label);
+            ++s.open;
+        }});
+    };
+    auto end_region = [&] {
+        frame.push_back({"", ']', [=](VkCommandBuffer cmd, State& s) {
+            if (close_label) close_label(cmd);
+            --s.open;
+        }});
+    };
+    auto scissor = [&](int32_t x, uint32_t width) {
+        const uint32_t eid = frame.size() + 1;
+        frame.push_back({"vkCmdSetScissor " + std::to_string(x) + "부터 " +
+                             std::to_string(width) + "칸",
+                         's', [=](VkCommandBuffer cmd, State& s) {
+            s.scissor = {{x, 0}, {width, 1}};
+            s.scissor_eid = eid;
+            vkCmdSetScissor(cmd, 0, 1, &s.scissor);
+        }});
+    };
+    auto draw = [&](const char* text, uint32_t from, uint32_t to, float shade) {
+        frame.push_back({"vkCmdPushConstants", 's',
+                         [=](VkCommandBuffer cmd, State&) {
+            const float push[3] = {from * 2.0f / W - 1, to * 2.0f / W - 1, shade};
+            vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_ALL, 0, 12, push);
+        }});
+        frame.push_back({std::string("vkCmdDraw ") + text, 'a',
+                         [](VkCommandBuffer cmd, State&) {
+            vkCmdDraw(cmd, 4, 1, 0, 0);
+        }});
+    };
+    auto record = [&](bool fixed) {
+        frame.clear();
+        region("장면", 0.2f, 0.6f, 1.0f);
+        frame.push_back({"vkCmdBindPipeline", 's',
+                         [=](VkCommandBuffer cmd, State&) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        }});
+        draw("바닥", 0, W, 0.2f);
+        draw("상자", 8, 12, 0.7f);
+        end_region();
+        region("UI", 1.0f, 0.8f, 0.2f);
+        scissor(0, 8);                    // UI는 왼쪽 여덟 칸 밖으로 나가지 않게
+        draw("체력 막대", 1, 20, 0.4f);
+        end_region();
+        region("뒤처리", 0.8f, 0.4f, 1.0f);
+        if (fixed) scissor(0, W);         // 고친 판: 시저를 화면 전체로 되돌린다
+        draw("반짝임", 20, 28, 1.0f);
+        end_region();
+    };
+
+    // 프레임의 처음부터 last번 이벤트까지만 실행하고, 그때의 상태를 돌려준다
+    auto replay = [&](uint32_t last) {
+        State s{.scissor = {{0, 0}, {W, 1}}};
+        VkCommandBuffer cmd = vkx::begin(cmds);
+        vkx::begin_drawing(cmd, target);
+        for (uint32_t i = 0; i < last; ++i) frame[i].call(cmd, s);
+        for (int i = 0; i < s.open; ++i)      // 도중에 끊었으면 구간을 닫아 준다
+            if (close_label) close_label(cmd);
+        vkx::end_drawing(cmd, target, pixels);
+        vkx::submit_and_wait(dev, cmds);
+        return s;
+    };
+    auto picture = [&] {
+        auto* v = static_cast<const float*>(pixels.mapped);
+        std::string row;
+        for (uint32_t x = 0; x < W; ++x) row += ".:-=+*#%@"[int(v[x] * 8.999f)];
+        return row;
+    };
+
+    record(false);
+    std::puts("EID  그 이벤트까지 실행한 렌더 타깃      이벤트(액션만)");
+    uint32_t suspect = 0;       // 그림을 바꾸지 못한 액션
+    std::string before(W, '.');
+    for (uint32_t i = 0, depth = 0; i < frame.size(); ++i) {
+        const Event& e = frame[i];
+        if (e.kind == '[')
+            std::printf("%*s%s\n", 41 + 2 * depth++, "", e.text.c_str());
+        if (e.kind == ']') --depth;
+        if (e.kind != 'a') continue;
+        replay(i + 1);
+        std::printf("%3u  |%s|  %*s%s\n", i + 1, picture().c_str(), 2 * depth, "",
+                    e.text.c_str());
+        if (picture() == before) suspect = i + 1;
+        before = picture();
+    }
+    const State at = replay(suspect);
+    std::printf("EID %u는 그림을 바꾸지 못했다. 이때의 시저: %d부터 %u칸\n",
+                suspect, at.scissor.offset.x, at.scissor.extent.width);
+    std::printf("시저를 정한 EID %u부터 EID %u까지의 모든 호출\n", at.scissor_eid,
+                suspect);
+    for (uint32_t i = at.scissor_eid - 1; i < suspect; ++i) {
+        const Event& e = frame[i];
+        std::printf("%3u  %s%s\n", i + 1,
+                    e.kind == '[' ? "구간 열기 " : e.kind == ']' ? "구간 닫기" : "",
+                    e.text.c_str());
+    }
+    record(true);
+    replay(frame.size());
+    std::printf("고친 프레임의 끝  |%s|\n", picture().c_str());
+
+    vkDestroyPipeline(dev.handle, pipeline, nullptr);
+    vkDestroyPipelineLayout(dev.handle, layout, nullptr);
+    vkDestroyShaderModule(dev.handle, vs, nullptr);
+    vkDestroyShaderModule(dev.handle, fs, nullptr);
+    vkx::destroy(dev, pixels);
+    vkx::destroy(dev, target);
+    vkx::destroy(dev, cmds);
+    vkx::destroy(dev);
+    vkx::destroy(inst);
+}
+```
+
+```text
+EID  그 이벤트까지 실행한 렌더 타깃      이벤트(액션만)
+                                         장면
+  4  |::::::::::::::::::::::::::::::::|    vkCmdDraw 바닥
+  6  |::::::::####::::::::::::::::::::|    vkCmdDraw 상자
+                                         UI
+ 11  |:=======####::::::::::::::::::::|    vkCmdDraw 체력 막대
+                                         뒤처리
+ 15  |:=======####::::::::::::::::::::|    vkCmdDraw 반짝임
+EID 15는 그림을 바꾸지 못했다. 이때의 시저: 0부터 8칸
+시저를 정한 EID 9부터 EID 15까지의 모든 호출
+  9  vkCmdSetScissor 0부터 8칸
+ 10  vkCmdPushConstants
+ 11  vkCmdDraw 체력 막대
+ 12  구간 닫기
+ 13  구간 열기 뒤처리
+ 14  vkCmdPushConstants
+ 15  vkCmdDraw 반짝임
+고친 프레임의 끝  |:=======####::::::::@@@@@@@@::::|
+```
+
+- **이벤트와 액션**: RenderDoc은 잡은 프레임의 API 호출마다 1부터 번호(EID)를 매기고 이벤트라고 부릅니다. 그리기, 디스패치, 복사, 지우기처럼 GPU에 일을 시키는 이벤트가 액션이고, 이벤트 브라우저 창은 기본으로 액션만 보여 줍니다. 상태를 정하는 호출도 번호를 받으므로 액션의 번호는 위처럼 띄엄띄엄합니다
+- **고른 이벤트의 시점**: 이벤트를 고르면 다른 창이 모두 그 시점을 보여 줍니다. 텍스처 뷰어에는 그때의 렌더 타깃이, 메시 뷰어에는 그때의 도형이 나옵니다. 위 출력의 줄 하나가 이벤트 하나를 골랐을 때의 렌더 타깃이고, EID 15는 그렸는데도 그림이 그대로입니다
+- **그 시점의 상태**: 파이프라인 상태 창은 그 이벤트에 걸려 있던 상태를 모두 보여 줍니다. 여기서는 시저가 여덟 칸이었습니다. UI 구간에서 좁힌 값이 커맨드 버퍼에 남아 다음 구간의 그리기에도 쓰인 것입니다([「동적 상태」](#/read/cpp-vulkan/ps-dynamic)). 이벤트 브라우저의 필터를 바꾸면 상태 호출도 보여서, 누가 정했는지 찾을 수 있습니다
+- **구간과 이름**: 꼬리표로 묶은 구간은 이벤트 브라우저의 나무가 되고 꼬리표의 색도 쓰입니다. `vkSetDebugUtilsObjectNameEXT`로 붙인 이름은 파이프라인에 묶인 리소스 자리에 나오는데, 리소스마다 마지막에 붙인 이름 하나만 남습니다
+- **픽셀에서 거꾸로**: 텍스처 뷰어에서 픽셀을 고르고 이력을 열면, 프레임의 처음부터 고른 이벤트까지 그 픽셀을 고친 이벤트가 모두 나옵니다. 검사에서 떨어진 프래그먼트는 빨갛게 표시되고, 줄을 골라 그 픽셀의 셰이더를 디버거로 따라갈 수 있습니다
+
+## 프레임 잡기
+
+RenderDoc의 File → Launch Application으로 프로그램을 띄웁니다. 벌칸에서 RenderDoc은 암묵 레이어로 등록되어 있다가 이렇게 띄운 프로세스에 끼어들므로 코드를 고칠 필요가 없습니다([「인스턴스와 확장」](#/read/cpp-vulkan/setup-instance)). F12나 Print Screen을 누르면 다음 프레임이 잡히고, 프로그램을 닫으면 RenderDoc에 열립니다. 프레임은 스왑체인에 내보내는 곳에서 끊으므로, 이 책의 예제처럼 창 없이 그리는 프로그램은 처음과 끝을 직접 알려 줍니다.
+
+```cpp nocheck
+#include <dlfcn.h>           // 윈도우에서는 GetModuleHandleA와 GetProcAddress
+#include "renderdoc_app.h"   // RenderDoc을 깐 폴더에 들어 있는 헤더
+
+// RenderDoc이 띄운 프로세스에는 그 모듈이 이미 올라와 있다. 아니면 nullptr
+RENDERDOC_API_1_1_2* find_renderdoc() {
+    void* module = dlopen("librenderdoc.so", RTLD_NOW | RTLD_NOLOAD);
+    if (!module) return nullptr;
+    auto get =
+        reinterpret_cast<pRENDERDOC_GetAPI>(dlsym(module, "RENDERDOC_GetAPI"));
+    RENDERDOC_API_1_1_2* api = nullptr;
+    if (!get || get(eRENDERDOC_API_Version_1_1_2,
+                    reinterpret_cast<void**>(&api)) != 1)
+        return nullptr;
+    return api;
+}
+
+// main에서: 잡으려는 프레임의 기록과 제출을 감싼다
+RENDERDOC_API_1_1_2* rdoc = find_renderdoc();
+void* device = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(inst.handle);
+if (rdoc) rdoc->StartFrameCapture(device, nullptr);   // 창이 없으므로 nullptr
+replay(frame.size());
+if (rdoc) rdoc->EndFrameCapture(device, nullptr);     // 캡처 파일 하나가 생긴다
+```
+
+- **있을 때만 부른다**: 모듈을 새로 올리지 않고 이미 올라와 있는지만 묻습니다. RenderDoc 없이 실행하면 `nullptr`이 나와 아무 일도 하지 않습니다. 이 책의 기계에는 RenderDoc이 없어, 이 조각은 문서의 서명대로 적고 흉내 낸 모듈로만 돌려 보았습니다
+- **장치 포인터**: 벌칸에서는 `VkInstance` 핸들이 아니라 매크로로 꺼낸 값을 넘깁니다. 창 자리에 `nullptr`을 주면 그 장치가 그린 것을 창과 상관없이 잡습니다
+- **캡처 파일**: 그 프레임을 다시 실행하는 데 필요한 데이터만 담습니다. 잡은 기계와 GPU 회사가 다르거나 하드웨어가 많이 다르면 열리지 않을 수 있습니다
+
+<Note>
+RenderDoc은 프로그램이 API를 옳게 쓴다고 보고 잡습니다. 규칙을 어긴 프로그램을 잡으면 죽거나 엉뚱한 결과가 나올 수 있으니, 검증 레이어부터 조용하게 만듭니다. 장치는 하나만 만든다고 가정하고, 메모리의 사본을 따로 두어 메모리를 더 씁니다. 지원하는 확장에도 범위가 있으니, 새 확장을 쓴다면 문서의 벌칸 지원 쪽을 먼저 봅니다.
+</Note>
+
+## 정리
+
+- RenderDoc은 프레임의 호출을 잡아 두고 고른 이벤트까지 다시 실행해, 그 시점의 렌더 타깃과 파이프라인 상태를 보여 준다
+- 그림이 틀리면 액션을 하나씩 넘기며 처음 어긋나는 이벤트를 찾고, 그 이벤트의 상태와 앞선 호출에서 원인을 찾는다
+- 꼬리표와 이름을 붙인 프로그램은 캡처도 읽기 쉽고, 창 없는 프로그램은 StartFrameCapture와 EndFrameCapture로 프레임을 정해 준다
+
+## 참고 문서
+
+- [RenderDoc 문서: Quick Start(띄우기, 잡기, 창들)](https://renderdoc.org/docs/getting_started/quick_start.html)
+- [RenderDoc 문서: Event Browser(이벤트와 액션, EID, 구간)](https://renderdoc.org/docs/window/event_browser.html)
+- [RenderDoc 문서: How do I annotate a capture?(꼬리표와 이름)](https://renderdoc.org/docs/how/how_annotate_capture.html)
+- [RenderDoc 문서: How do I inspect a pixel value?(픽셀 이력)](https://renderdoc.org/docs/how/how_inspect_pixel.html)
+- [RenderDoc 문서: In-application API(프로그램에서 잡기)](https://renderdoc.org/docs/in_application_api.html)
+- [RenderDoc 문서: Vulkan Support(레이어 등록, 가정, 지원 범위)](https://renderdoc.org/docs/behind_scenes/vulkan_support.html)
+- [RenderDoc 문서: Gotchas & Known Issues(스왑체인에서 끊는 프레임, 메모리)](https://renderdoc.org/docs/getting_started/gotchas_known_issues.html)
+- [RenderDoc 위키: Vulkan(옳게 쓴 프로그램을 가정한다는 주의)](https://github.com/baldurk/renderdoc/wiki/Vulkan)

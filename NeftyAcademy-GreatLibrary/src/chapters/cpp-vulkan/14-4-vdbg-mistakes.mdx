@@ -1,0 +1,250 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '흔한 실수: 레이어가 바로 잡는 것, 검사를 더 켜야 잡는 것, 아무도 못 잡는 것, 조용히 틀릴 때의 증상';
+export const terms = ['vkCmdFillBuffer'];
+
+벌칸의 실수는 누가 알려 주느냐로 셋으로 나뉩니다. 검증 레이어가 그 자리에서 알려 주는 것, 검사를 더 켜야 알려 주는 것, 아무도 알려 주지 않고 결과만 틀리는 것입니다. 아래 프로그램은 다섯 가지를 일부러 저지르고, 기본 검증만 켰을 때와 동기화 검증까지 켰을 때 레이어가 알린 규칙 이름을 찍습니다.
+
+```cpp vk novalid with=vkx_instance.hpp,vkx_device.hpp,vkx_cmd.hpp,vkx_resource.hpp,vkx_bind.hpp,vkx_compute.hpp,vkx_pipeline.hpp,vkx_draw.hpp
+#include <algorithm>
+#include <cstring>
+#include <string>
+#include "vkx_bind.hpp"
+#include "vkx_cmd.hpp"
+#include "vkx_compute.hpp"
+#include "vkx_draw.hpp"
+#include "vkx_pipeline.hpp"
+
+std::vector<std::string> said;   // 레이어가 알린 규칙 이름. 같은 이름은 한 번만
+VKAPI_ATTR VkBool32 VKAPI_CALL collect(
+        VkDebugUtilsMessageSeverityFlagBitsEXT, VkDebugUtilsMessageTypeFlagsEXT,
+        const VkDebugUtilsMessengerCallbackDataEXT* d, void*) {
+    if (std::find(said.begin(), said.end(), d->pMessageIdName) == said.end())
+        said.push_back(d->pMessageIdName);
+    return VK_FALSE;
+}
+
+struct World {
+    VkInstance instance;
+    VkDebugUtilsMessengerEXT messenger;
+    vkx::Device dev;
+    vkx::Commands cmds;
+};
+
+// 검증 레이어를 켠 인스턴스와 장치. sync면 동기화 검증도 켠다
+World make_world(bool sync) {
+    const char* layer = "VK_LAYER_KHRONOS_validation";
+    const char* extensions[] = {VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
+                                VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME};
+    VkDebugUtilsMessengerCreateInfoEXT mci{
+        .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+        .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                           VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+        .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT,
+        .pfnUserCallback = collect};
+    const VkValidationFeatureEnableEXT more =
+        VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT;
+    VkValidationFeaturesEXT features{
+        .sType = VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT, .pNext = &mci,
+        .enabledValidationFeatureCount = sync ? 1u : 0u,
+        .pEnabledValidationFeatures = &more};
+    VkApplicationInfo app{.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+                          .apiVersion = VK_API_VERSION_1_3};
+    VkInstanceCreateInfo ci{.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+                            .pNext = &features, .pApplicationInfo = &app,
+                            .enabledLayerCount = 1, .ppEnabledLayerNames = &layer,
+                            .enabledExtensionCount = 2,
+                            .ppEnabledExtensionNames = extensions};
+    World w{};
+    vkx::check(vkCreateInstance(&ci, nullptr, &w.instance), "vkCreateInstance");
+    reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(vkGetInstanceProcAddr(
+        w.instance, "vkCreateDebugUtilsMessengerEXT"))(w.instance, &mci, nullptr,
+                                                       &w.messenger);
+    w.dev = vkx::make_device(w.instance);
+    w.cmds = vkx::make_commands(w.dev);
+    return w;
+}
+
+std::string no_stype(World& w) {
+    VkBufferCreateInfo ci{.size = 64, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT};
+    VkBuffer buffer = VK_NULL_HANDLE;
+    vkCreateBuffer(w.dev.handle, &ci, nullptr, &buffer);
+    vkDestroyBuffer(w.dev.handle, buffer, nullptr);
+    return "";
+}
+
+std::string wrong_layout(World& w) {
+    vkx::Image image = vkx::make_image(
+        w.dev, {4, 4}, VK_FORMAT_R8_UNORM,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    vkx::Buffer pixels =
+        vkx::make_buffer(w.dev, 16, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+    VkCommandBuffer cmd = vkx::begin(w.cmds);
+    vkx::begin_drawing(cmd, image);            // 색 첨부물 레이아웃이 된다
+    vkCmdEndRendering(cmd);
+    vkx::copy_to_buffer(cmd, image, pixels);   // 전송 원본 레이아웃이라고 적는다
+    vkx::submit_and_wait(w.dev, w.cmds);
+    vkx::destroy(w.dev, pixels);
+    vkx::destroy(w.dev, image);
+    return "";
+}
+
+std::string submit_twice(World& w) {
+    vkx::begin(w.cmds);                    // 한 번만 제출하겠다고 기록을 시작한다
+    vkx::submit_and_wait(w.dev, w.cmds);
+    vkx::submit_and_wait(w.dev, w.cmds);   // 다시 기록하지 않고 또 낸다
+    return "";
+}
+
+std::string no_barrier(World& w) {
+    const auto USAGE = VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                       VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    vkx::Buffer a = vkx::make_buffer(w.dev, 64, USAGE, true);
+    vkx::Buffer b = vkx::make_buffer(w.dev, 64, USAGE, true);
+    VkCommandBuffer cmd = vkx::begin(w.cmds);
+    vkCmdFillBuffer(cmd, a.handle, 0, 64, 7);               // a에 쓰고
+    VkBufferCopy region{.size = 64};
+    vkCmdCopyBuffer(cmd, a.handle, b.handle, 1, &region);   // 배리어 없이 읽는다
+    vkx::submit_and_wait(w.dev, w.cmds);
+    vkx::destroy(w.dev, a);
+    vkx::destroy(w.dev, b);
+    return "";
+}
+
+// std140에서 vec3은 16바이트 경계에 놓인다: color 0, dir 16, power 28
+const char* READ = R"(#version 450
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0) uniform Light { vec3 color; vec3 dir; float power; };
+layout(set = 0, binding = 1) buffer Seen { float dir_x, seen_power; };
+void main() { dir_x = dir.x; seen_power = power; })";
+
+std::string wrong_packing(World& w) {
+    struct Light { float color[3], dir[3], power; };   // 빈틈 없이 28바이트
+    const Light light{{1, 2, 3}, {4, 5, 6}, 7};
+    vkx::Buffer ubo =
+        vkx::make_buffer(w.dev, 64, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true);
+    vkx::Buffer seen =
+        vkx::make_buffer(w.dev, 8, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true);
+    std::memset(ubo.mapped, 0, 64);
+    std::memcpy(ubo.mapped, &light, sizeof light);
+    const auto UBO = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    const auto SSBO = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    vkx::Bindings set = vkx::make_bindings(w.dev, {UBO, SSBO});
+    vkx::bind_buffer(w.dev, set, 0, UBO, ubo);
+    vkx::bind_buffer(w.dev, set, 1, SSBO, seen);
+    VkPipelineLayout layout = vkx::make_layout(w.dev, {set.layout});
+    VkShaderModule shader =
+        vkx::make_shader(w.dev, vkx::compile(READ, shaderc_compute_shader));
+    VkPipeline pipeline = vkx::make_compute(w.dev, shader, layout);
+    VkCommandBuffer cmd = vkx::begin(w.cmds);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1,
+                            &set.set, 0, nullptr);
+    vkCmdDispatch(cmd, 1, 1, 1);
+    vkx::submit_and_wait(w.dev, w.cmds);
+    const float* f = static_cast<const float*>(seen.mapped);
+    const std::string note =
+        "셰이더가 읽은 값: dir.x " + std::to_string(int(f[0])) +
+        "(넣은 값 4), power " + std::to_string(int(f[1])) + "(넣은 값 7)";
+    vkDestroyPipeline(w.dev.handle, pipeline, nullptr);
+    vkDestroyShaderModule(w.dev.handle, shader, nullptr);
+    vkDestroyPipelineLayout(w.dev.handle, layout, nullptr);
+    vkx::destroy(w.dev, set);
+    vkx::destroy(w.dev, ubo);
+    vkx::destroy(w.dev, seen);
+    return note;
+}
+
+int main() {
+    World worlds[2] = {make_world(false), make_world(true)};
+    const char* labels[2] = {"기본 검증", "동기화 검증까지"};
+    struct { const char* what; std::string (*commit)(World&); } mistakes[] = {
+        {"구조체의 sType을 빼먹음", no_stype},
+        {"레이아웃을 바꾸지 않고 이미지를 복사", wrong_layout},
+        {"다시 기록하지 않고 커맨드 버퍼를 또 제출", submit_twice},
+        {"쓴 버퍼를 배리어 없이 읽음", no_barrier},
+        {"유니폼 블록을 std140과 다르게 채움", wrong_packing}};
+    int number = 0;
+    for (auto& m : mistakes) {
+        std::printf("%d. %s\n", ++number, m.what);
+        for (int k = 0; k < 2; ++k) {
+            said.clear();
+            const std::string note = m.commit(worlds[k]);
+            std::printf("   %s:%s\n", labels[k], said.empty() ? " 조용함" : "");
+            for (const std::string& name : said)
+                std::printf("      %s\n", name.c_str());
+            if (k == 1 && !note.empty()) std::printf("   %s\n", note.c_str());
+        }
+    }
+    for (World& w : worlds) {
+        vkx::destroy(w.dev, w.cmds);
+        vkx::destroy(w.dev);
+        reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(vkGetInstanceProcAddr(
+            w.instance, "vkDestroyDebugUtilsMessengerEXT"))(w.instance, w.messenger,
+                                                            nullptr);
+        vkDestroyInstance(w.instance, nullptr);
+    }
+}
+```
+
+```text
+1. 구조체의 sType을 빼먹음
+   기본 검증:
+      VUID-VkBufferCreateInfo-sType-sType
+   동기화 검증까지:
+      VUID-VkBufferCreateInfo-sType-sType
+2. 레이아웃을 바꾸지 않고 이미지를 복사
+   기본 검증:
+      VUID-vkCmdCopyImageToBuffer-srcImageLayout-00189
+   동기화 검증까지:
+      VUID-vkCmdCopyImageToBuffer-srcImageLayout-00189
+      SYNC-HAZARD-READ-AFTER-WRITE
+3. 다시 기록하지 않고 커맨드 버퍼를 또 제출
+   기본 검증:
+      VUID-vkEndCommandBuffer-commandBuffer-00059
+      UNASSIGNED-DrawState-CommandBufferSingleSubmitViolation
+   동기화 검증까지:
+      VUID-vkEndCommandBuffer-commandBuffer-00059
+      UNASSIGNED-DrawState-CommandBufferSingleSubmitViolation
+4. 쓴 버퍼를 배리어 없이 읽음
+   기본 검증: 조용함
+   동기화 검증까지:
+      SYNC-HAZARD-READ-AFTER-WRITE
+5. 유니폼 블록을 std140과 다르게 채움
+   기본 검증: 조용함
+   동기화 검증까지: 조용함
+   셰이더가 읽은 값: dir.x 5(넣은 값 4), power 0(넣은 값 7)
+```
+
+- **기본값은 없다**: 벌칸은 구조체의 빈 자리를 채워 주지 않습니다. `sType`부터 직접 적어야 하고, 구조체를 `{}`로 초기화해 두어야 빠뜨린 멤버가 쓰레기 값이 아닌 0이 되어 이런 메시지로 드러납니다. `VkResult`도 받을 때마다 확인합니다
+- **레이아웃과 접근**: 2번은 기본 검증이 레이아웃 규칙으로 잡았고, 동기화 검증은 앞의 쓰기가 끝났다는 보장이 없다는 것까지 알렸습니다. 배리어 하나를 넣으면 둘 다 풀립니다([「레이아웃 전환」](#/read/cpp-vulkan/tex-layout))
+- **커맨드 버퍼의 상태**: 한 번만 내겠다고 기록한 버퍼는 실행 뒤에 무효가 되므로 프레임마다 다시 기록합니다([「커맨드 버퍼」](#/read/cpp-vulkan/tri-commands)). 3번에서 레이어는 기록 중이 아닌 버퍼를 닫으려 한 것과 한 번용 버퍼를 또 낸 것을 따로 알렸습니다
+- **검사를 켜야 보이는 것**: 4번은 `vkCmdFillBuffer`로 채운 버퍼를 배리어 없이 복사했는데 기본 검증은 조용했습니다. 빠뜨린 배리어는 동기화 검증이, 배열 밖의 디스크립터 번호는 GPU 지원 검증이 잡습니다([「파이프라인 배리어」](#/read/cpp-vulkan/vsync-barriers), [「검증 레이어 읽기」](#/read/cpp-vulkan/vdbg-validation)). 느린 검사라 늘 켜 두지는 못해도, 기능 하나를 마칠 때마다 켜고 돌립니다
+- **아무도 못 잡는 것**: 레이어는 버퍼 속 바이트의 뜻을 모릅니다. C++ 구조체는 28바이트로 붙었는데 std140은 `vec3`을 16바이트 경계에 놓으므로, 셰이더는 dir을 16에서, power를 28에서 읽었습니다([「인터페이스 블록과 레이아웃」](#/read/cpp-vulkan/glsl-interface)). 멤버에 `alignas(16)`을 붙여 맞추고, 리플렉션으로 얻은 오프셋을 `offsetof`와 견주는 검사를 빌드에 넣습니다([「리플렉션」](#/read/cpp-vulkan/spv-reflect))
+
+## 조용히 틀릴 때 의심할 곳
+
+| 증상 | 흔한 원인 | 다룬 쪽 |
+| --- | --- | --- |
+| 그림이 뒤집히거나 물체가 사라짐 | OpenGL용 행렬을 그대로 씀(y 방향, 깊이 범위), 앞면 방향 | [「정점 셰이더와 프래그먼트 셰이더」](#/read/cpp-vulkan/glsl-stages) |
+| 색이 어둡거나 허옇게 뜸 | 색 텍스처를 UNORM으로 읽음, SRGB 타깃에 감마를 또 곱함 | [「이미지, 뷰, 샘플러」](#/read/cpp-vulkan/tex-image), [「후처리」](#/read/cpp-vulkan/tech-post) |
+| 가끔 깜빡이거나 옛 값이 나옴 | GPU가 읽는 중인 버퍼를 다음 프레임이 덮어씀, 끝나기를 기다리지 않고 결과를 읽음 | [「여러 프레임을 겹쳐 진행하기」](#/read/cpp-vulkan/vsync-frames), [「펜스와 세마포어」](#/read/cpp-vulkan/tri-sync) |
+| 다른 장치에서만 깨짐 | 지원을 확인하지 않은 기능과 한도, 우연히 맞던 배리어 누락 | [「장치 기능에 따라 가르기」](#/read/cpp-vulkan/port-features) |
+
+값이 의심스러우면 RenderDoc에서 그 그리기의 버퍼와 상태를 직접 봅니다([「RenderDoc」](#/read/cpp-vulkan/vdbg-renderdoc)).
+
+<Note>
+틀린 코드가 맞게 도는 장치가 있습니다. 4번은 lavapipe에서 복사한 값까지 맞게 나왔습니다. 이 구현이 두 명령을 적힌 차례대로 실행했기 때문이고, 다른 GPU에서도 그렇다는 보장은 없습니다. 한 장치에서 돌아간다는 것은 증거가 못 되므로, 검사를 모두 켠 채 돌려 보고 구조가 다른 장치에서도 확인합니다.
+</Note>
+
+## 정리
+
+- 채우지 않은 구조체, 레이아웃, 커맨드 버퍼의 상태처럼 기본 검증이 잡는 실수는 메시지의 규칙 이름을 따라가 고친다
+- 빠뜨린 배리어와 범위 밖 번호는 기본 검증이 보지 않으므로, 동기화 검증과 GPU 지원 검증을 켜야 드러난다
+- 버퍼 속 값의 배치, 좌표와 색의 관례, 프레임 사이의 덮어쓰기는 어떤 검사도 알려 주지 않으므로 값을 직접 견주어 확인한다
+
+## 참고 문서
+
+- [Vulkan Guide: Common Pitfalls for New Vulkan Developers(검증 레이어, 올바른 사용 습관)](https://docs.vulkan.org/guide/latest/common_pitfalls.html)
+- [Vulkan Guide: Shader Memory Layout(std140, std430, scalar의 정렬)](https://docs.vulkan.org/guide/latest/shader_memory_layout.html)
+- [LunarG: Khronos Validation Layer(검사 묶음과 설정)](https://vulkan.lunarg.com/doc/view/1.4.350.1/mac/khronos_validation_layer.html)
