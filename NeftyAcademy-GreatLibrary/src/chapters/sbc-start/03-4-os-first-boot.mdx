@@ -1,0 +1,96 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'LED로 켜졌는지 보기, 이름으로 보드를 찾아 들어가기, 처음 확인할 것, apt 갱신, 부트로더 갱신, 끄기';
+export const terms = [];
+
+카드를 꽂고 전원을 넣으면 보드가 켜집니다. 화면이 없으므로 잘 켜졌는지는 LED와 네트워크로 압니다. 이 쪽은 처음 켠 보드를 찾아 들어가서, 상태를 확인하고, 소프트웨어를 최신으로 올리고, 끄는 데까지를 차례로 봅니다. 설정은 [「모니터 없이 설정하기: Wi-Fi, SSH, 사용자」](#/read/sbc-start/os-headless)에서 정한 `sensor-01`과 `sora`를 그대로 씁니다.
+
+## LED로 켜졌는지 보기
+
+| 보드 | LED | 켜지는 동안과 켜진 뒤 |
+| --- | --- | --- |
+| 5 | 전원 버튼 옆에 하나(빨강과 초록) | 전원을 넣으면 빨강, 올라오면서 초록. 카드를 읽고 쓸 때 잠깐씩 꺼진다 |
+| 4 Model B | PWR(빨강)과 ACT(초록) | PWR은 켜져 있고, ACT는 카드를 읽고 쓸 때 깜박인다 |
+| Zero 2 W | 초록 하나 | 켜져 있다가 카드를 읽고 쓸 때 잠깐씩 꺼진다 |
+
+- **불규칙하게 깜박이면 일하는 중이다**: 처음 켤 때는 카드를 많이 읽고 쓰므로 초록 불이 바쁘게 움직입니다. 설정을 적용하느라 평소보다 오래 걸리니 몇 분 기다립니다
+- **같은 무늬를 되풀이하면 경고다**: 길게 몇 번, 짧게 몇 번을 쉬었다가 되풀이하면 부팅에 실패했다는 신호입니다. 무늬의 뜻은 [「부팅이 안 될 때: LED 신호와 진단」](#/read/sbc-start/care-troubleshoot)에 있습니다
+- **4의 빨간 불이 꺼지거나 떨리면**: 전압이 모자란 것입니다([「전원: 5V 5A와 USB-PD」](#/read/sbc-start/prt-power))
+
+## 보드를 찾아 들어가기
+
+```sh
+ping sensor-01.local          # 답이 오면 보드가 네트워크에 붙은 것이다
+ssh sora@sensor-01.local      # 정해 둔 사용자와 호스트 이름으로 들어간다
+```
+
+- **이름으로 찾는다**: 보드는 제 호스트 이름을 네트워크에 알립니다. 문서는 `이름.local`이나 `이름.lan`으로 닿는다고 적습니다
+- **이름으로 안 되면 주소로**: 공유기의 관리 화면에는 붙어 있는 기기의 목록과 주소가 있습니다. 거기서 보드의 IP 주소를 찾아 `ssh sora@192.168.0.23`처럼 들어갑니다
+- **목록에도 없다면**: 보드가 네트워크에 붙지 못한 것입니다. Wi-Fi의 이름과 암호를 다시 보고, 이더넷 케이블이 있으면 꽂아 봅니다. 그래도 안 되면 [「시리얼 콘솔」](#/read/sbc-start/rem-serial)로 들어가 봅니다
+- **처음 들어갈 때의 물음**: SSH가 이 보드를 믿겠느냐고 한 번 묻습니다. 무엇을 묻는 것인지는 [「SSH와 키 인증」](#/read/sbc-start/rem-ssh)에서 봅니다
+
+## 처음 확인할 것
+
+```sh
+hostname                  # 정한 이름이 맞는가
+date                      # 시각이 맞는가
+df -h /                   # 카드의 크기만큼 쓸 수 있는가
+free -h                   # 램이 얼마나 비어 있는가
+vcgencmd get_throttled    # throttled=0x0 이면 전원이 넉넉하다
+```
+
+- **시각은 네트워크에서 받는다**: 4와 Zero 2 W에는 꺼져 있는 동안 가는 시계가 없고, 5의 시계도 전지를 달아야 이어집니다. 그래서 보드는 켜진 뒤 네트워크에서 시각을 받아 맞춥니다. 시각이 한참 틀린 채로는 패키지를 받는 일부터 막힙니다
+- **카드를 다 쓰고 있는가**: 32GB 카드인데 몇 GB로만 보인다면 파일 시스템이 카드 끝까지 늘어나지 않은 것입니다. `raspi-config`의 Advanced Options에 Expand Filesystem이 있습니다([「raspi-config」](#/read/sbc-start/cfg-raspi-config))
+- **전원부터 확인한다**: 0이 아닌 값이 나오면 다른 일을 하기 전에 전원과 케이블을 바꿉니다
+
+## 갱신하기
+
+```sh
+sudo apt update          # 받을 수 있는 패키지의 목록을 새로 받는다
+sudo apt full-upgrade    # 깔린 패키지를 새 판으로 올린다
+```
+
+- **upgrade가 아니라 full-upgrade**: 문서는 Raspberry Pi OS가 패키지 사이의 의존 관계를 데비안보다 자주 바꾸기 때문에 `full-upgrade`를 쓰라고 적습니다. 패키지를 다루는 법 전반은 [「apt와 저장소」](#/read/basics/apt)에 있습니다
+- **커널과 펌웨어도 함께 오른다**: 따로 받는 것이 아니라 패키지로 들어옵니다. 커널이나 펌웨어가 올랐다면 `sudo reboot`로 다시 켜야 새것으로 돕니다
+- **자리가 모자라면**: `df -h`로 남은 자리를 보고, `sudo apt clean`으로 받아 둔 패키지 파일을 지웁니다
+- **rpi-update는 쓰지 않는다**: 이름이 비슷하지만 시험 중인 펌웨어를 받는 명령입니다. 문서는 시스템이 불안정해지거나 켜지지 않을 수 있다고 경고합니다
+
+## 부트로더도 본다
+
+4와 5는 보드의 EEPROM에 부트로더가 들어 있고, 이것도 새 판이 나옵니다.
+
+```sh
+sudo rpi-eeprom-update       # 지금 것과 새것의 날짜를 보여 준다
+sudo rpi-eeprom-update -a    # 새것이 있으면 올리도록 걸어 둔다
+sudo reboot                  # 다시 켜질 때 올라간다
+```
+
+부트로더가 하는 일과 설정은 [「부트로더 EEPROM과 부팅 순서」](#/read/sbc-start/cfg-eeprom)에서 봅니다.
+
+## 끄기
+
+```sh
+sudo poweroff     # 끈다
+sudo reboot       # 다시 켠다
+```
+
+- **끝났는지는 LED로 본다**: 5는 불이 빨강으로 바뀌면 꺼진 것입니다. 4는 ACT가 짧게 여러 번 깜박이고 나면 전원을 뽑아도 됩니다
+- **그냥 뽑지 않는다**: 쓰는 도중에 전원이 끊기면 카드의 파일이 깨질 수 있습니다([「전원을 뽑기 전에」](#/read/sbc-start/care-shutdown))
+
+<Note>
+Imager에서 설정을 건너뛴 Lite는 처음 켤 때 글자 화면에서 사용자를 만들라고 묻습니다. 모니터와 키보드가 없으면 거기서 멈춰 있게 되므로, 화면 없이 쓸 카드는 반드시 설정을 넣어 씁니다. 이 쪽의 명령과 LED의 움직임은 문서에서 옮겼고, 보드에서 해 보지는 못했습니다.
+</Note>
+
+## 정리
+
+- 처음 켠 보드는 LED로 켜졌는지 보고, `이름.local`로 찾아 SSH로 들어간다
+- 들어가면 시각, 카드의 자리, 전원 상태를 먼저 확인한다
+- `sudo apt update`와 `sudo apt full-upgrade`로 갱신하고, 4와 5는 부트로더도 `rpi-eeprom-update`로 본다
+
+## 참고 문서
+
+- [Raspberry Pi 문서: Configuration(보드마다의 LED와 그 뜻, LED 경고 무늬, raspi-config의 항목)](https://www.raspberrypi.com/documentation/computers/configuration.html)
+- [Raspberry Pi 문서: Getting started(호스트 이름으로 찾기, 첫 부팅의 원격 접속, 끄는 명령)](https://www.raspberrypi.com/documentation/computers/getting-started.html)
+- [Raspberry Pi 문서: Raspberry Pi OS(apt로 갱신하기, full-upgrade를 쓰는 까닭, apt clean, rpi-update 경고, vcgencmd)](https://www.raspberrypi.com/documentation/computers/os.html)
+- [Raspberry Pi 문서: Raspberry Pi computer hardware(부트로더를 확인하고 올리는 명령, 5의 RTC와 전지)](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html)
+- [Raspberry Pi 소식: An update to Raspberry Pi OS Bullseye(Lite가 처음 켤 때 사용자를 묻는 일)](https://www.raspberrypi.com/news/raspberry-pi-bullseye-update-april-2022/)
