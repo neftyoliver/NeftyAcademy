@@ -12,13 +12,13 @@
  */
 import type { Book } from 'neftyacademy-paragons-bookshelf';
 import { cppAdvanced, cppStl, cppSyntax } from './core';
-import { cppComplexApp, cppDatabase, cppDbms, cppGameEngine, cppGameServer, cppIndustrial, cppQt, cppServiceServer, cppVulkan } from './master-a';
+import { cppComplexApp, cppDatabase, cppDbms, cppGameEngine, cppGameServer, cppIndustrial, cppLangImpl, cppQt, cppRaytracer, cppServiceServer, cppVulkan } from './master-a';
 import { cppAndroid, cppCompilers, cppEmbedded, cppEmbeddedEco, cppLinux, cppMacos, cppMsvc, cppOpenmpMpi, cppParallel, cppVirtualization } from './master-b';
 
 const cppMaster: Book = {
   id: 'cpp-master',
   title: 'C++ 최고급',
-  subtitle: '만들고 싶은 것에 따라 고르는 열아홉 권',
+  subtitle: '만들고 싶은 것에 따라 고르는 스물한 권',
   category: 'cpp',
   chapters: [],
   books: [
@@ -45,6 +45,8 @@ const cppMaster: Book = {
     cppEmbeddedEco,
     // 마무리 프로젝트
     cppDbms,
+    cppLangImpl,
+    cppRaytracer,
   ],
 };
 

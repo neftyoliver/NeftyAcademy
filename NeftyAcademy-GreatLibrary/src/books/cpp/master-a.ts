@@ -1,6 +1,7 @@
 /**
  * C++ 최고급 서가 (1): 만드는 것에 따른 책들.
- * 게임 엔진, Qt, 산업용 프로그램, 데이터베이스 연동, 벌칸, 복잡한 소프트웨어, 게임 서버, 서비스 서버, 직접 만드는 DBMS.
+ * 게임 엔진, Qt, 산업용 프로그램, 데이터베이스 연동, 벌칸, 복잡한 소프트웨어, 게임 서버, 서비스 서버,
+ * 그리고 직접 만들어 보는 마무리 프로젝트 셋: DBMS, 컴파일러, 레이 트레이서.
  */
 import { book } from '../outline';
 
@@ -605,4 +606,137 @@ beyond            그다음
   bey-columnar      열 지향 저장
   bey-distributed   분산과 복제
   bey-reading       기존 DBMS 코드 읽기
+`);
+
+// 2026-11-22, 벌칸 책을 마치며 더함. 그 책은 SPIR-V를 쓰는 쪽에서만 보았고(중간 표현, 최적화기, 검증기),
+// 컴파일러를 만드는 쪽은 서가 어디에도 없었다. 「가상화 기술」의 언어 VM, 「컴파일러별 방언과 기능」의 "컴파일러의 속"과 잇는다.
+export const cppLangImpl = book('cpp-lang-impl', '직접 구현해 보는 컴파일러', '어휘 분석에서 타입 검사, 중간 표현, 최적화, x86-64 기계어까지', 'cpp', `
+overview          컴파일러의 구조
+  cc-pipeline       앞단, 중간 표현, 뒷단
+  cc-language       만들 언어와 범위
+  cc-first          가장 작은 컴파일러: 정수 하나를 실행 파일로
+lexer             어휘 분석
+  lex-tokens        토큰과 원문 위치
+  lex-scanner       손으로 쓰는 스캐너
+  lex-literals      수, 문자열, 유니코드
+parser            구문 분석
+  parse-grammar     문법 적기
+  parse-descent     재귀 하강
+  parse-pratt       연산자 우선순위와 프랫 파서
+  parse-ast         구문 트리의 설계
+  parse-errors      오류 보고와 회복
+semantics         의미 분석
+  sem-scope         이름과 스코프
+  sem-types         타입 검사
+  sem-infer         타입 추론
+  sem-desugar       구문 트리 낮추기
+ir                중간 표현
+  ir-design         세 주소 코드와 기본 블록
+  ir-cfg            제어 흐름 그래프와 지배 관계
+  ir-ssa            SSA 만들기
+  ir-verify         찍어 보기와 검증기
+optimization      최적화
+  opt-passes        패스와 패스 관리자
+  opt-fold          상수 접기와 전파
+  opt-dce           죽은 코드 지우기
+  opt-cse           공통 부분식과 값 번호
+  opt-inline        인라이닝
+  opt-loops         루프 불변식 옮기기
+codegen           x86-64 코드 생성
+  cg-target         명령어 집합과 호출 규약
+  cg-select         명령 고르기
+  cg-regalloc       레지스터 할당
+  cg-frame          스택 프레임과 함수 호출
+  cg-emit           어셈블리 내보내기와 링크
+runtime           런타임
+  rt-startup        시작 코드와 C 라이브러리 붙이기
+  rt-heap           힙, 문자열, 배열
+  rt-gc             가비지 컬렉션
+features          언어 넓히기
+  feat-struct       구조체와 메모리 배치
+  feat-closure      일급 함수와 클로저
+  feat-generic      제네릭
+  feat-module       모듈과 분리 컴파일
+backends          다른 뒷단
+  be-arm64          AArch64
+  be-llvm           LLVM IR로 내보내기
+  be-spirv          SPIR-V로 내보내 GPU에서 돌리기
+tooling           도구
+  tool-diagnostics  읽기 좋은 진단 메시지
+  tool-debuginfo    디버그 정보
+  tool-editor       편집기 지원
+testing           테스트
+  cct-golden        기대 출력과 견주기
+  cct-fuzz          차등 시험과 퍼징
+  cct-reduce        실패한 입력 줄이기
+beyond            그다음
+  cc-jit            JIT으로 가기
+  cc-reading        기존 컴파일러 코드 읽기
+`);
+
+// 2026-11-22, 벌칸 책을 마치며 더함. 그 책은 레이 트레이싱의 API와 조명 식을 한 쪽씩만 다뤘고,
+// 빛의 수송을 푸는 알고리즘(몬테카를로, 중요도 샘플링, BVH 짓기)은 서가 어디에도 없었다. CPU만으로 처음부터 만든다.
+export const cppRaytracer = book('cpp-raytracer', '직접 구현해 보는 레이 트레이서', '광선 하나에서 경로 추적, BVH, 중요도 샘플링, GPU까지', 'cpp', `
+overview          빛을 따라가는 렌더러
+  pt-idea           래스터화와 광선 추적
+  pt-scope          만들 것의 범위
+  pt-first          첫 그림: 광선마다 색 하나
+image             그림 내보내기
+  img-file          픽셀과 이미지 파일
+  img-color         선형 색, 감마, 톤 매핑
+camera            광선과 카메라
+  cam-ray           벡터와 광선
+  cam-pinhole       바늘구멍 카메라
+  cam-samples       픽셀 하나에 표본 여럿
+geometry          도형과 교차
+  geo-sphere        구와 평면
+  geo-triangle      삼각형
+  geo-mesh          메시 읽기
+  geo-instance      변환과 인스턴스
+  geo-precision     부동소수 오차와 자기 교차
+materials         표면
+  mat-diffuse       난반사
+  mat-specular      거울과 유리
+  mat-microfacet    미세면 모델
+  mat-texture       텍스처와 법선 맵
+transport         빛의 수송
+  lt-radiometry     빛의 양을 재는 단위
+  lt-equation       렌더링 방정식
+  lt-montecarlo     몬테카를로 적분
+  lt-path           경로 추적
+  lt-roulette       러시안 룰렛
+sampling          표본 뽑기
+  smp-importance    중요도 샘플링
+  smp-light         광원을 직접 겨누기
+  smp-mis           다중 중요도 샘플링
+  smp-sequence      난수와 저불일치 수열
+accel             가속 구조
+  acc-aabb          경계 상자
+  acc-bvh           BVH 짓기
+  acc-sah           표면적 휴리스틱
+  acc-traverse      순회와 메모리 배치
+lights            광원
+  light-area        면 광원
+  light-env         환경 맵
+  light-sky         하늘과 해
+effects           카메라와 매질의 효과
+  fx-dof            피사계 심도
+  fx-motion         움직임 흐림
+  fx-volume         안개와 산란
+performance       빠르게
+  perf-threads      타일과 스레드
+  perf-simd         광선 묶음과 SIMD
+  perf-measure      어디가 느린지 재기
+denoise           잡음 줄이기
+  dn-variance       분산과 수렴
+  dn-filter         보조 버퍼와 필터
+gpu               GPU로 옮기기
+  gpu-vulkan        벌칸 레이 트레이싱으로
+  gpu-wavefront     파면 방식
+testing           검증
+  ptt-furnace       에너지 보존 확인
+  ptt-reference     기준 그림과 견주기
+beyond            그다음
+  pt-bidirectional  양방향 기법과 광자 매핑
+  pt-reading        기존 렌더러 코드 읽기
 `);
