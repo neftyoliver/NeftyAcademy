@@ -1,7 +1,8 @@
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react';
 import { bookColor, useBook } from '../context';
 import { buildIndex, canPaint, caretAt, findOccurrence, occurrenceBefore, offsetOf, paint, rangeOf } from '../marks';
-import { href } from '../router';
+import type { RefIndex } from '../refs';
+import { href, parseHash } from '../router';
 import { NotFound } from './BookPage';
 import { ScrollRail, type RailSection } from './ScrollRail';
 
@@ -42,6 +43,19 @@ function markExternalLinks(root: HTMLElement): void {
   }
 }
 
+/** 다른 쪽으로 가는 링크에, 올리면 보이는 이름표를 단다: "책 제목 › 3.2 챕터 제목". 코드 속 낱말에 걸린 링크가 어디로 가는지 누르기 전에 알 수 있다. */
+function nameInnerLinks(root: HTMLElement, at: RefIndex['at']): void {
+  for (const a of root.querySelectorAll<HTMLAnchorElement>('a[href^="#/read/"]')) {
+    if (a.title) continue;
+    const route = parseHash(a.getAttribute('href') ?? '');
+    const t = route.name === 'read' ? at.get(`${route.bookId}/${route.chapterId}`) : undefined;
+    if (t) a.title = `${t.book.title} › ${t.label} ${t.chapter.title}`;
+  }
+}
+
+/** 「같이 보기」에 처음부터 보여 주는 수. 이보다 많으면 나머지는 단추를 눌러야 편다 */
+const SEE_ALSO = 24;
+
 interface Placed {
   id: string;
   start: number;
@@ -65,6 +79,8 @@ export function Reader({ bookId, chapterId, section }: { bookId: string; chapter
   const [popover, setPopover] = useState<{ id: string; x: number; y: number } | null>(null);
   const placed = useRef<Placed[]>([]);
   const [markTops, setMarkTops] = useState<number[]>([]);
+  /** 「같이 보기」를 다 펴 둔 쪽. 다른 쪽으로 가면 다시 접힌다 */
+  const [allRefs, setAllRefs] = useState('');
 
   const chapterMarks = useMemo(() => marks.filter((m) => m.bookId === bookId && m.chapterId === chapterId), [marks, bookId, chapterId]);
 
@@ -73,6 +89,7 @@ export function Reader({ bookId, chapterId, section }: { bookId: string; chapter
     const root = article.current;
     if (!root) return;
     markExternalLinks(root);
+    nameInnerLinks(root, refs.at);
     const hs = Array.from(root.querySelectorAll('h2'));
     setSections(
       hs.map((h, i) => {
@@ -80,7 +97,7 @@ export function Reader({ bookId, chapterId, section }: { bookId: string; chapter
         return { index: i, title: h.textContent ?? `단락 ${i + 1}`, el: h };
       }),
     );
-  }, []);
+  }, [refs]);
 
   useLayoutEffect(() => {
     scan();
@@ -239,6 +256,7 @@ export function Reader({ bookId, chapterId, section }: { bookId: string; chapter
   // 같이 보기: 이 쪽을 참조하는 문서들. 같은 책의 것이 먼저 온다
   const referrers = refs.into.get(pageKey) ?? [];
   const seeAlso = [...referrers.filter((k) => refs.at.get(k)?.book.id === bookId), ...referrers.filter((k) => refs.at.get(k)?.book.id !== bookId)];
+  const seeAlsoShown = allRefs === pageKey ? seeAlso : seeAlso.slice(0, SEE_ALSO);
 
   return (
     <div className="bf-reader" style={{ ['--node' as string]: bookColor(library, book) }}>
@@ -293,7 +311,7 @@ export function Reader({ bookId, chapterId, section }: { bookId: string; chapter
             <h2 id="bf-seealso-title">같이 보기</h2>
             <p>이 쪽을 참조하는 문서 {seeAlso.length}</p>
             <ul>
-              {seeAlso.map((k) => {
+              {seeAlsoShown.map((k) => {
                 const t = refs.at.get(k)!;
                 return (
                   <li key={k}>
@@ -306,6 +324,11 @@ export function Reader({ bookId, chapterId, section }: { bookId: string; chapter
                 );
               })}
             </ul>
+            {seeAlso.length > seeAlsoShown.length ? (
+              <button type="button" className="bf-seealso-more" onClick={() => setAllRefs(pageKey)}>
+                나머지 {seeAlso.length - seeAlsoShown.length}쪽 모두 보기
+              </button>
+            ) : null}
           </section>
         ) : null}
 

@@ -521,6 +521,8 @@ a { color: inherit; }
 .bf-seealso > p { margin: 2px 0 10px; color: var(--bf-muted); font-size: 13px; }
 .bf-seealso ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 4px 14px; }
 .bf-seealso li a { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 6px; padding: 5px 8px; border-radius: 8px; text-decoration: none; font-size: 15px; line-height: 1.45; overflow-wrap: anywhere; }
+.bf-seealso-more { margin-top: 8px; padding: 5px 12px; border: 1px solid var(--bf-line); border-radius: 8px; background: none; color: var(--bf-muted); font: inherit; font-size: 13.5px; cursor: pointer; }
+.bf-seealso-more:hover { color: var(--bf-ink); border-color: color-mix(in srgb, var(--node, var(--bf-accent)) 50%, var(--bf-line)); }
 .bf-seealso li a:hover { background: color-mix(in srgb, var(--node, var(--bf-accent)) 11%, transparent); }
 .bf-seealso li small { flex-basis: 100%; padding-left: calc(1.8em + 6px); color: var(--bf-muted); font-size: 12px; }
 .bf-seealso + .bf-pager { margin-top: 32px; }
