@@ -1,0 +1,183 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '부품과 저항, 핀 9와 11에 배선하기, 명령으로 먼저 켜 보기, libgpiod로 깜박이기, 서비스로 만들기';
+export const terms = ['gpiod_chip_request_lines', 'gpiod_line_request_set_value', 'WantedBy'];
+
+LED 하나를 깜박이는 일은 작아 보이지만, 여기까지 오려면 이 책의 거의 모든 장을 한 번씩 거칩니다. 전원과 카드를 고르고, OS를 올리고, 모니터 없이 들어가고, 핀을 세고, 전류를 따지고, 프로그램을 짓고, 끌 때 깨끗이 끝내는 일까지입니다. 장마다 배운 것을 한 줄로 이어 봅니다.
+
+## 준비물
+
+| 부품 | 고르는 값 | 다룬 곳 |
+| --- | --- | --- |
+| 보드와 전원, OS를 쓴 카드 | 5, 4, Zero 2 W 가운데 아무것 | 1장부터 3장 |
+| LED | 빨강 하나 | |
+| 저항 | 330Ω 하나 | [「3.3V 논리와 전류 한계」](#/read/sbc-start/hdr-voltage) |
+| 브레드보드, 암-수 점퍼선 둘 | | [「케이블, 케이스, USB-시리얼 어댑터」](#/read/sbc-start/prt-cables) |
+
+- **저항은 계산해서 고른다**: 빨간 LED가 1.8V쯤을 가져가므로 저항에 남는 것은 3.3 - 1.8 = 1.5V입니다. 5mA를 바란다면 1.5 ÷ 0.005 = 300Ω이고, 파는 값 가운데 바로 위가 330Ω입니다. 그때 흐르는 전류는 4.5mA로, 핀 하나의 한도 16mA에 한참 못 미칩니다
+- **330Ω의 색띠**: 주황, 주황, 갈색입니다. 넷째 띠는 오차를 나타냅니다
+- **Zero 2 W**: 헤더가 납땜된 것이어야 점퍼선을 꽂을 수 있습니다
+
+## 배선
+
+보드를 끄고 전원선을 뺀 채로 꽂습니다([「전원을 뽑기 전에」](#/read/sbc-start/care-shutdown)).
+
+```text
+핀 11 (GPIO 17) ----[ 330Ω ]----(긴 다리) LED (짧은 다리)---- 핀 9 (GND)
+```
+
+- **핀 9와 11은 나란히 있다**: 둘 다 안쪽 줄입니다. 1번 핀에서 안쪽 줄을 따라 세어 다섯째가 9번(GND), 여섯째가 11번(GPIO 17)입니다([「핀 배치와 번호 붙이는 세 가지 방식」](#/read/sbc-start/hdr-pinout))
+- **LED는 방향이 있다**: 긴 다리가 저항을 거쳐 GPIO로, 짧은 다리가 GND로 갑니다. 거꾸로 꽂으면 켜지지 않을 뿐이니 돌려 꽂으면 됩니다
+- **저항은 방향이 없다**: LED의 앞에 달아도 뒤에 달아도 같습니다. 빠뜨리면 안 됩니다
+- **바깥쪽 줄의 맨 앞 두 핀은 5V다**: 2번과 4번에 선이 닿지 않게 합니다. 꽂은 뒤에 한 번 더 세어 봅니다
+
+## 명령으로 먼저 켜 보기
+
+전원을 넣고 들어가서([「SSH와 키 인증」](#/read/sbc-start/rem-ssh)), 프로그램을 짜기 전에 회로부터 확인합니다.
+
+```sh
+ssh sensor
+pinout                        # 9번과 11번의 자리를 그림으로 한 번 더 본다
+sudo pinctrl set 17 op dh     # GPIO 17을 출력으로 바꾸고 HIGH를 낸다. 켜진다
+sudo pinctrl set 17 op dl     # LOW를 낸다. 꺼진다
+```
+
+- **회로와 코드를 따로 확인한다**: 여기서 켜진다면 배선은 맞습니다. 뒤에 프로그램이 안 되면 코드만 보면 됩니다
+- **안 켜질 때**: LED를 돌려 꽂아 봅니다. 핀을 다시 셉니다. 저항의 색띠를 봅니다. 점퍼선을 다른 것으로 바꿔 봅니다. 한 번에 하나씩입니다
+- **숫자 17은 GPIO 번호다**: 핀 번호 11이 아닙니다. 명령과 코드에는 GPIO 번호를 적습니다
+
+## 프로그램으로 깜박이기
+
+```c nocheck
+// 첫 프로젝트: GPIO 17의 LED를 깜박이고, 끄라는 신호를 받으면 끄고 끝낸다
+#define _POSIX_C_SOURCE 200809L
+#include <gpiod.h>
+#include <signal.h>
+#include <stdio.h>
+#include <time.h>
+
+enum { LED = 17 };                           // GPIO 17, 헤더의 핀 11
+
+static volatile sig_atomic_t stop = 0;
+
+static void on_signal(int) { stop = 1; }
+
+int main(void) {
+    struct sigaction sa = {.sa_handler = on_signal};
+    sigaction(SIGINT, &sa, nullptr);         // Ctrl+C를 눌렀을 때
+    sigaction(SIGTERM, &sa, nullptr);        // 시스템이 끝내라고 할 때
+
+    struct gpiod_chip* chip = gpiod_chip_open("/dev/gpiochip0");
+    if (!chip) {
+        perror("/dev/gpiochip0");
+        return 1;
+    }
+
+    // 줄의 성질을 정한다: 출력이고, 처음에는 꺼 둔다
+    struct gpiod_line_settings* settings = gpiod_line_settings_new();
+    gpiod_line_settings_set_direction(settings, GPIOD_LINE_DIRECTION_OUTPUT);
+    gpiod_line_settings_set_output_value(settings, GPIOD_LINE_VALUE_INACTIVE);
+
+    // 어느 줄에 그 성질을 줄지 적고, 누가 쓰는지 이름을 붙여 줄을 얻는다
+    struct gpiod_line_config* config = gpiod_line_config_new();
+    unsigned int offset = LED;
+    gpiod_line_config_add_line_settings(config, &offset, 1, settings);
+    struct gpiod_request_config* who = gpiod_request_config_new();
+    gpiod_request_config_set_consumer(who, "blink");
+    struct gpiod_line_request* led = gpiod_chip_request_lines(chip, who, config);
+    if (!led) {
+        perror("GPIO 17");
+        return 1;
+    }
+
+    const struct timespec half_second = {.tv_nsec = 500'000'000};
+    for (bool on = true; !stop; on = !on) {
+        gpiod_line_request_set_value(
+            led, LED, on ? GPIOD_LINE_VALUE_ACTIVE : GPIOD_LINE_VALUE_INACTIVE);
+        nanosleep(&half_second, nullptr);    // 신호가 오면 다 자지 않고 돌아온다
+    }
+
+    gpiod_line_request_set_value(led, LED, GPIOD_LINE_VALUE_INACTIVE);
+    gpiod_line_request_release(led);
+    gpiod_request_config_free(who);
+    gpiod_line_config_free(config);
+    gpiod_line_settings_free(settings);
+    gpiod_chip_close(chip);
+    printf("\nLED를 끄고 끝낸다\n");
+}
+```
+
+```sh
+sudo apt install libgpiod-dev              # 한 번만 하면 된다
+gcc -std=c23 -Wall blink.c -o blink -lgpiod
+./blink                                    # 멈출 때에는 Ctrl+C
+```
+
+- **칩을 열고, 줄을 얻고, 값을 쓴다**: `/dev/gpiochip0`이 헤더를 맡은 칩이고 그 안의 17번 줄이 GPIO 17입니다. 5에서도 4에서도 같은 코드가 돕니다([「라즈베리파이 5의 RP1」](#/read/sbc-start/hdr-rp1))
+- **줄을 얻으면 내 것이 된다**: 프로그램이 줄을 쥐고 있는 동안 다른 프로그램은 그 줄을 얻지 못합니다. `gpioinfo`로 보면 누가 쥐고 있는지에 `blink`가 나옵니다
+- **`sudo` 없이 돈다**: 처음 만든 사용자가 `gpio` 그룹에 들어 있기 때문입니다
+- **끄고 끝낸다**: Ctrl+C나 끝내라는 신호를 받으면 반복을 나와 LED를 끄고 줄을 놓습니다. [「전원을 뽑기 전에」](#/read/sbc-start/care-shutdown)에서 본 틀 그대로입니다
+- **옛 OS에서는 함수 이름이 다르다**: 이 코드는 libgpiod 2의 것입니다. 1을 쓰는 옛 OS의 코드와 버튼을 읽는 법은 「C 언어 중급」의 [「GPIO로 신호 주고받기」](#/read/c-mid/gpio)에 있습니다
+
+## PC에서 쓰고 보드에서 돌리기
+
+```sh
+scp blink.c sensor:
+ssh sensor 'gcc -std=c23 -Wall blink.c -o blink -lgpiod && ./blink'
+```
+
+- **편집은 PC에서**: 코드는 손에 익은 PC의 편집기로 쓰고, 파일만 보내 보드에서 짓습니다([「파일 옮기기: scp, rsync, sshfs」](#/read/sbc-start/rem-files)). 편집기를 보드에 붙여 쓰는 법은 [「원격 편집: VS Code Remote와 CLion」](#/read/sbc-start/rem-editor)에 있습니다
+- **PC에서 짓는 길**: 프로젝트가 커지면 PC에서 지어 실행 파일만 보냅니다. 라이브러리까지 맞춰야 해서 준비가 더 들고, 이 서가의 「교차 컴파일과 배포」가 다룹니다
+
+## 전원을 넣으면 저절로 돌게
+
+```ini
+[Unit]
+Description=First project LED
+
+[Service]
+ExecStart=/home/sora/blink
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```sh
+sudo cp blink.service /etc/systemd/system/
+sudo systemctl enable --now blink     # 지금 켜고, 다음에 켤 때에도 저절로 돈다
+sudo systemctl stop blink             # 끝내라는 신호를 보낸다. LED가 꺼지는지 본다
+```
+
+- **이제 장치다**: 위 내용을 `blink.service`로 두고 등록하면, 모니터도 키보드도 SSH도 없이 전원만 넣으면 깜박입니다
+- **멈출 때 LED가 꺼지는가**: `systemctl stop`은 프로그램에 SIGTERM을 보냅니다. 신호를 받는 코드를 넣어 둔 덕에 LED가 켜진 채로 남지 않습니다
+- **서비스의 자세한 이야기**: 다시 띄우는 조건, 기록 보기, 사용자와 권한은 이 서가의 「임베디드 리눅스 시스템」에서 다룹니다
+
+## 다음에 볼 책
+
+| 하고 싶은 일 | 이 서가의 책 |
+| --- | --- |
+| 버튼을 기다리고 여러 핀을 한꺼번에 다루기 | 「libgpiod」 |
+| 밝기를 바꾸고 서보를 돌리기 | 「PWM」 |
+| 센서의 값을 읽기 | 「I2C」, 「SPI」, 「시리얼 통신」 |
+| 읽은 숫자를 믿을 만한 값으로 다듬기 | 「측정값 다루기」 |
+| 값을 서버로 보내기 | 「MQTT」, 「cJSON」, 「libcurl」 |
+| 값을 보드에 쌓아 두기 | 「SQLite」 |
+| 현장에 내놓을 장치로 만들기 | 「임베디드 리눅스 시스템」, 「장치 보안과 업데이트」 |
+
+<Note>
+프로그램은 libgpiod 2의 머리 파일로 x86-64와 aarch64에서 경고 없이 컴파일되는 것까지 확인했습니다. 검사 환경에 깔린 것은 libgpiod 1이고 보드도 없어서, 링크하고 돌려 LED가 깜박이는 것을 본 것은 아닙니다. 배선은 공식 문서의 핀 표를 따랐습니다. LED의 1.8V는 빨간 LED의 대표값이고, 서비스 파일은 systemd의 일반 문법입니다. 명령은 지금의 Raspberry Pi OS를 기준으로 적었고, 사용자 이름 `sora`와 호스트 `sensor`는 이 책에서 써 온 본보기입니다.
+</Note>
+
+## 정리
+
+- 빨간 LED에는 330Ω을 달고, 핀 11(GPIO 17)에서 저항과 LED를 거쳐 핀 9(GND)로 잇는다
+- `sudo pinctrl set 17 op dh`로 회로부터 확인한 다음 프로그램을 짓는다. 코드에는 GPIO 번호를 쓴다
+- 프로그램은 줄을 얻어 값을 쓰고, 끝내라는 신호를 받으면 LED를 끄고 줄을 놓는다
+
+## 참고 문서
+
+- [Raspberry Pi 문서: Raspberry Pi computer hardware(40핀 헤더의 핀 표, 핀의 전압과 전류)](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html)
+- [Raspberry Pi 백서: A history of GPIO usage on Raspberry Pi devices(libgpiod와 줄의 독점, pinctrl)](https://pip-assets.raspberrypi.com/categories/685-app-notes-guides-whitepapers/documents/RP-006553-WP-2-A%20history%20of%20GPIO%20usage%20on%20Raspberry%20Pi%20devices,%20and%20current%20best%20practices.pdf)
+- [libgpiod 문서: Command-line tools(gpiodetect와 gpioinfo)](https://libgpiod.readthedocs.io/en/master/gpio_tools.html)
+- [Raspberry Pi utils 저장소(pinctrl로 핀을 출력으로 바꾸고 값을 내기)](https://github.com/raspberrypi/utils)
