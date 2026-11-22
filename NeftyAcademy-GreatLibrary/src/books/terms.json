@@ -1,0 +1,17 @@
+{
+  "families": {
+    "c": {
+      "books": ["basics", "c-basic", "c-mid"],
+      "sees": [],
+      "langs": ["c", "objc", "asm", "sh", "bash", "bat", "make", "cmake"]
+    },
+    "cpp": {
+      "books": ["cpp-*"],
+      "sees": ["c"],
+      "langs": ["cpp", "c", "sh", "bash", "cmake"]
+    }
+  },
+  "pages": {
+    "basics/c-ecosystem": "c-mid/c-ecosystem"
+  }
+}
