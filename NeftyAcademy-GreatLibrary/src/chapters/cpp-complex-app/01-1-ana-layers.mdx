@@ -1,0 +1,205 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '문서, 명령, 뷰의 층: 화면을 모르는 문서, 문서를 고치는 유일한 길인 명령, 읽기만 하는 뷰, 다시 실행';
+export const terms = ['CDocument', 'UpdateAllViews'];
+
+워드 프로세서와 그림 편집기는 기능이 수천 개여도 뼈대가 같습니다. 데이터를 가진 **문서**, 문서를 바꾸는 **명령**, 문서를 보여 주고 입력을 받는 **뷰**의 세 층입니다. 아래는 그 뼈대만 남긴 프로그램으로, 한 줄짜리 캔버스에 도형을 놓고 옮기고 지웁니다.
+
+```cpp
+#include <functional>
+#include <iostream>
+#include <memory>
+#include <sstream>
+#include <string>
+#include <vector>
+
+// 문서: 한 줄짜리 캔버스에 놓인 도형들. 화면도 입력도 모른다
+struct Shape { int id; char ink; int x, w; };
+
+class Document {
+public:
+    std::vector<std::function<void()>> changed;     // 바뀌면 알릴 곳들
+    const std::vector<Shape>& shapes() const { return shapes_; }
+    size_t find(int id) const {
+        size_t at = 0;
+        while (shapes_[at].id != id) ++at;
+        return at;
+    }
+    void insert(size_t at, Shape s) {
+        shapes_.insert(shapes_.begin() + at, s);
+        notify();
+    }
+    Shape erase(size_t at) {
+        Shape s = shapes_[at];
+        shapes_.erase(shapes_.begin() + at);
+        notify();
+        return s;
+    }
+    void move(size_t at, int dx) { shapes_[at].x += dx; notify(); }
+
+private:
+    std::vector<Shape> shapes_;                     // 뒤에 있을수록 위에 그려진다
+    void notify() { for (auto& f : changed) f(); }
+};
+
+// 명령: 문서를 바꾸는 유일한 길. 되돌리는 법도 스스로 안다
+struct Command {
+    virtual ~Command() = default;
+    virtual void apply(Document&) = 0;
+    virtual void revert(Document&) = 0;
+};
+struct Add : Command {
+    Shape s;
+    explicit Add(Shape s) : s(s) {}
+    void apply(Document& d) override { d.insert(d.shapes().size(), s); }
+    void revert(Document& d) override { d.erase(d.find(s.id)); }
+};
+struct Move : Command {
+    int id, dx;
+    Move(int id, int dx) : id(id), dx(dx) {}
+    void apply(Document& d) override { d.move(d.find(id), dx); }
+    void revert(Document& d) override { d.move(d.find(id), -dx); }
+};
+struct Remove : Command {
+    int id;
+    size_t at = 0;                                  // 되돌릴 때 쓸 것: 있던 자리와
+    Shape gone{};                                   // 지워진 도형
+    explicit Remove(int id) : id(id) {}
+    void apply(Document& d) override { at = d.find(id); gone = d.erase(at); }
+    void revert(Document& d) override { d.insert(at, gone); }
+};
+
+// 입력을 명령으로 바꾼다. 메뉴, 단축키, 스크립트가 모두 이 문을 지난다
+std::unique_ptr<Command> parse(const std::string& line, int& next_id) {
+    std::istringstream in(line);
+    std::string verb;
+    in >> verb;
+    if (verb == "add") {
+        Shape s{next_id++, ' ', 0, 0};
+        in >> s.ink >> s.x >> s.w;
+        return std::make_unique<Add>(s);
+    }
+    int id = 0, dx = 0;
+    in >> id >> dx;
+    if (verb == "move") return std::make_unique<Move>(id, dx);
+    return std::make_unique<Remove>(id);
+}
+
+class History {
+public:
+    void run(Document& d, const std::string& line) {
+        done_.push_back({line, parse(line, next_id_)});
+        done_.back().command->apply(d);
+        undone_.clear();            // 새 일을 하면 다시 실행할 것은 사라진다
+    }
+    void undo(Document& d) {
+        done_.back().command->revert(d);
+        undone_.push_back(std::move(done_.back()));
+        done_.pop_back();
+    }
+    void redo(Document& d) {
+        undone_.back().command->apply(d);
+        done_.push_back(std::move(undone_.back()));
+        undone_.pop_back();
+    }
+    std::vector<std::string> log() const {          // 지금 상태를 만든 입력들
+        std::vector<std::string> lines;
+        for (const Step& s : done_) lines.push_back(s.line);
+        return lines;
+    }
+
+private:
+    struct Step { std::string line; std::unique_ptr<Command> command; };
+    std::vector<Step> done_, undone_;
+    int next_id_ = 1;
+};
+
+// 뷰: 문서를 읽기만 한다
+std::string canvas(const Document& d) {
+    std::string row(24, ' ');
+    for (const Shape& s : d.shapes())
+        for (int i = 0; i < s.w; ++i) row[size_t(s.x + i)] = s.ink;
+    return "|" + row + "|";
+}
+std::string outline(const Document& d) {
+    std::string out;
+    for (const Shape& s : d.shapes())
+        out += (out.empty() ? "" : " ") + std::to_string(s.id) + ":" + s.ink;
+    return out;
+}
+
+int main() {
+    Document doc;
+    History history;
+    int canvas_paints = 0, outline_paints = 0;
+    doc.changed.push_back([&] { ++canvas_paints; });     // 뷰 둘이 같은 문서를 본다
+    doc.changed.push_back([&] { ++outline_paints; });
+    auto show = [&](const char* what) {
+        std::cout << what << "\n  " << canvas(doc) << "  " << outline(doc) << "\n";
+    };
+
+    for (const char* line :
+         {"add A 2 6", "add B 8 6", "move 1 9", "add C 6 4", "del 2"})
+        history.run(doc, line);
+    show("입력 다섯 줄 뒤");
+    history.undo(doc);
+    history.undo(doc);
+    show("두 번 되돌림");
+    history.redo(doc);
+    show("한 번 다시 실행");
+
+    Document copy;                // 뷰 없이, 기록만으로 같은 문서를 만든다
+    History replay;
+    for (const std::string& line : history.log()) replay.run(copy, line);
+    std::cout << "기록 " << history.log().size() << "줄을 새 문서에 다시 실행: "
+              << (canvas(copy) == canvas(doc) ? "같은 그림" : "다른 그림") << "\n";
+    std::cout << "뷰가 받은 알림: 캔버스 " << canvas_paints << "번, 목록 "
+              << outline_paints << "번\n";
+}
+```
+
+```text
+입력 다섯 줄 뒤
+  |      CCCC AAAAAA       |  1:A 3:C
+두 번 되돌림
+  |        BBBBBBAAA       |  1:A 2:B
+한 번 다시 실행
+  |      CCCCBBBBAAA       |  1:A 2:B 3:C
+기록 4줄을 새 문서에 다시 실행: 같은 그림
+뷰가 받은 알림: 캔버스 8번, 목록 8번
+```
+
+- **문서는 화면을 모른다**: `Document`에는 그리는 코드도 입력을 읽는 코드도 없습니다. 바뀌면 등록된 곳에 알릴 뿐이어서, 캔버스와 목록이라는 두 뷰가 같은 문서를 보고 늘 같은 내용을 보여 줍니다. 뷰를 하나 더 붙여도 문서는 고칠 것이 없습니다
+- **명령만 문서를 고친다**: 편집은 모두 `Command` 객체가 합니다. 명령은 하는 법(`apply`)과 되돌리는 법(`revert`)을 함께 가지므로, 실행한 명령을 쌓아 두기만 하면 실행 취소가 됩니다. 문서를 명령 밖에서 한 번이라도 고치면 쌓아 둔 명령이 가정한 상태와 어긋나 되돌릴 수 없게 됩니다
+- **되돌리는 데 필요한 것을 기억한다**: `Remove`는 지운 도형과 그것이 있던 자리를 적어 둡니다. 그래서 되돌렸을 때 B가 A 위, C 아래라는 원래 차례로 돌아왔습니다. 끝에 다시 붙였다면 B가 C를 가렸을 것입니다
+- **입력은 명령이 되어 들어온다**: 메뉴, 단축키, 마우스 끌기가 모두 `parse` 같은 문을 지나 명령이 됩니다. 문이 하나이므로 입력을 적어 둔 기록을 새 문서에 다시 실행하면 같은 문서가 나옵니다. 매크로와 스크립트, 자동 저장, 화면 없는 테스트가 여기서 나옵니다
+- **뷰는 읽기만 한다**: `canvas`와 `outline`은 `const Document&`를 받습니다. 문서가 여덟 번 바뀌는 동안 두 뷰는 알림을 여덟 번씩 받았습니다. 실제 프로그램의 알림은 무엇이 바뀌었는지도 담아, 뷰가 그 부분만 다시 그리게 합니다([「무효화와 다시 그리기」](#/read/cpp-complex-app/rnd-invalidate))
+
+## 층마다 맡는 일
+
+| 층 | 맡는 일 | 모르는 것 | 다루는 곳 |
+| --- | --- | --- | --- |
+| 문서 | 데이터와 그 규칙 | 화면, 입력, 실행 취소 | [「글의 자료 구조: 피스 테이블과 로프」](#/read/cpp-complex-app/doc-text) |
+| 명령 | 바꾸기, 되돌리기, 기록 | 화면 | [「커맨드 패턴」](#/read/cpp-complex-app/cmd-pattern) |
+| 뷰 | 그리기, 입력을 명령으로 바꾸기 | 다른 뷰 | [「여러 창과 탭」](#/read/cpp-complex-app/win-multi) |
+
+흔히 MVC라고 부르는 나눔과 같은 생각이고, 편집 프로그램에서는 입력을 처리한 결과를 명령 객체로 남긴다는 점이 더해집니다. 의존은 한쪽으로만 흐릅니다. 뷰는 명령과 문서를 알고, 명령은 문서를 알고, 문서는 아무도 모릅니다. 그래서 문서와 명령은 창 없이 컴파일하고 시험할 수 있고, 화면을 그리는 라이브러리를 바꿔도 남습니다.
+
+무엇을 문서에 두느냐는 "저장되는가, 되돌릴 수 있어야 하는가"로 가릅니다. 스크롤 위치와 확대 배율은 창마다 다르고 되돌릴 일이 없으므로 뷰의 상태입니다. 선택 영역은 프로그램마다 다르게 둡니다([「선택 모델」](#/read/cpp-complex-app/doc-selection)).
+
+층을 지키기 어려운 곳은 대개 빠른 반응이 필요한 곳입니다. 슬라이더를 끄는 동안 값을 문서에 곧바로 쓰고 싶어지지만, 그러면 실행 취소 기록에 남지 않거나 수십 개로 쪼개져 남습니다. 끄는 동안의 변화는 명령을 합치거나 놓을 때 명령 하나로 확정합니다([「명령 묶기와 합치기」](#/read/cpp-complex-app/cmd-merge)).
+
+<Note>
+프레임워크들도 같은 나눔을 줍니다. MFC의 문서/뷰 구조에서는 `CDocument`가 데이터를 갖고, 뷰는 사용자의 입력을 해석해 새 데이터를 문서에 넘긴 뒤 `UpdateAllViews`를 불러 그 문서의 모든 뷰를 다시 그리게 합니다. Qt의 실행 취소 프레임워크는 편집을 모두 명령 객체로 한다는 전제 위에 서 있어서, 명령으로만 문서를 바꾸는 한 스택을 따라 내려가며 되돌릴 수 있다고 설명합니다.
+</Note>
+
+## 정리
+
+- 큰 편집 프로그램은 화면을 모르는 문서, 문서를 고치는 유일한 길인 명령, 읽기만 하는 뷰의 세 층으로 나뉜다
+- 명령이 되돌리는 법을 함께 가지므로 쌓아 두면 실행 취소가 되고, 입력 기록을 다시 실행하면 같은 문서가 나온다
+- 의존이 뷰에서 문서 쪽으로만 흘러서, 문서와 명령은 창 없이 시험하고 뷰는 몇이든 붙일 수 있다
+
+## 참고 문서
+
+- [Microsoft Learn: A Portrait of the Document/View Architecture(문서가 데이터를 갖고 뷰가 보여 주는 구조)](https://learn.microsoft.com/en-us/cpp/mfc/a-portrait-of-the-document-view-architecture?view=msvc-170)
+- [Qt 문서: Overview of Qt's Undo Framework(명령 객체로만 편집한다는 전제)](https://doc.qt.io/qt-6.9/qundo.html)
