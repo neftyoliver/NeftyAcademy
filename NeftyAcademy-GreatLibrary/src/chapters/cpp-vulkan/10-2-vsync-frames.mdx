@@ -1,0 +1,205 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '여러 프레임 겹치기: 칸마다 두는 것, 고리처럼 돌려 쓰는 스테이징 버퍼, 프레임이 끝난 뒤로 미루는 삭제';
+export const terms = [];
+
+[「프레임 루프」](#/read/cpp-vulkan/tri-loop)에서 CPU는 GPU가 앞 프레임을 그리는 동안 다음 프레임을 기록했습니다. 제출한 명령은 나중에 실행되므로, 그 명령이 가리키는 버퍼와 이미지는 실행이 끝날 때까지 살아 있어야 하고 내용도 그대로여야 합니다. 그래서 프레임마다 바뀌는 것은 칸마다 따로 두고, 버릴 것은 그 프레임이 끝난 뒤에 버립니다. 아래 프로그램은 스왑체인 없이 복사 명령만으로 스테이징 버퍼 하나를 고리처럼 돌려 쓰는 일과 삭제를 미루는 일을 보입니다.
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp,vkx_cmd.hpp,vkx_resource.hpp
+#include <vector>
+#include "vkx_cmd.hpp"
+#include "vkx_resource.hpp"
+
+constexpr int IN_FLIGHT = 2;   // 겹쳐 진행하는 프레임 수
+
+// 스테이징 버퍼 하나를 고리처럼 돌려 쓴다.
+// head 앞의 used바이트는 진행 중인 프레임의 것이라 GPU가 아직 읽을 수 있다
+struct Ring {
+    VkDeviceSize size, head = 0, used = 0;
+    // n바이트를 잘라 시작 위치를 at에 적는다. 자리가 없으면 그대로 두고 false
+    bool take(VkDeviceSize n, VkDeviceSize* at, VkDeviceSize* spent) {
+        if (used == 0) head = 0;
+        // 끝에 자리가 모자라면 남은 끝자리를 건너뛰고 처음으로 돌아간다
+        VkDeviceSize skip = head + n > size ? size - head : 0;
+        if (used + skip + n > size) return false;
+        *at = (head + skip) % size;
+        head = *at + n;
+        used += skip + n;
+        *spent += skip + n;   // 건너뛴 끝자리도 이 프레임이 가져간 것으로 친다
+        return true;
+    }
+};
+
+// 겹쳐 진행하는 프레임마다 하나씩 두는 칸
+struct Slot {
+    vkx::Commands cmds;               // 커맨드 풀, 커맨드 버퍼, 펜스
+    int frame = -1;                   // 이 칸으로 낸 프레임(-1이면 없다)
+    VkDeviceSize spent = 0;           // 그 프레임이 고리에서 가져간 바이트
+    std::vector<vkx::Buffer> trash;   // 그 프레임이 끝나야 지울 수 있는 버퍼
+};
+
+void barrier(VkCommandBuffer cmd, VkPipelineStageFlags2 src,
+             VkAccessFlags2 src_access, VkPipelineStageFlags2 dst,
+             VkAccessFlags2 dst_access) {
+    VkMemoryBarrier2 b{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+                       .srcStageMask = src, .srcAccessMask = src_access,
+                       .dstStageMask = dst, .dstAccessMask = dst_access};
+    VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                         .memoryBarrierCount = 1, .pMemoryBarriers = &b};
+    vkCmdPipelineBarrier2(cmd, &dep);
+}
+
+// 칸의 프레임이 GPU에서 끝나기를 기다린 뒤, 그 프레임에 묶여 있던 것을 돌려받는다
+void retire(const vkx::Device& dev, Ring& ring, Slot& s) {
+    if (s.frame < 0) return;
+    vkx::check(vkWaitForFences(dev.handle, 1, &s.cmds.done, VK_TRUE, UINT64_MAX),
+               "기다리기");
+    vkResetFences(dev.handle, 1, &s.cmds.done);
+    std::printf("  프레임 %d 끝: 고리 %u바이트를 돌려받고 버퍼 %zu개를 지움\n",
+                s.frame, unsigned(s.spent), s.trash.size());
+    ring.used -= s.spent;
+    for (vkx::Buffer& old : s.trash) vkx::destroy(dev, old);
+    s = Slot{.cmds = s.cmds};
+}
+
+int main() {
+    vkx::Instance inst = vkx::make_instance();
+    vkx::Device dev = vkx::make_device(inst.handle);
+    Slot slots[IN_FLIGHT];
+    for (Slot& s : slots) s.cmds = vkx::make_commands(dev);
+
+    const auto BOTH =
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    Ring ring{.size = 1024};
+    vkx::Buffer staging = vkx::make_buffer(dev, ring.size, BOTH, true);
+    // 올린 것이 쌓이는 대상 버퍼. 끝에 CPU가 읽어 확인하려고 매핑해 둔다
+    vkx::Buffer target = vkx::make_buffer(dev, 1024, BOTH, true);
+    auto* bytes = static_cast<unsigned char*>(staging.mapped);
+    const auto COPY = VK_PIPELINE_STAGE_2_COPY_BIT;
+    const VkDeviceSize UPLOAD[] = {600, 400, 300, 700, 200, 900};
+    VkDeviceSize filled = 0;   // 대상 버퍼에 지금까지 올린 양
+
+    for (int n = 0; n < 6; ++n) {
+        Slot& s = slots[n % IN_FLIGHT];
+        std::printf("프레임 %d(칸 %d)\n", n, n % IN_FLIGHT);
+        retire(dev, ring, s);   // 이 칸을 앞서 쓴 프레임 n - 2
+        VkDeviceSize at;
+        // 그래도 자리가 없으면 진행 중인 다른 프레임을 오래된 것부터 기다린다
+        for (int k = 1; !ring.take(UPLOAD[n], &at, &s.spent); ++k)
+            retire(dev, ring, slots[(n + k) % IN_FLIGHT]);
+        std::memset(bytes + at, n + 1, UPLOAD[n]);
+
+        VkCommandBuffer cmd = vkx::begin(s.cmds);
+        if (filled + UPLOAD[n] > target.size) {   // 모자라면 두 배로 새로 만든다
+            vkx::Buffer bigger = vkx::make_buffer(dev, target.size * 2, BOTH, true);
+            // 앞 프레임들이 대상에 쓴 것을 이 복사가 읽는다
+            barrier(cmd, COPY, VK_ACCESS_2_TRANSFER_WRITE_BIT, COPY,
+                    VK_ACCESS_2_TRANSFER_READ_BIT);
+            VkBufferCopy keep{0, 0, filled};
+            vkCmdCopyBuffer(cmd, target.handle, bigger.handle, 1, &keep);
+            s.trash.push_back(target);   // 이 프레임의 명령이 읽으니 아직 못 지운다
+            target = bigger;
+            std::printf("  대상 버퍼를 %u바이트로 키우고 옛 버퍼는 삭제 줄로\n",
+                        unsigned(target.size));
+        }
+        VkBufferCopy part{at, filled, UPLOAD[n]};
+        vkCmdCopyBuffer(cmd, staging.handle, target.handle, 1, &part);
+        filled += UPLOAD[n];
+        // 맨 끝에 CPU가 대상을 읽어 확인하려고 넣는 배리어
+        barrier(cmd, COPY, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
+        std::printf("  스테이징 [%4u, %4u)을 올림, 고리 %4u/%u\n", unsigned(at),
+                    unsigned(at + UPLOAD[n]), unsigned(ring.used),
+                    unsigned(ring.size));
+
+        vkx::check(vkEndCommandBuffer(cmd), "기록 끝");   // 내고, 기다리지 않는다
+        VkCommandBufferSubmitInfo one{
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+            .commandBuffer = cmd};
+        VkSubmitInfo2 si{.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+                         .commandBufferInfoCount = 1, .pCommandBufferInfos = &one};
+        vkx::check(vkQueueSubmit2(dev.queue, 1, &si, s.cmds.done), "제출");
+        s.frame = n;
+    }
+
+    std::puts("끝내기");
+    for (int k = 0; k < IN_FLIGHT; ++k) retire(dev, ring, slots[k]);
+    bool intact = true;
+    const auto* result = static_cast<const unsigned char*>(target.mapped);
+    for (VkDeviceSize i = 0, n = 0, end = UPLOAD[0]; i < filled; ++i) {
+        if (i == end) end += UPLOAD[++n];
+        intact = intact && result[i] == n + 1;
+    }
+    std::printf("올린 %u바이트가 모두 제자리에 있음: %s\n", unsigned(filled),
+                intact ? "예" : "아니요");
+
+    vkx::destroy(dev, staging);
+    vkx::destroy(dev, target);
+    for (Slot& s : slots) vkx::destroy(dev, s.cmds);
+    vkx::destroy(dev);
+    vkx::destroy(inst);
+}
+```
+
+```text
+프레임 0(칸 0)
+  스테이징 [   0,  600)을 올림, 고리  600/1024
+프레임 1(칸 1)
+  스테이징 [ 600, 1000)을 올림, 고리 1000/1024
+프레임 2(칸 0)
+  프레임 0 끝: 고리 600바이트를 돌려받고 버퍼 0개를 지움
+  대상 버퍼를 2048바이트로 키우고 옛 버퍼는 삭제 줄로
+  스테이징 [   0,  300)을 올림, 고리  724/1024
+프레임 3(칸 1)
+  프레임 1 끝: 고리 400바이트를 돌려받고 버퍼 0개를 지움
+  스테이징 [ 300, 1000)을 올림, 고리 1024/1024
+프레임 4(칸 0)
+  프레임 2 끝: 고리 324바이트를 돌려받고 버퍼 1개를 지움
+  대상 버퍼를 4096바이트로 키우고 옛 버퍼는 삭제 줄로
+  스테이징 [   0,  200)을 올림, 고리  924/1024
+프레임 5(칸 1)
+  프레임 3 끝: 고리 700바이트를 돌려받고 버퍼 0개를 지움
+  프레임 4 끝: 고리 224바이트를 돌려받고 버퍼 1개를 지움
+  스테이징 [   0,  900)을 올림, 고리  900/1024
+끝내기
+  프레임 5 끝: 고리 900바이트를 돌려받고 버퍼 0개를 지움
+올린 3100바이트가 모두 제자리에 있음: 예
+```
+
+- **칸을 다시 쓰기 전에**: 칸의 펜스를 기다린 뒤에야 그 칸의 커맨드 버퍼를 다시 기록하고, 그 프레임이 가져간 스테이징 구간과 삭제 줄을 돌려받습니다. 기다리지 않고 다시 기록하면 VUID-vkBeginCommandBuffer-commandBuffer-00049입니다
+- **고리**: `head` 앞의 `used`바이트가 진행 중인 프레임들의 몫입니다. 끝에 자리가 모자라면 처음으로 돌아가고(프레임 2와 4), 건너뛴 끝자리도 그 프레임의 몫으로 칩니다. 프레임은 낸 차례대로 돌려받으므로 `used`만 줄이면 됩니다
+- **자리가 없을 때**: 프레임 5의 900바이트는 프레임 3을 돌려받아도 들어가지 않아 프레임 4까지 기다렸습니다. CPU가 GPU를 기다리는 일이므로 고리는 넉넉히 잡고, 고리보다 큰 업로드는 버퍼를 따로 만듭니다
+- **미룬 삭제**: 프레임 2는 옛 대상 버퍼를 읽는 복사를 기록했으므로, 옛 버퍼는 프레임 2가 끝난 뒤(프레임 4의 처음)에 지웠습니다. 제출하자마자 지우면 VUID-vkDestroyBuffer-buffer-00922를 어기고, lavapipe에서는 거의 매번 프로그램이 죽었습니다
+- **앞 프레임이 쓴 것**: 키우는 복사는 앞 프레임들이 대상에 쓴 것을 읽습니다. 배리어는 같은 큐에 먼저 낸 다른 제출의 명령에도 미치므로 이 한 줄로 충분합니다([「파이프라인 배리어」](#/read/cpp-vulkan/vsync-barriers))
+
+## 칸마다 두는 것
+
+| 칸마다 따로 | 까닭 |
+| --- | --- |
+| 커맨드 풀과 버퍼, 펜스 | 실행을 기다리는 커맨드 버퍼는 다시 기록할 수 없다 |
+| 유니폼 버퍼의 칸 | 기록된 명령은 실행될 때 버퍼를 읽는다([「유니폼 버퍼」](#/read/cpp-vulkan/buf-uniform)) |
+| 한 프레임짜리 디스크립터 세트의 풀 | 풀째 비우려면 그 세트를 쓰는 프레임이 끝나야 한다([「풀」](#/read/cpp-vulkan/desc-pool)) |
+| 스테이징 구간, 삭제 줄 | 이 쪽의 프로그램 |
+
+정점 버퍼, 텍스처, 파이프라인처럼 프레임마다 바뀌지 않는 것은 하나만 두고 모든 칸이 함께 씁니다. 그런 것도 바꾸거나 버릴 때는 새로 만든 것으로 갈아 끼우고 옛것을 삭제 줄에 넣습니다.
+
+## 프레임 번호로 세기
+
+칸마다 펜스를 두는 대신 타임라인 세마포어 하나에 제출마다 프레임 번호를 알리게 할 수도 있습니다([「펜스와 세마포어」](#/read/cpp-vulkan/tri-sync)). 칸을 다시 쓸 때는 그 칸이 낸 번호까지 기다리고, 버릴 것에는 마지막으로 쓴 제출의 번호를 적어 두었다가 카운터가 그 번호에 이르면 지웁니다. 그러면 삭제 줄은 칸 수와 상관없이 하나면 됩니다.
+
+<Note>
+겹치는 프레임 수는 보통 2~3으로 둡니다. 늘리면 CPU가 더 앞서 나갈 수 있지만, 입력이 화면에 나타날 때까지의 지연과 칸마다 두는 메모리가 함께 늘어납니다. 이 책의 검증 레이어(1.3.275)는 미리 지운 버퍼를 `vkCmdFillBuffer`가 쓸 때는 알렸지만 `vkCmdCopyBuffer`가 쓸 때는 알리지 않았습니다. 레이어가 조용해도 수명은 프로그램이 지켜야 합니다.
+</Note>
+
+## 정리
+
+- 제출한 명령이 가리키는 리소스는 그 프레임의 펜스가 신호를 받을 때까지 살아 있고 내용이 그대로여야 한다
+- 프레임마다 바뀌는 것은 칸마다 따로 두고, 스테이징은 고리로 돌려 쓰며 프레임이 끝날 때 그 몫을 돌려받는다
+- 버릴 리소스는 삭제 줄에 넣어 마지막으로 쓴 프레임이 끝난 뒤에 지운다
+
+## 참고 문서
+
+- [Vulkan Tutorial: Frames in flight](https://docs.vulkan.org/tutorial/latest/03_Drawing_a_triangle/03_Drawing/03_Frames_in_flight.html)
+- [Vulkan Tutorial: Managing Concurrent Frames(타임라인 세마포어로 세기)](https://docs.vulkan.org/tutorial/latest/Synchronization/Frame_in_Flight/02_managing_concurrent_frames.html)
+- [Vulkan Tutorial: Resource Lifetimes(미룬 삭제)](https://docs.vulkan.org/tutorial/latest/Synchronization/Frame_in_Flight/03_resource_lifetimes.html)
+- [vkDestroyBuffer 참조 쪽](https://docs.vulkan.org/refpages/latest/refpages/source/vkDestroyBuffer.html)
