@@ -1,0 +1,92 @@
+import { Figure, Note } from 'neftyacademy-paragons-bookshelf';
+import { Scope } from '../../components/Scope';
+import { ring10, ring110, ring57, ringSrc } from './data/sh-ringing';
+
+export const summary = '선과 받는 쪽 핀이 만드는 울림, 울림이 만드는 가짜 에지, 직렬 저항으로 누르기, 프로브의 울림과 가리기';
+export const terms = [];
+
+빠른 변 뒤에 출렁임이 따라오는 화면이 있습니다. 변이 제 높이를 지나쳐 튀는 것을 오버슈트, 그 뒤에 출렁이는 것을 링잉(울림)이라고 합니다. 프로브의 긴 접지선이 만드는 울림은 앞에서 봤습니다([「접지 집게가 닿는 곳」](#/read/scope/pb-ground)). 이번에는 회로에 정말로 있는 울림입니다.
+
+## 울림이 생기는 까닭
+
+<Figure caption="핀이 내는 변(CH1)과, 그 변이 긴 선을 지나 받는 쪽 핀에 닿은 모양(CH2). 가로 10ns/칸">
+  <Scope tdiv={1e-8} dt={2.5e-10} traces={[{ name: 'CH1 내는 쪽', data: ringSrc, vdiv: 2, pos: 1.5 }, { name: 'CH2 받는 쪽', data: ring10, vdiv: 2, pos: -3 }]} />
+</Figure>
+
+- **선은 인덕터이고 받는 쪽은 커패시터다**: 한 뼘 넘는 점퍼선에는 수백 nH의 인덕턴스가, 받는 쪽의 핀과 배선에는 수십 pF의 커패시턴스가 있습니다. 둘이 만나면 그네처럼 제 박자로 흔들립니다
+- **빠른 변이 그네를 민다**: 변이 오르는 시간이 그네의 주기보다 짧으면 울립니다. 그림에서 변은 2ns, 울림의 주기는 12.6ns입니다
+- **내는 쪽의 저항이 작으면 오래 울린다**: 그네를 멈추는 것은 길에 있는 저항입니다. 그림은 10Ω뿐이어서 여러 번 출렁입니다
+- **내려갈 때에는 0V 아래로 간다**: 그림의 오른쪽, 내려가는 변 뒤에서는 -2.2V까지 내려갑니다. 0V 아래의 전압도 핀이 견디는 범위 밖입니다
+- **봉우리가 6V다**: 3.3V 신호인데 받는 쪽 핀에는 6V 가까이 걸립니다. 진짜 핀에는 대개 보호 다이오드가 있어 이보다 낮게 잘려 보이지만, 그때 다이오드로 흐르는 전류도 핀에 좋지 않습니다
+
+## 울림이 만드는 가짜 에지
+
+- **골이 1V까지 내려온다**: 첫 봉우리 뒤의 골은 0.99V입니다. HIGH로 읽히는 2.0V보다 한참 아래입니다([「논리 레벨과 문턱」](#/read/scope/bs-levels))
+- **변 하나가 둘로 세어진다**: 이 선이 클럭이면 받는 쪽은 올라갔다, 내려갔다, 다시 올라간 것으로 볼 수 있습니다. 카운터가 가끔 하나씩 더 세거나 데이터가 한 비트씩 밀리는 증상의 흔한 까닭입니다
+- **될 때도 있고 안 될 때도 있다**: 골이 머무는 시간이 수 ns뿐이라, 받는 칩의 빠르기와 온도와 전압에 따라 걸리기도 하고 지나치기도 합니다
+
+## 직렬 저항으로 누른다
+
+<Figure caption="받는 쪽의 모양. 길에 있는 저항이 10Ω일 때(CH1), 47Ω을 더해 57Ω일 때(CH2), 100Ω을 더해 110Ω일 때(CH3)">
+  <Scope tdiv={1e-8} dt={2.5e-10} traces={[{ name: '10Ω', data: ring10, vdiv: 2, pos: 1 }, { name: '57Ω', data: ring57, vdiv: 2, pos: -1.3 }, { name: '110Ω', data: ring110, vdiv: 2, pos: -3.6 }]} />
+</Figure>
+
+```python
+import math
+
+l, c = 200e-9, 20e-12               # 선 200nH, 받는 쪽 20pF
+f = 1 / (2 * math.pi * math.sqrt(l * c))
+z = math.sqrt(l / c)
+print(f"울림 {f / 1e6:.1f}MHz, 주기 {1e9 / f:.1f}ns, 선과 짐의 임피던스 {z:.0f}Ω")
+for r in (10, 57, 110, 200):
+    zeta = r / (2 * z)              # 감쇠비. 1이면 울리지 않는다
+    if zeta >= 1:
+        print(f"저항 {r:3d}Ω: 감쇠비 {zeta:.2f}, 넘치지 않는다")
+        continue
+    over = math.exp(-math.pi * zeta / math.sqrt(1 - zeta ** 2))
+    peak, pct = 3.3 * (1 + over), 100 * over
+    print(f"저항 {r:3d}Ω: 감쇠비 {zeta:.2f}, 넘침 {pct:2.0f}%, 봉우리 {peak:.2f}V")
+```
+
+```text
+울림 79.6MHz, 주기 12.6ns, 선과 짐의 임피던스 100Ω
+저항  10Ω: 감쇠비 0.05, 넘침 85%, 봉우리 6.12V
+저항  57Ω: 감쇠비 0.28, 넘침 39%, 봉우리 4.60V
+저항 110Ω: 감쇠비 0.55, 넘침 13%, 봉우리 3.72V
+저항 200Ω: 감쇠비 1.00, 넘치지 않는다
+```
+
+| 길의 저항 | 시뮬레이션의 첫 봉우리 | 그 뒤의 골 |
+| --- | --- | --- |
+| 10Ω | 6.00V | 0.99V |
+| 57Ω | 4.54V | 2.81V |
+| 110Ω | 3.70V | 3.25V |
+
+- **내는 쪽 핀 가까이에 저항을 끼운다**: 신호선에 22Ω에서 100Ω쯤의 저항을 직렬로 넣는 것이 흔한 처방입니다. 47Ω만 더해도 골이 2.0V 위에 머뭅니다
+- **셈과 시뮬레이션이 조금 다르다**: 셈은 변이 순식간에 오른다고 친 값입니다. 변이 2ns에 걸쳐 오르면 그네를 덜 세게 밀어서 봉우리가 조금 낮습니다
+- **변은 조금 느려진다**: 저항이 받는 쪽의 20pF를 채워야 하므로 110Ω이면 시정수가 2.2ns입니다. 수 MHz의 신호에는 티가 나지 않습니다([「RC 충전 곡선과 시정수」](#/read/scope/sh-rc))
+- **선을 짧게, GND를 곁에**: 인덕턴스는 신호선과 돌아오는 GND 선이 이루는 고리의 넓이를 따릅니다. 선을 줄이고 GND 선을 신호선에 붙여 나란히 보내면 줄어듭니다
+- **변을 느리게 한다**: 핀의 드라이브 세기를 고를 수 있는 칩이면 낮춥니다. 그네를 밀 만큼 빠르지 않은 변은 울리지 않습니다
+
+## 프로브의 울림과 가리기
+
+- **접지를 짧게 해서 다시 본다**: 집게 달린 접지선을 빼고 스프링 접지로 같은 곳을 봅니다. 울림이 사라지거나 박자가 크게 바뀌면 프로브가 만든 것이고, 그대로면 회로의 것입니다
+- **주기로 어림한다**: 커서로 울림의 주기를 재면 12.6ns, 80MHz쯤입니다. 받는 쪽을 20pF로 치고 거꾸로 셈하면 선이 200nH로 나옵니다. 선의 길이에 견주어 말이 되는 값인지 봅니다
+- **대역폭이 모자라면 안 보인다**: 80MHz의 울림을 제 크기로 보려면 장비와 프로브가 그보다 넉넉히 빨라야 합니다. 50MHz 장비에서 깨끗해 보이는 변이 실제로는 울리고 있을 수 있습니다([「대역폭과 상승 시간」](#/read/scope/lm-bandwidth))
+
+<Note>
+그림은 ngspice 42로 2ns의 변, 200nH의 선, 20pF의 짐을 놓고 돌린 것이고, 세 값은 제가 고른 것입니다. 핀의 보호 다이오드는 넣지 않았으므로 진짜 핀에서는 봉우리가 이만큼 오르지 않습니다. 선이 더 길어지면 인덕터 하나로 볼 수 없고 신호가 선의 끝에서 되튀는 일로 따져야 하는데, 이 책에서는 다루지 않습니다. 화면에 보이는 모양은 비슷하고 직렬 저항이라는 처방도 같습니다.
+</Note>
+
+## 정리
+
+- 빠른 변이 긴 선의 인덕턴스와 받는 쪽의 커패시턴스를 만나면 울린다. 봉우리는 전원 전압을 넘고 골은 문턱 아래로 내려올 수 있다
+- 내는 쪽 가까이의 직렬 저항, 짧은 선, 느린 변이 울림을 누른다
+- 접지를 짧게 해서 다시 봐도 그대로인 울림이 회로의 울림이다
+
+## 참고 문서
+
+- [Cadence: Series Resistor and RC Termination for Digital Signals(내는 쪽 핀에 직렬로 넣는 22Ω에서 100Ω의 저항)](https://resources.pcb.cadence.com/blog/series-resistor-and-rc-termination-for-digital-signals)
+- [Altium: Damping and Reflection Transfer with a Series Termination Resistor(선과 짐을 RLC 회로로 보고 저항으로 누르는 것, 흔히 쓰는 22Ω과 33Ω)](https://resources.altium.com/p/damping-and-reflection-transfer-series-termination-resistor)
+- [Cadence: Should Series Termination Be Used to Stop Ringing(울림의 까닭에 따라 처방이 달라진다는 것)](https://resources.pcb.cadence.com/blog/should-series-termination-be-used-to-stop-ringing)
+- [Rohde & Schwarz: Understanding Oscilloscope Probe Fundamentals(짧은 접지와 스프링 접지)](https://www.rohde-schwarz.com/my/_257202.html)

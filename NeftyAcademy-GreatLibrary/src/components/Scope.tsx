@@ -7,6 +7,7 @@
  *  - data: 같은 간격(dt 초)으로 잰 전압들. 첫 값이 화면 왼쪽 끝(t0, 기본 0)이다
  *  - vdiv: 그 채널의 V/칸. pos: 0V 선을 가운데에서 몇 칸 위에 둘지(음수면 아래)
  *  - trigger: 트리거 레벨 표시(첫 채널 기준). cursorsT/cursorsV: 세로 커서 둘(초), 가로 커서 둘(V, 첫 채널 기준)
+ *  - triggerAt: 트리거 점의 시각(초). 화면 위쪽의 T 표시와 세로 점선으로 그린다
  */
 type Trace = { name: string; data: number[]; vdiv: number; pos?: number };
 type Props = {
@@ -15,6 +16,7 @@ type Props = {
   tdiv: number;
   t0?: number;
   trigger?: { level: number };
+  triggerAt?: number;
   cursorsT?: [number, number];
   cursorsV?: [number, number];
 };
@@ -32,7 +34,7 @@ export function eng(value: number, unit: string): string {
   return `${value.toExponential(2)}${unit}`;
 }
 
-export function Scope({ traces, dt, tdiv, t0 = 0, trigger, cursorsT, cursorsV }: Props) {
+export function Scope({ traces, dt, tdiv, t0 = 0, trigger, triggerAt, cursorsT, cursorsV }: Props) {
   const D = 36;
   const W = 10 * D;
   const H = 8 * D;
@@ -70,6 +72,13 @@ export function Scope({ traces, dt, tdiv, t0 = 0, trigger, cursorsT, cursorsV }:
           <g>
             <line x1={ox} y1={clampY(yOf(trigger.level, first))} x2={ox + W} y2={clampY(yOf(trigger.level, first))} stroke="#ffa94d" strokeWidth={1} strokeDasharray="2 5" />
             <text x={ox + W - 3} y={clampY(yOf(trigger.level, first)) - 3} fontSize={10} textAnchor="end" fill="#ffa94d">T</text>
+          </g>
+        )}
+        {triggerAt !== undefined && (
+          <g>
+            <line x1={xOf(triggerAt)} y1={oy} x2={xOf(triggerAt)} y2={oy + H} stroke="#ffa94d" strokeWidth={1} strokeDasharray="2 5" />
+            <path d={`M${xOf(triggerAt)} ${oy + 9}l-5 -9h10z`} fill="#ffa94d" />
+            <text x={xOf(triggerAt) + 8} y={oy + 11} fontSize={10} fill="#ffa94d">T</text>
           </g>
         )}
         {cursorsT?.map((t, i) => <line key={`ct${i}`} x1={xOf(t)} y1={oy} x2={xOf(t)} y2={oy + H} stroke="#ffffff" strokeWidth={1} strokeDasharray="6 4" />)}
