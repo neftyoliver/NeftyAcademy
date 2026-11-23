@@ -1,0 +1,161 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '잠으로 만드는 PWM, 늦게 깬 주기의 모양, 진짜 시계로 잰 폭, 주파수를 올릴 때의 한계, 대신 쓰는 것';
+export const terms = ['sleep_until'];
+
+PWM은 핀을 일정한 주기로 켰다 끄면서, 켜 두는 시간으로 값을 전하는 신호입니다. LED는 한 주기 가운데 켜 둔 몫(듀티)만큼 밝고, 서보는 켜 둔 시간의 길이를 각도로 읽습니다. 이 신호를 `gpiod_line_request_set_value`와 잠으로 만드는 것이 소프트웨어 PWM입니다. 만들 수는 있지만, 앞 쪽에서 잰 늦음이 그대로 신호에 실립니다.
+
+## 잠으로 만드는 PWM
+
+아래 예제는 LED를 100Hz, 듀티 30%로 몹니다. 주기마다 켤 시각과 끌 시각까지 자고, 실제로 켜 둔 시간을 재서 적습니다.
+
+```c gpiosim=softpwm
+// 소프트웨어 PWM: 100Hz, 듀티 30%로 LED를 몰면서 실제로 켜 둔 시간을 잰다
+#define _POSIX_C_SOURCE 200809L              // clock_nanosleep을 쓰려고
+#include <gpiod.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <time.h>
+
+enum { LED = 17 };                           // GPIO 17, 핀 11
+enum { CYCLES = 8, DUTY = 30 };              // 여덟 주기를 30%로
+static const int64_t SECOND = 1'000'000'000;
+static const int64_t PERIOD = 10'000'000;    // 10ms, 곧 100Hz
+
+static int64_t now_ns(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return now.tv_sec * SECOND + now.tv_nsec;
+}
+
+static void sleep_until(int64_t when) {
+    struct timespec at = {.tv_sec = when / SECOND, .tv_nsec = when % SECOND};
+    clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &at, nullptr);
+}
+
+static struct gpiod_line_request* request_output(struct gpiod_chip* chip,
+                                                 unsigned int offset,
+                                                 enum gpiod_line_value first,
+                                                 const char* consumer) {
+    struct gpiod_line_settings* settings = gpiod_line_settings_new();
+    struct gpiod_line_config* config = gpiod_line_config_new();
+    struct gpiod_request_config* request_config = gpiod_request_config_new();
+    struct gpiod_line_request* request = nullptr;
+    if (settings && config && request_config) {
+        gpiod_line_settings_set_direction(settings, GPIOD_LINE_DIRECTION_OUTPUT);
+        gpiod_line_settings_set_output_value(settings, first);
+        gpiod_line_config_add_line_settings(config, &offset, 1, settings);
+        gpiod_request_config_set_consumer(request_config, consumer);
+        request = gpiod_chip_request_lines(chip, request_config, config);
+    }
+    gpiod_request_config_free(request_config);
+    gpiod_line_config_free(config);
+    gpiod_line_settings_free(settings);
+    return request;
+}
+
+int main(void) {
+    struct gpiod_chip* chip = gpiod_chip_open("/dev/gpiochip0");
+    if (!chip) {
+        perror("/dev/gpiochip0");
+        return 1;
+    }
+    struct gpiod_line_request* led =
+        request_output(chip, LED, GPIOD_LINE_VALUE_INACTIVE, "softpwm");
+    gpiod_chip_close(chip);
+    if (!led) {
+        perror("GPIO 17 요청");
+        return 1;
+    }
+    const int64_t on_time = PERIOD * DUTY / 100;
+    const int64_t origin = now_ns();
+    for (int i = 1; i <= CYCLES; ++i) {
+        const int64_t begin = origin + i * PERIOD;   // 이 주기가 시작할 눈금
+        sleep_until(begin);
+        gpiod_line_request_set_value(led, LED, GPIOD_LINE_VALUE_ACTIVE);
+        const int64_t rose = now_ns();
+        sleep_until(begin + on_time);
+        gpiod_line_request_set_value(led, LED, GPIOD_LINE_VALUE_INACTIVE);
+        const int64_t fell = now_ns();
+        printf("%d번째 주기: %4.1fms에 켜서 %3.1fms 뒤에 껐다. 듀티 %2.0f%%\n", i,
+               (double)(rose - origin) / 1e6, (double)(fell - rose) / 1e6,
+               100.0 * (double)(fell - rose) / (double)PERIOD);
+    }
+    gpiod_line_request_release(led);
+}
+```
+
+```text
+1번째 주기: 10.0ms에 켜서 3.0ms 뒤에 껐다. 듀티 30%
+2번째 주기: 20.0ms에 켜서 3.0ms 뒤에 껐다. 듀티 30%
+3번째 주기: 30.0ms에 켜서 3.0ms 뒤에 껐다. 듀티 30%
+4번째 주기: 40.0ms에 켜서 7.0ms 뒤에 껐다. 듀티 70%
+5번째 주기: 50.0ms에 켜서 3.0ms 뒤에 껐다. 듀티 30%
+6번째 주기: 62.0ms에 켜서 1.0ms 뒤에 껐다. 듀티 10%
+7번째 주기: 70.0ms에 켜서 3.0ms 뒤에 껐다. 듀티 30%
+8번째 주기: 80.0ms에 켜서 3.0ms 뒤에 껐다. 듀티 30%
+```
+
+- **눈금은 시각으로 잡았다**: 주기의 시작과 끌 시각을 처음 읽은 시계에서 셈하고, `sleep_until`로 그 시각까지 잡니다. 박자가 밀리지 않습니다([「사용자 공간에서 얼마나 정확한가」](#/read/libgpiod/tm-jitter))
+- **끄는 잠이 늦으면 더 밝다**: 4번째 주기에서는 끄려고 든 잠이 4ms 늦게 깼습니다. 3ms여야 할 것이 7ms 동안 켜져 있었고, 그 주기의 듀티는 70%입니다
+- **켜는 잠이 늦으면 더 어둡다**: 6번째 주기에서는 켜려고 든 잠이 2ms 늦게 깼습니다. 끌 시각은 그대로여서 1ms만 켜졌습니다. 3ms 넘게 늦었다면 끌 시각이 이미 지나 있어서, 켜자마자 껐을 것입니다
+- **다음 주기는 멀쩡하다**: 시각으로 자므로 틀린 것은 그 주기 하나입니다. 길이로 잤다면 뒤의 주기가 모두 밀립니다
+- **늦음은 대본으로 넣었다**: 흉내 칩의 시간은 가상이라 잠이 늦지 않습니다. 두 번의 늦음은 대본에 적어 넣은 것이고, 크기는 앞 쪽에서 CPU가 바쁠 때 잰 값에서 골랐습니다. 보드에서 돌리면 진짜 늦음이 이 숫자에 나타납니다
+
+## 진짜 시계로 잰 폭
+
+예제의 반복문에서 값 쓰기만 빼고, 이 책을 쓴 컴퓨터에서 2000주기씩 돌려 켜 둔 시간을 쟀습니다. 바쁠 때란 CPU가 둘인 컴퓨터에서 쉬지 않고 도는 프로그램 넷을 함께 돌린 때입니다.
+
+| 바란 폭과 조건 | 가운데 | 100번에 98번 | 가장 짧게~길게 |
+| --- | --- | --- | --- |
+| 3ms(100Hz), 한가할 때 | 2.98ms | 2.87~3.08ms | 0.02~3.4ms |
+| 3ms(100Hz), 바쁠 때 | 3.00ms | 2.36~4.53ms | 0.03~8.2ms |
+| 1.5ms(50Hz), 한가할 때 | 1.46ms | 1.31~1.58ms | 0.03~2.5ms |
+| 1.5ms(50Hz), 바쁠 때 | 1.50ms | 0.03~2.84ms | 0.02~4.3ms |
+| 1.5ms, 바쁠 때 `chrt -f 50` | 1.50ms | 1.47~1.52ms | 0.03~3.0ms |
+
+- **LED에는 대개 괜찮다**: 한가할 때 100Hz의 듀티는 100번에 98번이 28.7%에서 30.8% 사이였습니다. 바쁠 때에는 23.6%에서 45.3%로 벌어지고, 가끔 한 주기가 거의 꺼지거나 82%까지 켜집니다. 그런 주기는 밝기가 순간 튀는 것으로 보일 수 있습니다
+- **서보에는 모자라다**: 서보는 50Hz쯤으로 오는 펄스의 폭을 각도로 읽습니다. 1.5ms가 가운데이고, 1ms에서 2ms까지가 대략 90도입니다. 폭이 0.1ms 틀리면 9도쯤이 틀립니다. 한가할 때에도 100번에 98번의 범위가 0.27ms, 곧 24도쯤입니다
+- **바쁘면 펄스가 사라진다**: 바쁠 때의 1.5ms는 100번에 한 번꼴로 0.03ms였습니다. 켜는 잠이 1.5ms 넘게 늦어서 켜자마자 끈 것입니다. 서보가 알아들을 폭이 아닙니다
+- **실시간 정책은 대개를 고친다**: `chrt -f 50`으로 돌리자 100번에 98번이 1.47ms에서 1.52ms 사이로 모였습니다. 그래도 2000번 가운데에는 0.03ms와 3.0ms가 있었습니다
+- **가운데 값도 조금 어긋난다**: 한가할 때의 1.5ms는 가운데 값이 1.46ms였습니다. 켜는 잠과 끄는 잠이 늦는 정도가 서로 달랐던 것인데, 그 까닭은 확인하지 않았습니다
+
+## 주파수를 올릴 때의 한계
+
+위의 표에서 한가할 때의 폭은 0.1ms 안팎으로 흔들렸습니다. 이 흔들림은 주파수를 올려도 줄지 않으므로, 주기가 짧아질수록 듀티에서 차지하는 몫이 커집니다.
+
+| 주파수 | 한 주기 | 0.1ms가 차지하는 몫 |
+| --- | --- | --- |
+| 50Hz | 20ms | 0.5% |
+| 100Hz | 10ms | 1% |
+| 1kHz | 1ms | 10% |
+| 10kHz | 0.1ms | 주기 전체 |
+
+- **느릴수록 정확하다**: 주기가 초 단위인 신호, 이를테면 릴레이로 히터를 켜 두는 몫을 조절하는 일에는 소프트웨어 PWM으로 충분합니다
+- **빠를수록 쓸 수 없다**: 1kHz에서는 듀티의 10분의 1이 늘 흔들리고, 가끔 오는 수 ms의 늦음은 여러 주기를 통째로 지웁니다
+- **깨는 횟수도 늘어난다**: 한 주기에 두 번 깨고 두 번 값을 씁니다. 1kHz면 초당 2000번을 깨고 2000번 값을 씁니다
+- **자지 않고 기다리는 방법**: 잠드는 대신 시계를 계속 읽으며 기다리면, 한가한 컴퓨터에서는 늦음의 가운데 값이 1µs 아래로 내려갑니다. 그 대신 CPU 하나를 통째로 쓰고, CPU를 다투는 프로그램이 있으면 오히려 더 늦습니다. [「비트뱅잉」](#/read/libgpiod/tm-bitbang)에서 재 봅니다
+
+## 대신 쓰는 것
+
+- **하드웨어 PWM**: 칩 안의 전용 회로가 주기와 듀티를 받아 신호를 스스로 만듭니다. 프로그램이 늦게 깨어도 파형은 흔들리지 않습니다. 헤더에서는 GPIO 12와 13, 또는 18과 19로 나옵니다([「핀의 대체 기능: I2C, SPI, UART, PWM」](#/read/sbc-start/hdr-functions))
+- **5에서는 다른 핀으로도**: 5는 RP1의 PIO로 헤더의 다른 핀에도 PWM을 낼 수 있습니다([「라즈베리파이 5의 RP1」](#/read/sbc-start/hdr-rp1))
+- **쓰는 법은 다음 책에서**: 커널의 PWM 인터페이스에 주기와 듀티를 적는 법, LED와 서보에 맞추는 법은 이 서가의 「PWM」에서 다룹니다
+- **DMA로 시각을 맞추던 라이브러리**: pigpio가 쓰던 방법과 지금의 사정은 [「gpiozero, lgpio, pigpio와 견주기」](#/read/libgpiod/bn-others)에서 봅니다
+
+<Note>
+예제는 이 책의 흉내 칩에서 돌린 것이고, 두 번의 늦음은 대본으로 넣었습니다. 진짜 libgpiod 2.2.4의 머리 파일로 x86-64와 aarch64에서 컴파일되는지 확인했고, 보드에서 돌려 보지는 못했습니다. 표의 폭은 라즈베리파이에서 잰 것이 아닙니다. CPU가 둘인 x86-64 가상 머신(리눅스 6.18)에서 같은 반복문을 GPIO 없이 돌려 쟀고, LED나 서보를 달아 눈으로 본 것도 아닙니다. 서보의 신호에 관한 숫자는 Pololu의 글에서 옮겼고, 서보마다 범위가 다르다고 그 글은 적습니다.
+</Note>
+
+## 정리
+
+- 소프트웨어 PWM은 켤 시각과 끌 시각까지 자면서 값을 쓰는 것이다. 늦게 깬 만큼 그 주기의 듀티가 틀린다
+- 흔들림의 크기는 주파수와 상관없다. 주기가 짧을수록 듀티에서 차지하는 몫이 커진다
+- 느린 신호와 눈으로 보는 밝기에는 쓸 수 있다. 서보와 빠른 신호는 하드웨어 PWM에 맡긴다
+
+## 참고 문서
+
+- [Pololu 블로그: Servo control interface in detail(펄스의 폭과 각도, 주기)](https://www.pololu.com/blog/17/servo-control-interface-in-detail)
+- [Pololu 블로그: Electrical characteristics of servos and introduction to the servo control interface(50Hz쯤, 1.5ms가 가운데, 1~2ms가 대략 90도)](https://www.pololu.com/blog/16)
+- [위키백과: Servo control(20ms마다 오는 펄스, 폭이 각도를 정한다는 것)](https://en.wikipedia.org/wiki/Servo_control)
+- [리눅스 설명서: clock_nanosleep(2)(시각으로 자기)](https://man7.org/linux/man-pages/man2/clock_nanosleep.2.html)
