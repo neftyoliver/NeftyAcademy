@@ -1,0 +1,98 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '시뮬레이터 창에서 해석을 정해 돌리고 신호를 골라 본다. 커서와 측정, 값 돌려 보기, 넷리스트 꺼내 보기';
+export const terms = [];
+
+KiCad에서 회로도를 그리는 창과 돌리는 창은 따로입니다. 회로도 편집기에서 그리고 모델을 붙인 다음, 시뮬레이터 창을 열어 무엇을 구할지 정하고 돌립니다. 이 쪽은 그 창에서 하는 일을 차례대로 봅니다. 회로는 6장에서 LTspice에 그린 RC 회로입니다.
+
+## 돌리는 차례
+
+- **창을 연다**: 회로도 편집기에서 Inspect 메뉴의 Simulator를 고릅니다
+- **해석 탭을 만든다**: Simulation 메뉴의 New Analysis Tab…입니다. 해석의 종류를 고르고 칸을 채웁니다
+- **돌린다**: Simulation 메뉴의 Run Simulation이고 키는 `R`입니다. 지금 보고 있는 탭의 해석만 돕니다
+- **신호를 고른다**: 오른쪽의 신호 목록에서 `V(/out)` 같은 이름에 표시를 하면 그려집니다. Simulation 메뉴의 Probe Schematic…을 고르고 회로도의 선을 누르면 그 전압이, 기호의 핀을 누르면 그 핀으로 들어가는 전류가 그려집니다
+- **해석을 고친다**: Simulation 메뉴의 Edit Analysis Tab…이 같은 창을 다시 엽니다
+- **탭마다 해석이 하나다**: 과도 해석의 탭과 AC의 탭을 따로 만들어 두고 오가며 봅니다. 탭마다 그림, 신호 목록, 로그가 따로 있습니다
+
+## 창의 생김새
+
+| 자리 | 있는 것 |
+| --- | --- |
+| 위 | 도구 막대 |
+| 가운데 | 파형이 그려지는 곳 |
+| 아래 | ngspice가 내놓는 글 |
+| 오른쪽 | 신호 목록, 커서, 측정, 값 돌려 보기 |
+
+- **아래의 글은 5장에서 보던 출력이다**: 경고와 오류, 동작점의 표가 여기에 나옵니다. 그림이 이상하면 이곳부터 읽습니다([「수렴 실패와 흔한 오류」](#/read/circuit-sim/ng-errors))
+
+## 해석의 종류
+
+| 탭의 종류 | 채우는 칸 | 넷리스트의 줄 |
+| --- | --- | --- |
+| OP | 없음 | `.op` |
+| DC | 훑을 전원, 처음 값, 끝 값, 걸음 | `.dc` |
+| AC | 열 배마다의 점 수, 처음과 끝 주파수 | `.ac dec` |
+| TRAN | 걸음, 끝나는 시간 | `.tran` |
+
+- **그 밖의 종류**: 극점과 영점, 잡음, S 매개변수, FFT의 탭이 있고, Custom은 3장에서 익힌 줄을 글로 그대로 적는 탭입니다
+- **칸은 넷리스트의 숫자와 같다**: TRAN의 걸음과 끝나는 시간은 `.tran 1u 5m`의 두 숫자입니다. DC는 전원 말고 저항과 온도도 훑습니다
+- **회로도에 적은 지시문**: 회로도에 `.tran` 같은 글이 있으면 시뮬레이터를 열 때 그것을 씁니다. 창에서 한 번 돌린 뒤에는 시뮬레이터를 다시 열 때까지 창의 설정이 앞섭니다
+- **OP의 결과**: 아래의 글에 표로 나옵니다. View 메뉴의 Show OP Voltages와 Show OP Currents를 켜면 회로도 위에 숫자로 적힙니다
+
+## 보고 재기
+
+- **커서**: 신호 목록의 Cursor 1과 Cursor 2 칸에 표시를 하면 그 파형에 커서가 붙고, 값이 커서의 표에 나옵니다
+- **측정**: 신호마다 최솟값, 최댓값, 실효값, 봉우리에서 골까지의 크기, 적분을 재는 항목(Measure Min, Measure Max, Measure RMS 같은 이름)이 있습니다. 잰 값은 측정 칸에 나옵니다
+- **식**: Simulation 메뉴의 User-defined Signals…에 `V(/in)-V(/out)` 같은 식을 적어 신호로 만듭니다
+- **값을 돌려 본다**: Simulation 메뉴의 Add Tuned Value…로 부품을 고르면 값을 움직이는 손잡이가 생깁니다. 저항, 커패시터, 인덕터, DC 전원에 쓸 수 있고, 마음에 드는 값을 Save로 회로도에 적습니다. 여러 값으로 한꺼번에 돌리는 방식도 있습니다([「값 바꿔 가며 돌리기」](#/read/circuit-sim/an-param))
+- **설정을 남긴다**: File 메뉴의 Save Workbook이 해석의 설정, 고른 신호, 커서, 측정을 저장합니다. 결과의 숫자는 담기지 않습니다
+- **내보낸다**: File 메뉴의 Export Current Plot as CSV…가 그려진 신호를 글 파일로 냅니다. 칸은 세미콜론으로 나뉩니다. PNG 그림으로도 냅니다
+
+## 넷리스트를 꺼내 보기
+
+답이 이상하면 KiCad가 ngspice에 넘긴 넷리스트를 봅니다. Simulation 메뉴의 Show SPICE netlist…입니다. 아래는 RC 회로의 회로도에서 뽑은 넷리스트와, 그것을 ngspice로 돌린 결과입니다. 회로도에는 `.tran`과 `.meas`를 글로 적어 두었습니다.
+
+```spice
+.title KiCad schematic
+.meas tran vmax MAX v(/out)
+.tran 1u 5m
+V1 /in GND PULSE( 0 3.3 0 1u 1u 499u 1m )
+R1 /in /out 1k
+C1 /out GND 100n
+.end
+```
+
+```text
+$ ngspice -b rc.cir
+vmax = 3.277805e+00 at= 3.500000e-03
+```
+
+- **앞 장들과 같은 답이다**: `vmax`가 3.277805V입니다([「해석 지시문과 파형 창」](#/read/circuit-sim/lt-run))
+- **전원의 줄**: `VPULSE` 기호의 모델 창에 채운 숫자가 `PULSE( … )`의 괄호 안으로 들어갔습니다. 차례는 2장에서 적던 그대로입니다
+- **명령줄로도 뽑는다**: `kicad-cli sch export netlist --format spice`가 화면을 띄우지 않고 회로도에서 넷리스트를 만듭니다. 위의 것도 그렇게 뽑았습니다
+- **ngspice로 따로 돌리려면 뽑아낼 줄이 있어야 한다**: 이 넷리스트에는 `.print`가 없습니다. `.meas`나 `.print`를 글로 적어 두지 않으면 배치 방식의 ngspice는 해석을 돌리지 않습니다([「배치 실행과 대화형」](#/read/circuit-sim/ng-run))
+- **빗금이 든 이름은 식에서 걸린다**: `v(/out)`은 통했습니다. `.print ac vdb(/out)`은 ngspice 42가 `PPerror: syntax error`라고 했고, `vdb("/out")`처럼 따옴표로 묶으니 통했습니다
+- **전역 이름표에는 빗금이 없다**: `Ctrl`과 `L`로 놓는 전역 이름표를 쓰면 마디의 이름이 `out` 그대로 나옵니다
+
+## 돌지 않을 때
+
+- **아래의 글에서 `timestep too small`을 찾는다**: 설명서는 수렴 문제, 틀린 핀의 짝, 빠진 전원을 원인으로 꼽습니다
+- **핀의 짝을 부품마다 확인한다**: 모델을 붙인 부품의 줄을 넷리스트에서 하나씩 봅니다([「회로도와 시뮬레이션 모델 붙이기」](#/read/circuit-sim/kc-schematic))
+- **접지가 있는지 본다**: 전원 기호 `GND`나 `Simulation_SPICE`의 `0`이 회로에 이어져 있어야 합니다
+- **모델이 없는 부품**: 커넥터처럼 모델이 없는 기호가 섞여 있으면 돌지 않습니다. 시뮬레이션에서 빼는 법은 다음 쪽에 있습니다([「시뮬레이션에서 기판으로」](#/read/circuit-sim/kc-to-pcb))
+- **`.options`는 마지막에 쓴다**: 설명서는 `gmin`, `abstol`, `reltol` 같은 값을 느슨하게 하는 지시문을 알려 주면서, 틀린 답이 나올 수 있다고 덧붙입니다
+
+<Note>
+창, 메뉴, 칸의 이름은 KiCad 10의 설명서에서 옮긴 것이고, 제가 화면에서 눌러 본 것은 아닙니다. 넷리스트는 KiCad 7.0.11의 `kicad-cli`로 뽑아 ngspice 42로 돌렸고, 줄 끝의 빈칸만 지웠습니다. 회로도 파일은 화면에서 그리지 않고 스크립트로 만들었습니다. 빗금이 든 이름과 전역 이름표의 결과도 같은 방법으로 확인했습니다. 시뮬레이터 창이 ngspice에 넘기는 넷리스트에는 신호를 저장하라는 줄이 더 붙는다고 설명서에 적혀 있으므로, 창에서 본 넷리스트는 위의 것과 조금 다를 수 있습니다.
+</Note>
+
+## 정리
+
+- 시뮬레이터 창에서 해석 탭을 만들고, 돌리고, 신호 목록이나 회로도에서 신호를 고른다. 탭 하나가 해석 하나다
+- 커서와 측정으로 숫자를 읽고, Add Tuned Value로 값을 움직여 본다. 설정은 워크북으로 저장한다
+- 답이 이상하면 Show SPICE netlist로 넷리스트를 본다. 같은 넷리스트를 `kicad-cli`로 뽑아 ngspice에서 돌릴 수 있다
+
+## 참고 문서
+
+- [KiCad 10 설명서: Schematic Editor(Simulator 장의 Running simulations, Viewing simulation results, Tuning components, Saving simulation setups, Exporting simulation results, Troubleshooting simulations)](https://docs.kicad.org/10.0/en/eeschema/eeschema.html)
+- [KiCad: SPICE Simulation(회로도 편집기에서 시뮬레이터를 연다는 것)](https://kicad.org/discover/spice)
