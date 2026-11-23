@@ -1,0 +1,114 @@
+import { Figure, Note } from 'neftyacademy-paragons-bookshelf';
+import { Circuit } from '../../components/Circuit';
+
+export const summary = '2장의 분배기를 LTspice에 그린다. 그림과 넷리스트의 짝, 모델 붙이기, 글로 된 회로도 파일';
+export const terms = [];
+
+5장까지는 넷리스트를 손으로 적었습니다. LTspice에서는 회로도를 그리면 프로그램이 그 넷리스트를 대신 만듭니다. 이 쪽에서는 2장의 분배기를 LTspice에 그리는 차례를 따라가면서, 그림의 무엇이 넷리스트의 무엇이 되는지를 짝짓습니다. 이 장의 화면 이야기는 제가 눌러 본 것이 아니라 Analog Devices의 문서에서 옮긴 것입니다.
+
+## 그리는 차례
+
+<Figure caption="LTspice에 그릴 분배기. 2장에서 넷리스트로 적은 회로와 같다">
+  <Circuit spec="V 0,2 0,0 V1 5V; W 0,0 1,0; O 1,0 ^in; R 1,0 3,0 R1 10kΩ; O 3,0 ^out; R 3,0 3,2 R2 20kΩ; W 3,2 0,2; G 0,2" label="5볼트 전원 V1에서 이름표 in이 붙은 선이 나와 10킬로옴 저항 R1을 지나고, 이름표 out이 붙은 선에서 20킬로옴 저항 R2가 접지로 내려가는 회로도" />
+</Figure>
+
+- **새 회로도를 연다**: File 메뉴의 New Schematic입니다. 저장하면 확장자가 `.asc`인 파일이 됩니다
+- **부품을 놓는다**: 글자 하나가 부품 하나입니다. `R`은 저항, `C`는 커패시터, `L`은 인덕터, `D`는 다이오드, `V`는 전압원이고, 그 밖의 부품은 `P`로 여는 창에서 고릅니다. Esc나 마우스의 오른쪽 단추가 놓기를 끝냅니다
+- **선을 긋는다**: `W`를 누르고 핀에서 핀으로 긋습니다. 26판에서는 아직 아무것도 이어지지 않은 핀을 누르면 그 자리에서 선이 시작됩니다
+- **접지를 붙인다**: `G`입니다. 넷리스트의 마디 `0`이 이 기호입니다
+- **마디에 이름을 붙인다**: `N`을 누르고 `in`, `out`이라고 적어 선 위에 놓습니다
+- **값을 적는다**: 부품을 오른쪽 단추로 누르면 값을 적는 창이 뜹니다. 저항에 `10k`와 `20k`, 전원에 `5`를 적습니다
+- **시킬 일을 적는다**: `.`을 누르면 글 상자가 뜹니다. `.op`라고 적고 회로도의 빈 곳에 놓습니다
+- **고친다**: `M`은 옮기기, `S`는 선이 붙은 채로 끌기입니다. 빈칸 키는 회로 전체가 보이도록 화면을 맞춥니다
+
+## 그림이 넷리스트가 되는 법
+
+| 회로도에 그린 것 | 넷리스트에 생기는 것 |
+| --- | --- |
+| 부품 기호 하나 | 소자 줄 하나 |
+| 선으로 이어진 덩어리 | 마디 하나 |
+| 이름표 | 그 마디의 이름 |
+| 접지 기호 | 마디 `0` |
+| 부품의 값 | 소자 줄 끝의 값 |
+| `.`으로 적은 글 | 점으로 시작하는 줄 |
+
+- **만들어진 넷리스트를 본다**: 회로도 창을 누른 다음 View 메뉴의 SPICE Netlist를 고릅니다. 분배기를 맞게 그렸다면 [「첫 넷리스트: 전압 분배기」](#/read/circuit-sim/nl-first)에서 손으로 적은 소자 줄 셋과 `.op`가 거기에 들어 있습니다
+- **이름을 붙이지 않은 마디는 번호를 받는다**: `N001`, `N002` 같은 이름입니다. 파형 창에서도 `V(n001)`로 나오므로, 들여다볼 마디에는 이름표를 붙여 둡니다
+- **같은 이름표는 같은 마디다**: 선으로 잇지 않아도 이어집니다. 넷리스트에서 같은 이름을 적는 것과 같습니다. 한 글자를 틀리면 2장에서처럼 다른 마디가 됩니다
+- **접지를 빠뜨리면 돌지 않는다**: ngspice는 접지가 없는 넷리스트에 뜻 없는 전압을 내놓았습니다. LTspice는 접지로 가는 길이 없다는 오류를 띄운다고 합니다
+- **지시문과 주석**: `.`으로 적은 글은 넷리스트에 들어가는 지시문이고, `T`로 적은 글은 그림에만 남는 주석입니다. Shift를 누른 채 글을 누르면 둘 사이를 오가고, 주석이 된 지시문은 파랗게 보입니다
+- **돌릴 때마다 넷리스트 파일이 새로 써진다**: 회로도와 이름이 같고 확장자가 `.net`인 파일입니다. LTspice가 셈하는 것은 그림이 아니라 이 파일입니다([「넷리스트와 파형 내보내기」](#/read/circuit-sim/lt-export))
+
+## 신호원과 모델
+
+- **신호원**: 전압원을 오른쪽 단추로 누르고 Advanced를 누르면 `PULSE`나 `SINE` 같은 꼴을 고르는 창이 열립니다. 칸에 채우는 숫자는 [「신호원: DC, SIN, PULSE, PWL」](#/read/circuit-sim/nl-sources)에서 괄호 안에 적던 숫자들입니다
+- **딸려 오는 모델을 고른다**: LTspice에는 여러 제조사의 다이오드, 트랜지스터, MOSFET 모델이 함께 들어 있습니다. 부품을 오른쪽 단추로 누르면 뜨는 창에 그 목록을 여는 단추가 있습니다
+- **내 모델을 붙인다**: `.model` 줄을 `.`의 글 상자에 붙여 넣어 회로도에 놓고, 부품의 값 자리에 모델의 이름을 적습니다. 3장의 `.model RED D(IS=1e-18 N=1.9 RS=5)`라면 다이오드의 값에 `RED`라고 적습니다
+- **파일로 가져온다**: 모델 파일을 회로도와 같은 폴더에 두고 `.lib 파일이름`을 지시문으로 놓습니다. 부품의 값에는 파일의 이름이 아니라 모델의 이름을 적습니다
+- **하위 회로로 된 모델**: 부품을 Ctrl과 오른쪽 단추로 누르면 속성을 고치는 창이 열립니다. Prefix를 `X`로 바꾸고 Value에 하위 회로의 이름을 적습니다. 기호의 핀 차례가 `.subckt` 줄의 마디 차례와 같아야 합니다([「.subckt와 제조사 모델 가져오기」](#/read/circuit-sim/dv-subckt))
+- **접미사는 넷리스트와 같다**: `M`은 밀리이고 메가는 `Meg`이며, `1F`는 1펨토패럿입니다([「접미사와 단위의 함정」](#/read/circuit-sim/nl-units)). 26.0.2판의 고친 점 목록에는 저항이나 주파수에 `M`을, 커패시터에 `F`를 적으면 경고한다는 줄이 있습니다
+
+## 회로도 파일은 글이다
+
+`.asc` 파일을 글 편집기로 열면 이런 줄들이 보입니다.
+
+```text nocheck
+Version 4
+SHEET 1 880 680
+WIRE 112 96 112 144
+WIRE 272 96 224 96
+...
+FLAG 112 240 0
+FLAG 112 96 in
+FLAG 272 96 out
+SYMBOL voltage 112 128 R0
+SYMATTR InstName V1
+SYMATTR Value 5
+SYMBOL res 256 128 R0
+SYMATTR InstName R2
+SYMATTR Value 20k
+...
+TEXT 80 280 Left 2 !.op
+```
+
+| 줄의 머리 | 뜻 |
+| --- | --- |
+| `WIRE x1 y1 x2 y2` | 두 점을 잇는 선 |
+| `FLAG x y 이름` | 이름표. 이름이 `0`이면 접지 |
+| `SYMBOL 기호 x y 방향` | 부품 하나. `R0`은 그대로, `R90`은 90° 돌린 것 |
+| `SYMATTR 속성 값` | 바로 앞 부품의 속성. `InstName`은 이름, `Value`는 값 |
+| `TEXT x y … 글` | 글. `!`로 시작하면 지시문, `;`로 시작하면 주석 |
+
+- **한 줄에 하나씩이다**: 선 하나, 이름표 하나, 부품 하나가 저마다 한 줄입니다. 저항의 값을 바꾸면 `SYMATTR Value` 한 줄이 바뀝니다
+- **버전 관리에 넣을 수 있다**: 줄 단위로 된 글이므로, git에 넣어 두면 두 판 사이에 무엇이 달라졌는지가 줄로 보입니다
+- **좌표는 격자의 눈금이다**: 정수이고 아래로 갈수록 y가 커집니다. 선의 끝이 핀의 자리와 맞아야 이어지므로, 그리는 일은 화면에서 하고 파일은 읽는 데에 씁니다
+- **글 편집기로 고쳐 저장할 때에는 `µ`를 조심한다**: 회로도 파일은 옛 방식의 한 바이트 글자로 저장되고, 마이크로를 뜻하는 `µ`도 그렇습니다. 편집기가 다른 인코딩으로 다시 저장해서 이 글자가 깨지고 값이 백만 배 달라진 일이 있었다는 글이 Analog Devices의 게시판에 있습니다
+
+## 판과 운영체제
+
+- **단축키는 24판에서 바뀌었다**: 그 전에 쓰인 글과 영상은 F2, F3 같은 키를 씁니다. Help 메뉴의 Keyboard Shortcuts가 지금 깔린 판의 표를 보여 주고, 설정에서 옛 키로 되돌릴 수 있습니다
+- **macOS의 화면은 26판에서 윈도우와 같아졌다**: 17판까지는 macOS용의 화면이 따로였습니다. 26판부터는 두 운영체제의 것이 함께 나옵니다. 돌리기와 뒤집기 같은 조합 키는 운영체제마다 다르므로 Keyboard Shortcuts의 표에서 확인합니다
+- **보기 회로**: File 메뉴의 Open Examples에 배우는 데에 쓰는 회로들이 들어 있습니다
+
+<Note>
+이 쪽에는 제가 돌려서 확인한 것이 없습니다. LTspice를 깔 수 없는 곳에서 썼기 때문입니다. 키와 메뉴의 이름은 LTspice 26의 단축키 표, Analog Devices의 안내 글, LTspice 도움말의 사본에서 옮겼고, 판에 따라 자리가 다를 수 있습니다. 회로도 파일의 보기는 LTspice가 저장한 파일이 아니라 형식을 적은 문서를 보고 제가 적은 조각입니다. 줄을 줄였으므로 그대로 저장해서 열 수 있는 파일이 아닙니다.
+</Note>
+
+## 정리
+
+- LTspice에서는 부품, 선, 이름표, 접지, 지시문을 그리면 넷리스트가 만들어진다. View 메뉴의 SPICE Netlist로 그 넷리스트를 본다
+- 들여다볼 마디에는 이름표를 붙인다. 모델은 `.model`이나 `.lib`를 지시문으로 놓고 부품의 값 자리에 이름을 적어 붙인다
+- 회로도 파일 `.asc`는 줄 단위의 글이어서 읽을 수 있고 버전 관리에 넣을 수 있다
+
+## 참고 문서
+
+- [Analog Devices: LTspice Keyboard Shortcuts(26판의 키: 부품, 선, 접지, 이름표, 지시문, 옮기기)](https://www.analog.com/en/resources/technical-articles/ltspice-keyboard-shortcuts.html)
+- [Analog Devices EngineerZone: Getting Started with LTspice(새 회로도, 부품 고치기, 접미사, 넷리스트 보기, 보기 회로)](https://ez.analog.com/design-tools-and-calculators/ltspice/a/faqs-docs/c/getting-started-with-ltspice)
+- [Analog Devices: LTspice How to: Importing Third-Party Models(딸려 오는 모델, .model과 .lib, Prefix를 X로 바꾸기)](https://www.analog.com/en/resources/technical-articles/ltspice-how-to-import-third-party-models.html)
+- [Analog Devices: Using the .STEP Directive to Perform Repeated Analysis(Shift와 클릭으로 지시문을 주석으로, 파란 글)](https://www.analog.com/en/resources/technical-articles/ltspice-using-the-step-command-to-perform-repeated-analysis.html)
+- [LTspice Help: Circuit Description(돌릴 때 .net 파일이 만들어진다는 것)](https://ltspicehelpmanual.azurewebsites.net/introduction1.htm)
+- [LTspice: 고친 점 목록(24판의 단축키, 26판의 macOS, 핀을 눌러 선 긋기, 접미사 경고)](https://ltspice.analog.com/download/updates.txt)
+- [KiCad 개발 문서: LTspice Import Format(.asc 파일의 줄들과 그 뜻)](https://dev-docs.kicad.org/en/import-formats/ltspice/index.html)
+- [Analog Devices EngineerZone: Plot settings (.PLT) file incompatibility problem(회로도는 옛 형식으로 저장된다는 것, 깨진 µ와 백만 배 틀어진 값)](https://ez.analog.com/design-tools-and-calculators/ltspice/f/q-a/604644/plot-settings-plt-file-incompatibility-problem)
+- [Electronics-Lab: How to deal with (LT)SPICE error messages(접지가 없을 때의 오류)](https://www.electronics-lab.com/forums/resources/how-to-deal-with-lt-spice-error-messages.14/updates)
+- [콜로라도 대학교 PHYS 3330: Installing LTspice(26판부터 두 운영체제가 같은 화면, 단축키 표를 여는 곳)](https://physicslabs.colorado.edu/courses/phys-3330/resources/ltspice/)
