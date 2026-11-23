@@ -21,6 +21,7 @@ import Commands from './chapters/basics/07-commands.mdx';
 import CEcosystem from './chapters/basics/08-c-ecosystem.mdx';
 import { writtenIn } from './books/written';
 import { cpp } from './books/cpp';
+import { analogDigital, circuitSim, scope } from './books/ee';
 import { networking } from './books/networking';
 import { mpi, openmp } from './books/parallel';
 import { python } from './books/python';
@@ -283,6 +284,11 @@ export const library: Library = {
         draft('fields', '전기와 자기장'),
       ],
     },
+
+    // 전자공학 보강 세 권: 오실로스코프 읽기, 회로 시뮬레이터, 아날로그에서 디지털로. src/books/ee.ts
+    scope,
+    circuitSim,
+    analogDigital,
 
     // =====================================================================
     // 책 속에 책이 든 서가들. 차례는 src/books/ 아래에 글로 적혀 있다.
