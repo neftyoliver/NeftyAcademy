@@ -1,0 +1,87 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'pinctrl이 보여 주는 핀의 기능과 풀과 전압, 들여다보기와 바꾸기, libgpiod의 도구와 나눠 쓰는 법';
+export const terms = ['pinctrl'];
+
+libgpiod의 도구는 커널이 아는 것을 보여 줍니다. 줄을 누가 쥐었고 어떤 설정으로 요청했는지입니다. 핀이 지금 GPIO인지 I2C의 선인지, 어떤 풀이 걸려 있는지, 전압이 높은지 낮은지는 칩의 레지스터에 있고, 라즈베리파이의 `pinctrl`은 그것을 직접 읽습니다. 두 쪽을 함께 봐야 고장이 어디에 있는지가 가려집니다.
+
+## 무엇이 다른가
+
+| 알고 싶은 것 | libgpiod의 도구 | `pinctrl` |
+| --- | --- | --- |
+| 줄을 누가 쥐고 있나 | `gpioinfo`의 `consumer` | 알지 못한다 |
+| 핀의 지금 전압 | `gpioget`. 남이 쥔 줄은 못 읽는다 | 누가 쥐었든 읽는다 |
+| 핀이 GPIO인가 버스의 선인가 | 나오지 않는다 | 기능을 그대로 보여 준다 |
+| 핀에 걸린 풀 | 요청에 실린 것만 | 칩에 걸려 있는 것 |
+| 어느 보드에서 되나 | 리눅스 보드면 된다 | 라즈베리파이의 칩만 |
+
+- **커널을 건너뛴다**: [「/dev/mem으로 레지스터를 만지던 라이브러리들」](#/read/libgpiod/hs-devmem)에서 본 그 방식입니다. 줄을 요청하지 않으므로 임자가 있는지 알지 못하고 묻지도 않습니다
+- **들여다볼 때는 그것이 장점이다**: 내 프로그램이 줄을 쥐고 도는 동안에도 그 핀의 전압을 옆에서 볼 수 있습니다
+- **권한**: 도움말은 루트이거나 `gpio` 그룹에 든 사용자로 돌리라고 적습니다. 되지 않으면 `sudo`를 붙입니다
+- **옛 이름**: 옛 글의 `raspi-gpio get 17`은 `pinctrl get 17`로 바꿔 칩니다. `pinctrl`이 그 도구의 자리를 이어받았습니다
+
+## 들여다보기
+
+```sh
+pinctrl                   # 모든 핀의 상태
+pinctrl get 17            # GPIO 17만
+pinctrl get 2,3,17-22     # 여럿은 쉼표와 범위로. 빈칸 없이 적는다
+pinctrl -p                # 번호를 헤더의 핀 번호로 바꿔서 보여 준다
+pinctrl lev 17            # 전압만 1이나 0으로
+pinctrl poll 17           # 전압이 바뀔 때마다 한 줄. Ctrl+C로 끝낸다
+pinctrl funcs 17          # 그 핀이 맡을 수 있는 기능의 목록
+```
+
+```text
+17: ip    pd | lo // GPIO17 = input
+```
+
+- **맨 앞은 번호와 기능**: `ip`는 입력, `op`는 출력입니다. `a0`부터 `a8`은 I2C나 SPI 같은 다른 기능으로 돌려져 있다는 뜻이고, `no`는 아무 기능도 아닙니다
+- **출력이면 내는 값이 따라온다**: `op dh`는 HIGH를, `op dl`은 LOW를 내고 있다는 뜻입니다. 입력이면 그 칸이 빕니다
+- **풀**: `pu`는 풀업, `pd`는 풀다운, `pn`은 풀 없음입니다
+- **막대 뒤가 지금의 전압**: `hi`나 `lo`입니다. 읽어 낼 수 없으면 `--`로 나옵니다
+- **`//` 뒤**: 줄의 이름과 기능의 이름입니다
+- **이름으로도 가리킨다**: 숫자 자리에 `GPIO17` 같은 줄 이름을 적어도 됩니다
+- **`poll`**: 처음 상태를 찍고, 전압이 바뀔 때마다 한 줄을 더 찍습니다. 한동안 조용했다가 바뀌면 그 사이의 시간을 마이크로초로 적어 줍니다. `gpiomon`과 달리 줄을 쥐지 않습니다
+
+## 바꾸기
+
+```sh
+pinctrl set 17 op dh      # 출력으로 돌리고 HIGH를 낸다
+pinctrl set 17 dl         # LOW로. 이미 출력일 때만 통한다
+pinctrl set 27 ip pu      # 입력으로 돌리고 풀업을 건다
+pinctrl -e set 17 ip pd   # 입력과 풀다운으로 되돌리고, 바뀐 상태를 찍는다
+```
+
+- **낱말은 볼 때와 같다**: 기능은 `ip`, `op`, `a0`부터 `a8`, `no`이고 풀은 `pu`, `pd`, `pn`, 내는 값은 `dh`, `dl`입니다. 한 줄에 여럿을 늘어놓습니다
+- **임자를 묻지 않는다**: 프로그램이나 드라이버가 쥐고 있는 핀도 그대로 바꿉니다. 커널은 바뀐 줄을 모르므로 `gpioinfo`가 보여 주는 것과 핀의 실제 상태가 어긋날 수 있습니다
+- **뒷정리가 없다**: 써 넣은 값은 누가 다시 바꿀 때까지 남습니다. 시험이 끝나면 마지막 명령처럼 손으로 되돌립니다
+- **그래서 고장 찾는 데만 쓴다**: 도구의 도움말도 라즈베리파이의 백서도 이것을 디버깅용이라고 적습니다. 스크립트로 핀을 몰 일은 `gpioset`에 맡깁니다([「gpioset과 gpioget」](#/read/libgpiod/tl-set-get))
+
+## 고장을 찾을 때
+
+| 증상 | 칠 명령 | 볼 것 |
+| --- | --- | --- |
+| LED가 켜지지 않는다 | `pinctrl get 17` | `op dh`인데도 꺼져 있으면 회로를, `ip`이면 프로그램을 본다 |
+| 단추가 읽히지 않는다 | `pinctrl poll 27` | 누를 때 `hi`와 `lo`가 바뀌면 회로는 맞다 |
+| I2C 장치가 안 보인다 | `pinctrl get 2,3` | 기능이 `ip`나 `op`이면 버스가 켜지지 않은 것이다 |
+| 요청이 busy로 실패한다 | `gpioinfo GPIO17` | `consumer`에 적힌 이름이 그 줄의 임자다 |
+
+- **회로와 프로그램을 가른다**: 핀의 전압이 뜻한 대로인데 부품이 움직이지 않으면 회로의 문제이고, 핀부터 뜻과 다르면 프로그램이나 설정의 문제입니다
+- **두 도구가 어긋날 때**: `gpioinfo`는 `output`이라는데 `pinctrl`은 `ip`라면 커널이 모르는 사이에 핀이 바뀐 것입니다. 핀의 실제 상태는 `pinctrl` 쪽입니다
+
+<Note>
+이 쪽의 명령은 하나도 돌려 보지 못했습니다. 명령의 꼴과 낱말의 뜻은 `pinctrl`의 소스에 있는 사용법을 읽어 적었고, 보기로 든 한 줄은 그 소스가 찍는 차례에 맞춰 지어낸 것입니다. 내 보드의 출력은 칸의 너비나 이름이 조금 다를 수 있습니다. 디버깅용이라는 말과 `raspi-gpio`를 이어받았다는 말은 라즈베리파이의 GPIO 백서와 utils 저장소의 설명에서 왔습니다.
+</Note>
+
+## 정리
+
+- `pinctrl`은 커널을 거치지 않고 칩을 읽어, 핀의 기능과 풀과 지금의 전압을 보여 준다
+- 줄을 쥐지 않으므로 남이 쥔 핀도 볼 수 있고, 같은 까닭으로 남이 쥔 핀도 바꿔 버린다. 고장을 찾는 데만 쓴다
+- 누가 쥐었는지는 `gpioinfo`에, 핀이 실제로 어떤지는 `pinctrl`에 묻는다
+
+## 참고 문서
+
+- [raspberrypi/utils: pinctrl.c(사용법: 명령의 꼴, set의 낱말, 한 줄을 찍는 차례)](https://github.com/raspberrypi/utils/blob/master/pinctrl/pinctrl.c)
+- [Raspberry Pi utils 저장소(pinctrl이 하는 일, raspi-gpio의 뒤를 잇는 도구)](https://github.com/raspberrypi/utils)
+- [Raspberry Pi 백서: A history of GPIO usage on Raspberry Pi devices(pinctrl은 디버깅용이라는 권고)](https://pip-assets.raspberrypi.com/categories/685-app-notes-guides-whitepapers/documents/RP-006553-WP-2-A%20history%20of%20GPIO%20usage%20on%20Raspberry%20Pi%20devices,%20and%20current%20best%20practices.pdf)
