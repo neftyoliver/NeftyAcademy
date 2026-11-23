@@ -179,3 +179,12 @@ mtable.tex-sm > mtr > mtd { padding: 0.05em 0.2em; }
 .nf-cut { stroke: currentColor; stroke-width: 1.2; stroke-dasharray: 4 3; }
 .nf-pair { stroke: var(--bf-muted); stroke-width: 1.4; }
 .nf-row + .nf-row { margin-top: 16px; }
+.nf-pairbox { fill: none; stroke: var(--bf-line); stroke-width: 1.4; }
+.nf-light { fill: var(--bf-paper); stroke: var(--bf-line); stroke-width: 1; }
+.nf-dark { fill: color-mix(in srgb, var(--bf-ink) 32%, var(--bf-paper)); stroke: var(--bf-line); stroke-width: 1; }
+.nf-gone { fill: none; stroke: #e8590c; stroke-width: 1.3; stroke-dasharray: 4 3; }
+.pl text.nf-prime { font-size: 13px; font-weight: 700; font-family: "STIX Two Text", "Cambria", "Latin Modern Roman", "Noto Serif", serif; }
+.pl text.nf-comp { font-size: 12px; fill: var(--bf-muted); font-family: "STIX Two Text", "Cambria", "Latin Modern Roman", "Noto Serif", serif; }
+.pl text.nf-comp-node { font-size: 14px; font-family: "STIX Two Text", "Cambria", "Latin Modern Roman", "Noto Serif", serif; }
+.pl text.nf-legend { font-size: 11.5px; fill: var(--bf-muted); }
+.nf-branch { stroke: var(--bf-muted); stroke-width: 1.2; }

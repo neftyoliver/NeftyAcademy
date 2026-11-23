@@ -8,6 +8,12 @@
  *   <Base10 n={347} />                                    백 모눈 3, 십 막대 4, 낱개 7
  *   <AreaModel rows={[10, 4]} cols={[20, 3]} />           직사각형을 갈라 곱을 나눠 셈하기
  *   <FigRow>…</FigRow>                                    그림 여럿을 옆으로 나란히(좁으면 아래로 내려간다)
+ *   <DotGrid rows={3} cols={5} extra={2} />                5개씩 3줄을 채우고 2개가 남는다(몫과 나머지)
+ *   <Pairs n={7} />                                       둘씩 짝지은 점. 홀수면 하나가 남는다
+ *   <Checker removed={[[0, 0], [7, 7]]} />                체스판. 뗀 칸은 점선으로
+ *   <Sieve />                                             에라토스테네스의 체(1부터 100까지)
+ *   <FactorTree n={360} />                                소인수분해 나무. splits 로 쪼개는 방법을 고른다
+ *   <EuclidRect a={21} b={15} />                          직사각형을 정사각형으로 채워 가는 호제법
  *
  * 색은 0~3(주황, 파랑, 초록, 보라). 이름표의 글은 Plane 의 mathLabel 규칙을 따른다(한 글자 로마자는 기울인다).
  */
@@ -28,6 +34,7 @@ export function FigRow({ children }: { children?: ReactNode }) {
  *  - cutCol, cutRow: 그 칸(줄)부터 색을 달리하고 사이에 점선을 긋는다
  *  - top, left: 위와 왼쪽에 적는 수. 갈랐으면 조각마다 하나씩 적을 수 있다
  *  - shape: 'dot'(기본) 또는 'cell'(네모 칸)
+ *  - extra: 줄을 다 채우고 남은 점의 수. 아래에 한 줄 띄워 다른 색으로 그린다(나머지)
  */
 export function DotGrid({
   rows,
@@ -39,9 +46,11 @@ export function DotGrid({
   shape = 'dot',
   cell = 20,
   color = 0,
+  extra = 0,
 }: {
   rows: number;
   cols: number;
+  extra?: number;
   cutCol?: number;
   cutRow?: number;
   top?: string | string[];
@@ -55,7 +64,7 @@ export function DotGrid({
   const padL = lefts.length ? 26 : 4;
   const padT = tops.length ? 22 : 4;
   const W = padL + cols * cell + 4;
-  const H = padT + rows * cell + 4;
+  const H = padT + (rows + (extra ? 1 : 0)) * cell + (extra ? 6 : 0) + 4;
   const part = (r: number, c: number) => (cutCol !== undefined && c >= cutCol ? 1 : 0) + (cutRow !== undefined && r >= cutRow ? 2 : 0);
   const marks: ReactNode[] = [];
   for (let r = 0; r < rows; r++) {
@@ -71,6 +80,10 @@ export function DotGrid({
         ),
       );
     }
+  }
+  // 묶고 남은 것: 한 줄 띄워 다른 색으로
+  for (let c = 0; c < extra; c++) {
+    marks.push(<circle key={`x${c}`} cx={padL + c * cell + cell / 2} cy={padT + rows * cell + 6 + cell / 2} r={cell * 0.3} fill={paint(color + 1)} />);
   }
   // 위쪽 이름표: 갈랐으면 조각의 가운데에, 아니면 전체의 가운데에
   const colSpans: [number, number][] = cutCol !== undefined && tops.length > 1 ? [[0, cutCol], [cutCol, cols]] : [[0, cols]];
@@ -278,6 +291,196 @@ export function AreaModel({
           {mathLabel(rowLabels?.[i] ?? String(r))}
         </text>
       ))}
+    </svg>
+  );
+}
+
+/** 점 n개를 둘씩 짝짓는다. 홀수면 짝 없는 점 하나가 남는다 */
+export function Pairs({ n, cell = 22 }: { n: number; cell?: number }) {
+  const cols = Math.ceil(n / 2);
+  const W = cols * cell + 8;
+  const H = 2 * cell + 8;
+  return (
+    <svg className="pl nf" viewBox={`0 0 ${W} ${H}`} width={W} role="img">
+      {Array.from({ length: cols }, (_, c) => {
+        const single = n % 2 === 1 && c === cols - 1;
+        const x = 4 + c * cell;
+        return (
+          <g key={c}>
+            {single ? null : <rect x={x + 2} y={6} width={cell - 4} height={2 * cell - 4} rx={(cell - 4) / 2} className="nf-pairbox" />}
+            <circle cx={x + cell / 2} cy={4 + cell / 2} r={cell * 0.27} fill={paint(single ? 0 : 1)} />
+            {single ? null : <circle cx={x + cell / 2} cy={4 + cell * 1.5} r={cell * 0.27} fill={paint(1)} />}
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+/** 체스판. removed 의 [줄, 칸](0부터, 왼쪽 위가 [0, 0])은 떼어 낸 칸으로 그린다 */
+export function Checker({ size = 8, removed = [], cell = 24 }: { size?: number; removed?: [number, number][]; cell?: number }) {
+  const W = size * cell + 8;
+  const gone = (r: number, c: number) => removed.some(([rr, cc]) => rr === r && cc === c);
+  return (
+    <svg className="pl nf" viewBox={`0 0 ${W} ${W}`} width={W} role="img">
+      {Array.from({ length: size * size }, (_, i) => {
+        const r = Math.floor(i / size);
+        const c = i % size;
+        const x = 4 + c * cell;
+        const y = 4 + r * cell;
+        if (gone(r, c)) return <rect key={i} x={x + 2} y={y + 2} width={cell - 4} height={cell - 4} className="nf-gone" />;
+        return <rect key={i} x={x} y={y} width={cell} height={cell} className={(r + c) % 2 ? 'nf-dark' : 'nf-light'} />;
+      })}
+    </svg>
+  );
+}
+
+function smallestPrime(v: number): number {
+  for (let p = 2; p * p <= v; p++) if (v % p === 0) return p;
+  return v;
+}
+
+/** 에라토스테네스의 체. 소수는 굵은 글자와 테두리로, 합성수는 가장 작은 소인수의 색으로 칠한다 */
+export function Sieve({ n = 100, cols = 10, cell = 28 }: { n?: number; cols?: number; cell?: number }) {
+  const rows = Math.ceil(n / cols);
+  const W = cols * cell + 8;
+  const legend = [2, 3, 5, 7];
+  const H = rows * cell + 8 + 26;
+  const colorOf = (p: number) => (p === 2 ? paint(1) : p === 3 ? paint(2) : p === 5 ? paint(0) : p === 7 ? paint(3) : 'currentColor');
+  return (
+    <svg className="pl nf" viewBox={`0 0 ${W} ${H}`} width={W} role="img">
+      {Array.from({ length: n }, (_, i) => {
+        const v = i + 1;
+        const x = 4 + (i % cols) * cell;
+        const y = 4 + Math.floor(i / cols) * cell;
+        const p = v === 1 ? 0 : smallestPrime(v);
+        const prime = v > 1 && p === v;
+        return (
+          <g key={v}>
+            <rect x={x + 1} y={y + 1} width={cell - 2} height={cell - 2} rx={4} fill={v === 1 || prime ? 'none' : colorOf(p)} fillOpacity={0.2} stroke={prime ? 'currentColor' : 'none'} strokeWidth={1.3} />
+            <text x={x + cell / 2} y={y + cell / 2 + 4.3} textAnchor="middle" className={prime ? 'nf-prime' : 'nf-comp'}>
+              {v}
+            </text>
+          </g>
+        );
+      })}
+      {legend.map((p, i) => (
+        <g key={`l${p}`}>
+          <rect x={6 + i * 68} y={rows * cell + 14} width={12} height={12} rx={3} fill={colorOf(p)} fillOpacity={0.3} />
+          <text x={22 + i * 68} y={rows * cell + 24.5} className="nf-legend">{`${p}의 배수`}</text>
+        </g>
+      ))}
+    </svg>
+  );
+}
+
+interface TreeNode {
+  v: number;
+  kids?: [TreeNode, TreeNode];
+  x: number;
+  depth: number;
+}
+
+/**
+ * 소인수분해 나무. 합성수는 두 수의 곱으로 쪼개고, 소수는 동그라미를 친다.
+ *  - splits: 쪼개는 방법을 고른다. { 360: [36, 10] } 이면 360을 36 × 10 으로 쪼갠다. 적지 않은 수는 가장 작은 소인수로 쪼갠다
+ */
+export function FactorTree({ n, splits = {}, gap = 34 }: { n: number; splits?: Record<number, [number, number]>; gap?: number }) {
+  let leaf = 0;
+  let deepest = 0;
+  const build = (v: number, depth: number): TreeNode => {
+    deepest = Math.max(deepest, depth);
+    const p = smallestPrime(v);
+    if (p === v) return { v, x: leaf++, depth };
+    const [a, b] = splits[v] ?? [p, v / p];
+    const kids: [TreeNode, TreeNode] = [build(a, depth + 1), build(b, depth + 1)];
+    return { v, kids, x: (kids[0].x + kids[1].x) / 2, depth };
+  };
+  const root = build(n, 0);
+  const level = 40;
+  const W = Math.max(leaf, 2) * gap + 16;
+  const H = (deepest + 1) * level + 8;
+  const px = (node: TreeNode) => 8 + gap / 2 + node.x * gap;
+  const py = (node: TreeNode) => 20 + node.depth * level;
+  const lines: ReactNode[] = [];
+  const nodes: ReactNode[] = [];
+  const walk = (node: TreeNode) => {
+    const key = `${node.v}-${node.x}-${node.depth}`;
+    if (node.kids) {
+      for (const kid of node.kids) {
+        lines.push(<line key={`l${key}-${kid.x}`} x1={px(node)} y1={py(node) + 8} x2={px(kid)} y2={py(kid) - 13} className="nf-branch" />);
+        walk(kid);
+      }
+      nodes.push(
+        <text key={`n${key}`} x={px(node)} y={py(node) + 4.5} textAnchor="middle" className="nf-comp-node">
+          {node.v}
+        </text>,
+      );
+    } else {
+      nodes.push(
+        <g key={`n${key}`}>
+          <circle cx={px(node)} cy={py(node)} r={12.5} fill={paint(0)} fillOpacity={0.16} stroke={paint(0)} strokeWidth={1.4} />
+          <text x={px(node)} y={py(node) + 4.5} textAnchor="middle" className="nf-prime">
+            {node.v}
+          </text>
+        </g>,
+      );
+    }
+  };
+  walk(root);
+  return (
+    <svg className="pl nf" viewBox={`0 0 ${W} ${H}`} width={W} role="img">
+      {lines}
+      {nodes}
+    </svg>
+  );
+}
+
+/** 가로 a, 세로 b 인 직사각형을 넣을 수 있는 가장 큰 정사각형으로 거듭 채운다(유클리드 호제법). 마지막 정사각형의 변이 최대공약수다 */
+export function EuclidRect({ a, b, width = 252 }: { a: number; b: number; width?: number }) {
+  const unit = Math.min(14, width / a);
+  const padL = 26;
+  const padT = 22;
+  const squares: { x: number; y: number; s: number; step: number }[] = [];
+  let x = 0;
+  let y = 0;
+  let w = a;
+  let h = b;
+  let step = 0;
+  while (w > 0 && h > 0) {
+    if (w >= h) {
+      const k = Math.floor(w / h);
+      for (let i = 0; i < k; i++) squares.push({ x: x + i * h, y, s: h, step });
+      x += k * h;
+      w -= k * h;
+    } else {
+      const k = Math.floor(h / w);
+      for (let i = 0; i < k; i++) squares.push({ x, y: y + i * w, s: w, step });
+      y += k * w;
+      h -= k * w;
+    }
+    step++;
+  }
+  const W = padL + a * unit + 6;
+  const H = padT + b * unit + 6;
+  return (
+    <svg className="pl nf" viewBox={`0 0 ${W} ${H}`} width={W} role="img">
+      {squares.map((q, i) => (
+        <g key={i}>
+          <rect x={padL + q.x * unit} y={padT + q.y * unit} width={q.s * unit} height={q.s * unit} fill={paint(q.step + 1)} fillOpacity={0.2} stroke="currentColor" strokeWidth={1.1} />
+          {q.s * unit >= 17 ? (
+            <text x={padL + (q.x + q.s / 2) * unit} y={padT + (q.y + q.s / 2) * unit + 4.5} textAnchor="middle" className="pl-label">
+              {mathLabel(String(q.s))}
+            </text>
+          ) : null}
+        </g>
+      ))}
+      <text x={padL + (a * unit) / 2} y={padT - 7} textAnchor="middle" className="pl-label">
+        {mathLabel(String(a))}
+      </text>
+      <text x={padL - 8} y={padT + (b * unit) / 2 + 4.5} textAnchor="end" className="pl-label">
+        {mathLabel(String(b))}
+      </text>
     </svg>
   );
 }
