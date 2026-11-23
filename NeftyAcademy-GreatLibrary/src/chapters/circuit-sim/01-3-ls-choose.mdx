@@ -29,8 +29,11 @@ export const terms = [];
 ## 깔고 확인하기
 
 ```sh
-brew install ngspice              # macOS에서 Homebrew로
-sudo apt install ngspice          # 라즈베리파이 OS, 데비안, 우분투
+# macOS에서 Homebrew로
+brew install ngspice
+# 라즈베리파이 OS, 데비안, 우분투
+sudo apt install ngspice
+# 깔린 판 확인
 ngspice --version
 ```
 
@@ -57,7 +60,7 @@ ngspice --version
 | LTspice에만 있다 | `.step`, 부품 줄 끝에 붙이는 `Rser=` 같은 값 |
 
 ```spice fails
-LTspice의 방언이 든 넷리스트를 ngspice에 그대로 넣으면
+LTspice의 방언을 ngspice에 넣으면
 V1 in 0 5
 R1 in out {R}
 C1 out 0 1u

@@ -40,7 +40,7 @@ Index  v-sweep       v(out)
 ## 전원과 속도를 아는 모델
 
 ```spice file=opamp.lib
-* LM358의 데이터시트 숫자에 맞춘 연산 증폭기
+* LM358 데이터시트에 맞춘 연산 증폭기
 .subckt OPAMP p n vcc vee out
 B1 0 x I=68u*tanh(14.7*(v(p)-v(n)))
 R1 x 0 100Meg

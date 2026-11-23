@@ -98,7 +98,9 @@ dc       0.02  2e-18
 
 ```sh
 ngspice -b units.cir 2>/dev/null |
-  grep -E 'device|resistance|capacitance|inductance| dc '
+  grep -e device -e resistance \
+    -e capacitance -e inductance \
+    -e ' dc '
 ```
 
 - **소수점은 마침표, 접미사는 숫자에 붙여 하나만**: `4.7k`, `100n`, `1.5Meg`처럼 적습니다

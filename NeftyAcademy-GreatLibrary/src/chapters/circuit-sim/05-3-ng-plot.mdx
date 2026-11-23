@@ -47,7 +47,9 @@ The file "rc.svg" has the Scalable Vector Graphics format.
 ## 파이썬으로 읽기
 
 ```python
-import os, subprocess, tempfile
+import subprocess
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 NETLIST = """RC 충전을 글로 내기
 V1 in 0 PULSE(0 3.3 0 1u 1u 1 2)
@@ -63,37 +65,55 @@ quit
 .end
 """
 
-with tempfile.TemporaryDirectory() as d:
-    with open(os.path.join(d, "rc.cir"), "w", encoding="utf-8") as f:
-        f.write(NETLIST)
-    subprocess.run(["ngspice", "-b", "rc.cir"], cwd=d, capture_output=True)
-    lines = open(os.path.join(d, "rc.txt")).read().split("\n")
+with TemporaryDirectory() as d:
+    Path(d, "rc.cir").write_text(
+        NETLIST, encoding="utf-8")
+    subprocess.run(
+        ["ngspice", "-b", "rc.cir"],
+        cwd=d, capture_output=True)
+    out = Path(d, "rc.txt")
+    text = out.read_text()
 
+lines = text.split("\n")
 names = lines[0].split()
-rows = [[float(x) for x in l.split()] for l in lines[1:] if l.strip()]
+rows = [[float(x) for x in l.split()]
+        for l in lines[1:]]
+rows = [r for r in rows if r]
 t = [r[0] for r in rows]
-vout = [r[names.index("v(out)")] for r in rows]
-print("열:", names, " 줄:", len(rows))
+k = names.index("v(out)")
+vout = [r[k] for r in rows]
+print("열:", names)
+print("줄:", len(rows))
 
-# 2.086V를 지나는 시각을 두 점 사이를 곧게 이어 구한다
+# 2.086V를 지나는 시각을
+# 두 점 사이를 곧게 이어 구한다
 for i in range(1, len(rows)):
-    if vout[i - 1] < 2.086 <= vout[i]:
-        f = (2.086 - vout[i - 1]) / (vout[i] - vout[i - 1])
-        print(f"63%에 닿는 시각 {(t[i - 1] + f * (t[i] - t[i - 1])) * 1e3:.4f}ms")
+    a, b = vout[i - 1], vout[i]
+    if a < 2.086 <= b:
+        f = (2.086 - a) / (b - a)
+        dt = t[i] - t[i - 1]
+        ts = t[i - 1] + f * dt
+        print("63%에 닿는 시각",
+              f"{ts * 1e3:.4f}ms")
         break
-steps = [b - a for a, b in zip(t, t[1:])]
-lo, hi = min(steps) * 1e6, max(steps) * 1e6
-print(f"걸음: 가장 작은 것 {lo:.3f}µs, 가장 큰 것 {hi:.3f}µs")
+steps = [b - a
+         for a, b in zip(t, t[1:])]
+lo = min(steps) * 1e6
+hi = max(steps) * 1e6
+print("가장 작은 걸음", f"{lo:.3f}µs")
+print("가장 큰 걸음", f"{hi:.3f}µs")
 ```
 
 ```text
-열: ['time', 'v(in)', 'v(out)']  줄: 519
+열: ['time', 'v(in)', 'v(out)']
+줄: 519
 63%에 닿는 시각 1.0005ms
-걸음: 가장 작은 것 0.001µs, 가장 큰 것 10.000µs
+가장 작은 걸음 0.001µs
+가장 큰 걸음 10.000µs
 ```
 
 - **첫 줄이 이름이고 나머지가 숫자다**: 줄을 빈칸으로 나누면 끝입니다. 따로 깔 것이 없습니다
-- **`.meas`와 같은 값이 나온다**: 두 점 사이를 곧게 이어 구한 시각이 1.0005ms입니다. 앞 장의 `t63`과 같습니다
+- **`.meas`와 같은 값이 나온다**: 두 점 사이를 곧게 이어 구한 시각이 1.0005ms입니다. 앞 쪽들의 `t63`과 같습니다
 - **걸음이 만 배나 차이 난다**: 계단이 오르는 순간에는 1ns로 딛고, 느리게 변하는 곳에서는 10µs로 딛습니다. 점의 수로 평균을 내거나 주파수를 셈하려면 먼저 같은 간격으로 다시 뽑아야 합니다
 - **그림은 그리는 프로그램에 넘긴다**: 읽은 `t`와 `vout`을 matplotlib의 `plot`에 넘기면 그림이 됩니다. 이 책의 파형 그림들도 이렇게 ngspice가 낸 값을 읽어 만들었습니다
 

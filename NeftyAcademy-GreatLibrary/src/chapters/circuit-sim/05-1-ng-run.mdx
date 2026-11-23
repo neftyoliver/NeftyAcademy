@@ -20,11 +20,17 @@ export const terms = [];
 ## 배치: 출력이 가는 곳
 
 ```sh
-ngspice -b divider.cir                    # 결과를 화면에
-ngspice -b divider.cir -o out.log         # 결과와 경고를 파일에
-ngspice -b rc.cir -r rc.raw               # 파형을 raw 파일에
-ngspice -b divider.cir > out.txt 2> warn.txt
-echo $?                                   # 끝난 값
+# 결과를 화면에
+ngspice -b divider.cir
+# 결과와 경고를 파일에
+ngspice -b divider.cir -o out.log
+# 파형을 raw 파일에
+ngspice -b rc.cir -r rc.raw
+# 결과와 경고를 따로 받기
+ngspice -b divider.cir > out.txt \
+  2> warn.txt
+# 끝난 값
+echo $?
 ```
 
 ```spice fails
@@ -79,7 +85,10 @@ ngspice-42 done
 ## 다른 프로그램에서 부르기
 
 ```python
-import os, re, subprocess, tempfile
+import re
+import subprocess
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 NETLIST = """RC 충전: C = {c}
 V1 in 0 PULSE(0 3.3 0 1u 1u 1 2)
@@ -89,21 +98,32 @@ C1 out 0 {c}
 .meas tran t63 WHEN v(out)=2.086
 .end
 """
+ERR = re.compile(r"^Error", re.M)
+CMD = ["ngspice", "-b", "rc.cir"]
 
 def t63(c):
-    with tempfile.TemporaryDirectory() as d:
-        path = os.path.join(d, "rc.cir")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(NETLIST.format(c=c))
-        r = subprocess.run(["ngspice", "-b", path],
-                           capture_output=True, text=True)
+    with TemporaryDirectory() as d:
+        Path(d, "rc.cir").write_text(
+            NETLIST.format(c=c),
+            encoding="utf-8")
+        r = subprocess.run(
+            CMD, cwd=d,
+            capture_output=True,
+            encoding="utf-8")
     out = r.stdout + r.stderr
-    if r.returncode != 0 or re.search(r"^Error", out, re.M):
-        raise RuntimeError(out[-300:])        # 끝난 값과 Error 줄을 함께 본다
-    return float(re.search(r"^t63\s*=\s*(\S+)", r.stdout, re.M).group(1))
+    # 끝난 값과 Error 줄을 함께 본다
+    failed = r.returncode != 0
+    if failed or ERR.search(out):
+        raise RuntimeError(out[-300:])
+    m = re.search(r"^t63\s*=\s*(\S+)",
+                  r.stdout, re.M)
+    return float(m.group(1))
 
 for c in ("470n", "1u", "2.2u"):
-    print(f"C = {c:>4}: 63%에 닿는 시각 {t63(c) * 1e3:.4f}ms")
+    ms = t63(c) * 1e3
+    print(f"C = {c:>4}:",
+          "63%에 닿는 시각",
+          f"{ms:.4f}ms")
 ```
 
 ```text

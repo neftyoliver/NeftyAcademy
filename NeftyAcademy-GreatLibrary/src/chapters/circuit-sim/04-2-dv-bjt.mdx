@@ -13,7 +13,7 @@ export const terms = [];
 ## 모델을 파일에 두기
 
 ```spice file=2N3904.lib
-* 2N3904. Fairchild의 데이터시트에 실린 모델
+* 2N3904. Fairchild 데이터시트의 모델
 .model Q2N3904 NPN(IS=6.734f XTI=3
 + EG=1.11 VAF=74.03 BF=416.4 NE=1.259
 + ISE=6.734f IKF=66.78m XTB=1.5
@@ -108,7 +108,7 @@ c_at_20 = 1.621474e-01
 </Figure>
 
 ```spice with=2N3904.lib
-릴레이 코일을 끄는 순간: 다이오드를 달았을 때
+릴레이 코일을 끄는 순간: 다이오드 있음
 V1 vcc 0 5
 V2 in 0 PULSE(0 3.3 1m 1u 1u 4m 10m)
 R1 in b 1k

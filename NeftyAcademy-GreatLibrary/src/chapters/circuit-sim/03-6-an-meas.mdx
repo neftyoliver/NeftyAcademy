@@ -10,15 +10,17 @@ export const terms = [];
 ## 한 파형에서 뽑은 숫자들
 
 ```spice
-1kHz 네모파가 RC를 지난 파형에서 숫자 뽑기
+1kHz 네모파가 RC를 지난 파형의 숫자
 V1 in 0 PULSE(0 3.3 0 1u 1u 499u 1m)
 R1 in out 1k
 C1 out 0 100n
 .tran 1u 5m
 .meas tran vmax MAX v(out)
-.meas tran vavg AVG v(out) FROM=1m TO=5m
+.meas tran vavg AVG v(out)
++ FROM=1m TO=5m
 .meas tran v_at FIND v(out) AT=1.1m
-.meas tran t_cross WHEN v(out)=1.65 RISE=2
+.meas tran t_cross
++ WHEN v(out)=1.65 RISE=2
 .meas tran trise
 + TRIG v(out) VAL=0.33 RISE=2
 + TARG v(out) VAL=2.97 RISE=2

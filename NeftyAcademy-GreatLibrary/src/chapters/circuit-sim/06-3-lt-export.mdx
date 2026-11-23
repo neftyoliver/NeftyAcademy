@@ -76,14 +76,18 @@ TSTOP is invalid, must be greater than zero.
 import re
 
 NUM = re.compile(
-    r'[-+]?\d+\.?\d*(?:e[-+]?\d+)?', re.I)
+    r'[-+]?\d+\.?\d*(?:e[-+]?\d+)?',
+    re.I)
 
 def read_export(text):
     rows = []
-    for line in text.splitlines()[1:]:  # 첫 줄은 이름
-        if line.startswith('Step'):     # .step의 단계
+    # 첫 줄은 이름이라 건너뛴다
+    for line in text.splitlines()[1:]:
+        # .step의 단계를 알리는 줄
+        if line.startswith('Step'):
             continue
-        nums = [float(n) for n in NUM.findall(line)]
+        nums = [float(n) for n
+                in NUM.findall(line)]
         if nums:
             rows.append(nums)
     return rows
@@ -95,14 +99,17 @@ tran = '\n'.join([
 ])
 ac = '\n'.join([
     'Freq.\tV(out)',
-    '1.0e+002\t(-1.4451e+000dB,-3.2142e+001°)',
-    '1.0e+003\t(-1.6072e+001dB,-8.0957e+001°)',
+    '1.0e+002\t(-1.4451e+000dB,'
+    + '-3.2142e+001°)',
+    '1.0e+003\t(-1.6072e+001dB,'
+    + '-8.0957e+001°)',
 ])
 
 for t, v in read_export(tran):
     print(f'{t * 1e3:.1f}ms  {v:.3f}V')
 for f, db, deg in read_export(ac):
-    print(f'{f:.0f}Hz  {db:.2f}dB  {deg:.1f}°')
+    s = f'{f:.0f}Hz  {db:.2f}dB'
+    print(f'{s}  {deg:.1f}°')
 ```
 
 ```text
