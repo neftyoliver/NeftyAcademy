@@ -1,0 +1,114 @@
+import { Figure, Note } from 'neftyacademy-paragons-bookshelf';
+import { Scope } from '../../components/Scope';
+import { rcIn, rcOut } from './data/sh-rc';
+
+export const summary = '화면의 손잡이와 넷리스트의 줄, .meas로 하는 측정, 프로브 그려 넣기, 시뮬레이터에 없는 것, 연습 순서';
+export const terms = [];
+
+오실로스코프가 없어도 파형을 읽는 연습은 할 수 있습니다. 이 책의 화면 그림은 한 장도 장비로 찍지 않았습니다. 모두 회로 시뮬레이터와 계산으로 만든 것입니다. 같은 방법으로 파형을 직접 만들고, 화면을 읽던 순서대로 읽어 봅니다. 넷리스트를 쓰는 법은 [「회로 시뮬레이션 프로그램」](#/read/ee-intro/simulation)에서 봤습니다.
+
+## 화면의 손잡이와 넷리스트의 줄
+
+| 오실로스코프에서 하는 일 | 시뮬레이터에서 하는 일 |
+| --- | --- |
+| 시간/칸을 고른다 | `.tran`의 끝 시각과 그림의 가로 범위를 정한다 |
+| V/칸과 위치를 고른다 | 그림의 세로 범위를 정한다 |
+| 커서를 놓고 자동 측정을 켠다 | `.meas` 줄을 적는다 |
+| 트리거를 건다 | 할 일이 없다. 늘 0초에서 같은 일이 시작된다 |
+| 프로브를 댄다 | 보고 싶은 마디의 이름을 적는다 |
+
+- **가로 열 칸이 `.tran`의 길이다**: 1ms/칸으로 보고 싶으면 10ms 동안 돌립니다. 주기의 두세 배가 담기게 고르는 것은 장비에서와 같습니다([「칸, V/칸, 시간/칸」](#/read/scope/sc-grid))
+- **화면이 흐르지 않는다**: 시뮬레이션은 돌릴 때마다 똑같은 결과를 냅니다. 트리거로 화면을 세울 일이 없고, 그래서 트리거는 여기서 연습할 수 없습니다
+- **마디의 이름이 프로브다**: `v(out)`이라고 적으면 그 마디의 전압이 나옵니다. 접지 집게도, 프로브의 커패시턴스도 없습니다
+
+## 측정을 .meas로
+
+```spice
+RC 충전과 방전: 10kΩ과 100nF
+V1 in 0 PULSE(0 3.3 1m 1u 1u 5m 20m)
+R1 in out 10k
+C1 out 0 100n
+.tran 5u 10m
+.meas tran vmax MAX v(out)
+.meas tran vavg AVG v(out) from=0 to=10m
+.meas tran tau TRIG v(in) VAL=1.65 RISE=1 TARG v(out) VAL=2.086 RISE=1
+.meas tran trise TRIG v(out) VAL=0.33 RISE=1 TARG v(out) VAL=2.97 RISE=1
+.end
+```
+
+```text
+$ ngspice -b rc.cir
+vmax                =  3.277776e+00 at=  6.001000e-03
+vavg                =  1.644316e+00 from=  0.000000e+00 to=  1.000000e-02
+tau                 =  1.000001e-03 targ=  2.000501e-03 trig=  1.000500e-03
+trise               =  2.197218e-03 targ=  3.303080e-03 trig=  1.105862e-03
+```
+
+<Figure caption="위 넷리스트의 결과를 이 책의 화면 틀에 그린 것. 커서는 trise 줄이 알려 준 두 시각과 두 전압에 놓았다">
+  <Scope tdiv={1e-3} dt={2.5e-5} traces={[{ name: 'CH1 v(in)', data: rcIn, vdiv: 1, pos: -2 }, { name: 'CH2 v(out)', data: rcOut, vdiv: 1, pos: -2 }]} cursorsT={[1.1059e-3, 3.3031e-3]} cursorsV={[0.33, 2.97]} />
+</Figure>
+
+- **TRIG와 TARG가 세로 커서 둘이다**: 어느 신호가 어느 전압을 몇 번째로 오르며 지나는 때인지를 둘 적으면, 그 사이의 시간이 나옵니다. 결과 줄의 `trig`와 `targ`가 커서가 놓인 시각입니다
+- **상승 시간**: 0.33V에서 2.97V까지, 곧 10%에서 90%까지가 2.197ms입니다. 시정수 1ms의 2.2배입니다([「RC 충전 곡선과 시정수」](#/read/scope/sh-rc))
+- **시정수**: 입력이 오른 때부터 출력이 63%인 2.086V를 지날 때까지가 1.000ms입니다
+- **MAX와 AVG는 자동 측정이다**: 가장 높은 값은 3.278V이고 6.001ms에 나옵니다. 5ms는 시정수의 다섯 배라서 3.3V에 조금 못 미칩니다. 평균은 1.644V입니다([「Vpp, 평균, RMS, 주기, 듀티」](#/read/scope/sc-measure))
+- **먼저 어림하고 돌린다**: 돌리기 전에 "시정수가 1ms니까 2.2ms쯤"이라고 적어 두고 결과와 견줍니다. 화면을 읽는 힘은 이 견주기에서 늡니다
+
+## 프로브를 그려 넣는다
+
+```spice
+100kΩ 뒤의 마디에 프로브를 그려 넣는다
+V1 in 0 PULSE(0 3.3 10u 10n 10n 50u 100u)
+R1 in out 100k
+C1 out 0 5p
+Rp out 0 10Meg
+Cp out 0 12p
+.tran 20n 100u
+.meas tran vhigh FIND v(out) AT=59u
+.meas tran tlate TRIG v(in) VAL=1.65 RISE=1 TARG v(out) VAL=2.0 RISE=1
+.end
+```
+
+```text
+프로브 없이(Rp와 Cp를 뺌)   vhigh = 3.300000e+00   tlate = 4.657180e-07
+10배 프로브(10Meg, 12p)     vhigh = 3.267327e+00   tlate = 1.594012e-06
+1배 프로브(1Meg, 100p)      vhigh = 2.982300e+00   tlate = 1.048673e-05
+```
+
+- **두 줄이 프로브다**: `Rp`와 `Cp`가 10배 프로브의 저항과 커패시턴스입니다. 값을 1MΩ과 100pF로 바꾸면 1배 프로브가 됩니다
+- **HIGH가 낮아진다**: 프로브가 없으면 3.300V, 10배면 3.267V입니다. 1배면 2.98V에서 반 주기가 끝납니다
+- **문턱을 늦게 넘는다**: 입력이 오른 뒤 출력이 2.0V를 넘기까지 0.47µs이던 것이 10배에서 1.59µs, 1배에서 10.5µs가 됩니다
+- **잴 수 없는 것을 본다**: 진짜 회로에서는 프로브를 대지 않은 마디를 볼 방법이 없습니다. 시뮬레이터에서는 프로브가 무엇을 바꾸는지를 나란히 놓고 봅니다([「프로브가 회로를 바꾼다」](#/read/scope/pb-loading))
+
+## 시뮬레이터에 없는 것
+
+- **그려 넣지 않은 것은 없다**: 접지선의 인덕턴스, 선의 커패시턴스, 전원의 리플은 넷리스트에 적어야 나타납니다. 이 책의 울림 그림들은 인덕터와 커패시터를 일부러 넣어서 만들었습니다([「링잉과 오버슈트」](#/read/scope/sh-ringing))
+- **잡음이 없다**: 진짜 화면의 선은 늘 조금 굵습니다. 시뮬레이터의 선은 한 줄입니다([「세로 분해능과 잡음」](#/read/scope/lm-resolution))
+- **대역폭의 한계가 없다**: 1µs짜리 변도 1ns짜리 변도 그대로 그려집니다. 장비가 변을 눕히는 것은 겪을 수 없습니다([「대역폭과 상승 시간」](#/read/scope/lm-bandwidth))
+- **부품이 적힌 값 그대로다**: 100nF는 정확히 100nF입니다. 진짜 부품의 값은 적힌 값에서 조금씩 벗어나 있습니다([「부품 오차와 몬테카를로」](#/read/circuit-sim/ts-tolerance))
+- **그리는 간격은 있다**: 결과를 성긴 간격으로 뽑아 그리면 뾰족한 꼭대기가 낮게 그려집니다. 이 책의 그림을 만들 때에도 2.73V의 꼭대기가 2.65V로 그려진 적이 있습니다([「샘플링 속도와 에일리어싱」](#/read/scope/lm-sampling))
+
+## 연습하는 순서
+
+- **이 책의 그림 하나를 고른다**: 그림 아래의 설명과 쪽 끝의 알림에 부품의 값이 적혀 있습니다. 그 값으로 넷리스트를 씁니다
+- **기대하는 것을 먼저 적는다**: 높이, 주기, 변의 시간을 어림해 적습니다. 그다음에 돌립니다
+- **값 하나를 바꿔 본다**: 저항을 열 배로, 커패시터를 반으로 바꾸고 무엇이 얼마나 달라질지 먼저 맞혀 봅니다
+- **흐르는 화면은 브라우저에서**: Falstad의 회로 시뮬레이터는 브라우저에서 돌고, 부품을 오른쪽 단추로 눌러 스코프로 보는 항목("View in Scope", 판에 따라 "View in New Scope")을 고르면 그 부품의 전압이 흐르는 화면으로 나옵니다([「ngspice, LTspice, KiCad, Qucs-S, Falstad, Tinkercad」](#/read/circuit-sim/ls-programs))
+- **더 배우려면**: 해석의 종류와 `.meas`의 나머지 쓰임은 「회로 시뮬레이터」에서 다룹니다([「.meas로 숫자 뽑기」](#/read/circuit-sim/an-meas))
+
+<Note>
+두 넷리스트는 ngspice 42로 돌렸고, 결과에서 측정 줄만 옮겼습니다. 프로브의 표는 `Rp`와 `Cp`를 바꿔 가며 세 번 돌린 결과에서 두 값씩 추려 나란히 놓은 것입니다. 프로브의 저항과 커패시턴스, 마디에 이미 있던 5pF는 어림으로 고른 값입니다. Falstad의 메뉴 이름은 그 프로그램의 안내 글에서 옮겼고 제가 눌러 본 것은 아닙니다.
+</Note>
+
+## 정리
+
+- 시간/칸은 `.tran`의 길이로, 커서와 자동 측정은 `.meas`로 옮겨진다. 트리거는 시뮬레이터에서 연습할 수 없다
+- 프로브의 저항과 커패시터를 넷리스트에 적으면, 재는 일이 회로를 얼마나 바꾸는지를 나란히 볼 수 있다
+- 시뮬레이터에는 적어 넣은 것만 있다. 잡음, 접지선의 울림, 장비의 한계는 진짜 화면에서만 만난다
+
+## 참고 문서
+
+- [ngspice: Ngspice User's Manual Version 43(.meas의 문법: TRIG와 TARG, FIND와 AT, AVG와 MAX)](https://ftp.fau.de/gentoo/distfiles/d4/ngspice-43-manual.pdf)
+- [EasyEDA 문서: Making measurements of simulation results(.MEAS의 두 가지 꼴과 보기들)](https://docs.easyeda.com/en/Simulation/Chapter17-Making-measurements-of-simulation-results/)
+- [CircuitJS1: Interactive Circuit Simulator(부품을 오른쪽 단추로 눌러 View in Scope를 고르는 것)](https://lushprojects.com/circuitjs/)
+- [UCD Physics Labs: Falstad circuit sim(브라우저에서 돌리기, View in new scope로 전압을 시간에 따라 보기)](https://physicslabs.ucd.ie/documentation/Falstad_circuit_sim/)
