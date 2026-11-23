@@ -67,15 +67,58 @@ system           수의 체계 한눈에
 
 export const mPolynomials = book('m-polynomials', '다항식과 인수분해', '문자로 쓰는 식의 셈: 곱셈 공식, 나눗셈, 인수분해', 'math', `
 terms            문자와 식
+  term-letter      문자를 쓰는 까닭
+  term-poly        항, 계수, 차수
+  term-value       식의 값
+  term-place       자릿값과 다항식
 add-mul          다항식의 덧셈과 곱셈
+  am-add           동류항 모으기: 덧셈과 뺄셈
+  am-mul           곱셈: 분배법칙과 넓이
+  am-degree        차수의 셈
+  am-ring          다항식은 정수와 닮았다
 formulas         곱셈 공식
+  fm-square        합의 제곱과 차의 제곱
+  fm-diff          합과 차의 곱
+  fm-linear        일차식 둘의 곱
+  fm-cube          세제곱 공식
+  fm-variant       공식의 변형과 대칭인 식
 factoring        인수분해
+  fc-common        공통인수로 묶기
+  fc-formula       공식을 거꾸로 쓰기
+  fc-quadratic     이차식의 인수분해
+  fc-group         묶기와 치환
+  fc-cubic         세제곱의 합과 차
+  fc-irreducible   더 쪼갤 수 없는 식
 division         다항식의 나눗셈
+  dv-long          세로로 나누기
+  dv-theorem       몫과 나머지는 하나뿐
+  dv-synthetic     조립제법
+  dv-gcd           다항식의 최대공약수
 remainder        나머지정리와 인수정리
+  rm-remainder     나머지정리
+  rm-factor        인수정리
+  rm-rational      유리수 근 찾기
+  rm-count         근의 개수는 차수 이하
 identity         항등식과 미정계수법
+  id-identity      항등식과 방정식
+  id-coeff         미정계수법
+  id-interp        점을 지나는 다항식
 binomial         이항정리와 파스칼의 삼각형
+  bn-pascal        파스칼의 삼각형
+  bn-choose        고르는 방법의 수
+  bn-theorem       이항정리
+  bn-apps          이항정리의 쓰임
 rational-expr    유리식과 부분분수
+  re-define        유리식
+  re-arith         유리식의 셈
+  re-proper        몫과 나머지로 나누어 적기
+  re-partial       부분분수
 roots            다항식의 근과 계수
+  rt-quadratic     이차식의 근과 계수
+  rt-vieta         삼차 이상의 근과 계수
+  rt-symmetric     근의 대칭식
+  rt-graph         근과 그래프
+  rt-complex       실수 근의 수와 복소수 근
 `);
 
 export const mEquations = book('m-equations', '방정식과 부등식', '식을 푼다는 것: 일차에서 고차까지, 연립과 부등식', 'math', `
