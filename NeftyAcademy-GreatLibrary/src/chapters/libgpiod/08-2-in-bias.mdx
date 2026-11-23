@@ -1,0 +1,118 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '바이어스 값 넷, 스위치의 방향과 풀의 방향, 칩 안의 풀이 모자랄 때, 바이어스를 믿을 수 있는 만큼';
+export const terms = ['gpiod_line_settings_set_bias', 'GPIOD_LINE_BIAS_PULL_UP'];
+
+스위치는 닫혔을 때만 선을 어딘가에 이어 줍니다. 열려 있는 동안 그 선의 전압을 정해 주는 것이 풀 저항입니다. 왜 필요하고 얼마짜리가 좋은지는 [「풀업과 풀다운」](#/read/libgpiod/gp-pull)에서 봤습니다. 라즈베리파이의 핀에는 그 저항이 칩 안에 들어 있어서, 요청할 때 설정 하나를 적으면 켜집니다.
+
+## 바이어스 값 넷
+
+| 값 | 뜻 |
+| --- | --- |
+| `GPIOD_LINE_BIAS_AS_IS` | 지금 걸려 있는 대로 둔다. 기본값 |
+| `GPIOD_LINE_BIAS_PULL_UP` | 칩 안의 풀업을 켠다 |
+| `GPIOD_LINE_BIAS_PULL_DOWN` | 칩 안의 풀다운을 켠다 |
+| `GPIOD_LINE_BIAS_DISABLED` | 칩 안의 풀을 끈다 |
+
+- **`gpiod_line_settings_set_bias`**: settings에 위의 값 가운데 하나를 적습니다
+- **방향과 함께 적는다**: 방향을 그대로 두면서 바이어스만 적은 요청은 거절됩니다([「gpiod_chip_request_lines」](#/read/libgpiod/rq-request))
+- **그대로 두는 것에 기대지 않는다**: 지금 걸려 있는 풀은 보드가 켜질 때의 기본일 수도, 앞서 돈 프로그램이 바꿔 놓은 것일 수도 있습니다. 풀이 있어야 하는 줄에는 요청할 때마다 적습니다
+
+## 스위치의 방향과 풀의 방향
+
+아래 예제는 GPIO 27과 GND 사이에 단 스위치를 두 가지 바이어스로 읽습니다. 스위치는 프로그램이 도는 동안 닫혔다 열렸다 합니다.
+
+```c gpiosim=switch
+// GND로 가는 스위치를 풀업으로 읽을 때와 풀다운으로 읽을 때
+#include <gpiod.h>
+#include <stdio.h>
+#include <threads.h>
+
+enum { SWITCH = 27 };                        // GPIO 27, 헤더의 핀 13
+
+// 줄을 그 바이어스의 입력으로 쥐고 한 번 읽은 뒤 놓는다. 실패하면 -1
+static int read_with(struct gpiod_chip* chip, enum gpiod_line_bias bias) {
+    struct gpiod_line_settings* settings = gpiod_line_settings_new();
+    struct gpiod_line_config* config = gpiod_line_config_new();
+    struct gpiod_line_request* request = nullptr;
+    unsigned int offset = SWITCH;
+    if (settings && config) {
+        gpiod_line_settings_set_direction(settings, GPIOD_LINE_DIRECTION_INPUT);
+        gpiod_line_settings_set_bias(settings, bias);
+        gpiod_line_config_add_line_settings(config, &offset, 1, settings);
+        request = gpiod_chip_request_lines(chip, nullptr, config);
+    }
+    gpiod_line_config_free(config);
+    gpiod_line_settings_free(settings);
+    if (!request) return -1;
+    int value = gpiod_line_request_get_value(request, SWITCH);
+    gpiod_line_request_release(request);
+    return value;
+}
+
+static void wait_ms(long ms) {
+    thrd_sleep(&(struct timespec){.tv_sec = ms / 1000,
+                                  .tv_nsec = ms % 1000 * 1'000'000},
+               nullptr);
+}
+
+int main(void) {
+    struct gpiod_chip* chip = gpiod_chip_open("/dev/gpiochip0");
+    if (!chip) {
+        perror("/dev/gpiochip0");
+        return 1;
+    }
+    int up_open = read_with(chip, GPIOD_LINE_BIAS_PULL_UP);
+    wait_ms(1500);                           // 그 사이 1초에 스위치가 닫힌다
+    int up_closed = read_with(chip, GPIOD_LINE_BIAS_PULL_UP);
+    wait_ms(1000);                           // 2초에 열린다
+    int down_open = read_with(chip, GPIOD_LINE_BIAS_PULL_DOWN);
+    wait_ms(1000);                           // 3초에 다시 닫힌다
+    int down_closed = read_with(chip, GPIOD_LINE_BIAS_PULL_DOWN);
+
+    printf("bias       open  closed\n");
+    printf("pull-up    %d     %d\n", up_open, up_closed);
+    printf("pull-down  %d     %d\n", down_open, down_closed);
+    gpiod_chip_close(chip);
+}
+```
+
+```text
+bias       open  closed
+pull-up    1     0
+pull-down  0     0
+```
+
+- **풀업으로는 가려진다**: 열렸을 때는 풀업이 선을 올려 1, 닫혔을 때는 스위치가 선을 GND에 이어 0입니다
+- **풀다운으로는 가려지지 않는다**: 열려도 0, 닫혀도 0입니다. 풀과 스위치가 같은 쪽으로 당기므로 스위치가 있으나 마나입니다
+- **풀은 스위치의 반대쪽으로**: GND로 가는 스위치에는 풀업을, 3.3V로 가는 스위치에는 풀다운을 겁니다
+- **흔히 쓰는 쪽은 GND와 풀업이다**: 스위치까지 뻗는 선에 전원이 아니라 GND가 실리므로, 선이 어딘가에 닿아도 덜 위험합니다. 눌림이 0으로 읽히는 것은 액티브 로로 바로잡습니다([「단추 읽기」](#/read/libgpiod/in-button))
+
+## 칩 안의 풀이 모자랄 때
+
+- **약한 저항이다**: 4에서 33kΩ에서 73kΩ 사이입니다. 책상 위의 짧은 선에는 충분하지만, 선이 길거나 모터 옆처럼 잡음이 많은 곳에서는 바깥에 4.7kΩ이나 10kΩ을 답니다
+- **바깥에 달았으면 안의 것은 끈다**: `GPIOD_LINE_BIAS_DISABLED`를 적습니다. 바깥의 풀업과 안의 풀다운이 함께 있으면 둘이 전압을 나눠 가집니다
+- **GPIO 2와 3은 다르다**: 보드에 1.8kΩ 풀업이 붙어 있어서 풀다운을 켜도 선은 올라가 있습니다
+- **풀을 바꾼 직후에는**: 선에 큰 커패시터가 달려 있으면 전압이 자리를 잡는 데 시간이 걸립니다. 그런 선은 요청하고 조금 뒤에 읽습니다
+
+## 바이어스를 믿을 수 있는 만큼
+
+- **커널은 되는 만큼만 한다**: 커널 문서는 바이어스를 힘닿는 데까지 적용한다고 적습니다. 풀을 걸 수 없는 칩에서는 요청이 받아들여지고도 풀이 걸리지 않을 수 있습니다. 라즈베리파이의 헤더 핀은 풀을 걸 수 있습니다
+- **줄 정보는 요청을 되풀이할 뿐이다**: `gpioinfo`의 `bias=`는 요청에 적은 값입니다. 핀에 실제로 걸린 풀은 `pinctrl get 27`의 `pu`나 `pd`로 봅니다([「pinctrl」](#/read/libgpiod/tl-pinctrl))
+- **놓은 뒤는 정해져 있지 않다**: 줄을 놓은 다음에도 풀이 남는지는 기대지 않습니다. 다음 프로그램이 제 요청에 다시 적습니다
+
+<Note>
+예제는 이 책의 흉내 칩에서 돌린 것이고, 스위치가 닫히고 열리는 것은 대본으로 넣었습니다. 흉내 칩은 요청에 적은 풀을 그대로 겁니다. 풀 저항의 범위와 GPIO 2와 3의 풀업은 라즈베리파이 문서의 값이고, 바이어스가 힘닿는 데까지라는 말은 리눅스 커널 문서의 줄 요청 대목에 있습니다. 진짜 libgpiod 2.2.4의 머리 파일로 x86-64와 aarch64에서 컴파일되는지 따로 확인했고, 보드와 스위치로 돌려 보지는 못했습니다.
+</Note>
+
+## 정리
+
+- 바이어스는 `gpiod_line_settings_set_bias`로 적는다. 풀업, 풀다운, 끔, 그대로 둠 가운데 하나다
+- 풀은 스위치가 선을 잇는 쪽의 반대로 건다. GND로 가는 스위치에는 풀업이다
+- 칩 안의 풀은 약하다. 긴 선과 잡음이 많은 곳에는 바깥 저항을 달고 안의 것은 끈다
+
+## 참고 문서
+
+- [리눅스 커널 문서: GPIO_V2_GET_LINE_IOCTL(바이어스는 방향과 함께, 힘닿는 데까지 적용된다는 것)](https://docs.kernel.org/userspace-api/gpio/gpio-v2-get-line-ioctl.html)
+- [Raspberry Pi 문서: Raspberry Pi computer hardware(풀 저항의 범위, GPIO 2와 3의 풀업)](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html)
+- [libgpiod 문서: Line definitions(바이어스의 값들)](https://libgpiod.readthedocs.io/en/v2.3/core_line_defs.html)
