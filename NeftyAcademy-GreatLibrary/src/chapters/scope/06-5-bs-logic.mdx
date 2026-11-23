@@ -2,7 +2,7 @@ import { Figure, Note } from 'neftyacademy-paragons-bookshelf';
 import { Scope } from '../../components/Scope';
 import { laAnalog, laClock, laFast, laHigh, laLow, laSlow } from './data/bs-logic';
 
-export const summary = '오실로스코프와 다른 점, 문턱이 지우는 것, 표본 속도 고르기, 싼 USB 분석기와 sigrok, 둘을 쓰는 순서';
+export const summary = '오실로스코프와 다른 점, 문턱이 지우는 것, 샘플링 속도 고르기, 싼 USB 분석기와 sigrok, 둘을 쓰는 순서';
 export const terms = [];
 
 앞의 세 쪽에서 화면의 높낮이를 눈으로 따라가며 바이트를 읽었습니다. 두세 바이트는 그렇게 읽을 수 있지만, 센서를 초기화하는 수십 바이트를 그렇게 읽을 수는 없습니다. 그 일을 맡는 장비가 로직 분석기입니다. 다만 이 장비는 오실로스코프가 보여 주던 것 가운데 여러 가지를 보여 주지 않습니다.
@@ -13,7 +13,7 @@ export const terms = [];
 | --- | --- | --- |
 | 적는 것 | 전압의 모양 | 문턱으로 가른 0과 1 |
 | 채널 | 둘에서 넷 | 여덟이나 열여섯, 그 이상 |
-| 한 번에 담는 길이 | 화면 몇 장 | 표본 하나가 한 비트라 훨씬 길다 |
+| 한 번에 담는 길이 | 화면 몇 장 | 점 하나가 한 비트라 훨씬 길다 |
 | 잘하는 일 | 높이, 변, 울림, 잡음 보기 | 긴 대화를 값으로 풀어 읽기 |
 
 - **입력마다 비교기가 하나 있다**: 로직 분석기는 선의 전압을 문턱과 견주어 위면 1, 아래면 0으로 적습니다. 전압이 얼마였는지는 버립니다
@@ -32,15 +32,15 @@ export const terms = [];
 - **울림과 잡음은 문턱을 넘을 때에만 보인다**: 넘지 않으면 없는 것으로, 넘으면 까닭 모를 좁은 펄스로 적힙니다
 - **깨끗한 화면이 깨끗한 선은 아니다**: 분석기의 화면은 늘 반듯합니다. 선이 반듯한지는 오실로스코프로 봐야 압니다
 
-## 표본 속도
+## 샘플링 속도
 
-<Figure caption="HIGH가 0.3µs인 1MHz 클럭 여덟 개. D0은 4MS/s로, D1은 2.5MS/s로 표본을 뽑은 분석기가 적은 것이다">
+<Figure caption="HIGH가 0.3µs인 1MHz 클럭 여덟 개. D0은 4MS/s로, D1은 2.5MS/s로 점을 찍은 분석기가 적은 것이다">
   <Scope tdiv={1e-6} dt={1e-8} traces={[{ name: 'CH1 클럭', data: laClock, vdiv: 2, pos: 1.8 }, { name: 'D0 4MS/s', data: laFast, vdiv: 1, pos: -0.8, logic: true }, { name: 'D1 2.5MS/s', data: laSlow, vdiv: 1, pos: -3, logic: true }]} />
 </Figure>
 
 ```python
 def pulses_seen(rate, phase, f=1e6, high=0.3, count=8):
-    n, prev, t = 0, 0, phase             # 표본을 하나씩 뽑으며 오르는 변을 센다
+    n, prev, t = 0, 0, phase             # 점을 하나씩 찍으며 오르는 변을 센다
     while t < (count + 1) / f:
         k = t * f                        # 몇째 주기의 어디쯤인가
         v = 1 if k < count and k % 1 < high else 0
@@ -61,11 +61,11 @@ for rate in (24e6, 4e6, 2.5e6, 2e6):
  2.0MS/s: 펄스 8개가 0~8개로 보인다. 변의 자리는 500ns까지 어긋난다
 ```
 
-- **표본과 표본 사이는 모른다**: 2.5MS/s의 분석기는 0.4µs마다 한 번 봅니다. 0.3µs짜리 HIGH가 그 사이에 통째로 들어가면 없던 일이 됩니다. 그림의 D1에는 여덟 개 가운데 넷만 남았습니다
+- **점과 점 사이는 모른다**: 2.5MS/s의 분석기는 0.4µs마다 한 번 봅니다. 0.3µs짜리 HIGH가 그 사이에 통째로 들어가면 없던 일이 됩니다. 그림의 D1에는 여덟 개 가운데 넷만 남았습니다([「샘플링 속도와 에일리어싱」](#/read/scope/lm-sampling))
 - **네 배를 넘게 잡는다**: 디지털 신호는 그 신호보다 네 배 넘게 빠른 속도로 뽑으라는 지침이 있습니다. 100kHz의 I2C에는 1MS/s 넘게, 1MHz의 SPI에는 4MS/s 넘게입니다
 - **느리게 오르는 선에는 더 빠르게**: 풀업이 올리는 선은 문턱 위에 머무는 시간이 반 주기보다 짧습니다. 예제가 HIGH를 주기의 30%로 둔 까닭입니다
-- **변의 자리는 표본 간격만큼 흐리다**: 두 선의 변 가운데 어느 쪽이 먼저였는지를 가리려면, 표본 간격이 그 차이보다 작아야 합니다
-- **넉넉하면 가장 빠르게 둔다**: 속도를 높이면 같은 시간에 표본이 더 쌓일 뿐입니다. 담을 수 있는 길이가 모자랄 때에만 낮춥니다
+- **변의 자리는 찍는 간격만큼 흐리다**: 두 선의 변 가운데 어느 쪽이 먼저였는지를 가리려면, 찍는 간격이 그 차이보다 작아야 합니다
+- **넉넉하면 가장 빠르게 둔다**: 속도를 높이면 같은 시간에 점이 더 쌓일 뿐입니다. 담을 수 있는 길이가 모자랄 때에만 낮춥니다
 
 ## 싼 USB 분석기와 sigrok
 
@@ -73,7 +73,7 @@ for rate in (24e6, 4e6, 2.5e6, 2e6):
 - **문턱이 고정이다**: 0.8V 아래를 LOW로, 2.0V 위를 HIGH로 적습니다. 3.3V와 5V의 논리에는 맞지만, 1.8V로 도는 선은 HIGH가 문턱에 닿지 않습니다
 - **5.25V를 넘기면 안 된다**: 입력이 견디는 전압이 그만큼입니다. RS-232 선이나 12V의 신호를 그대로 물리면 분석기가 상할 수 있습니다([「UART 프레임 읽기」](#/read/scope/bs-uart))
 - **GND부터 잇는다**: 분석기의 GND 선을 보드의 GND에 잇습니다. 분석기도 USB를 거쳐 PC의 접지에 이어지므로, 접지의 주의는 오실로스코프와 같습니다([「접지 집게가 닿는 곳」](#/read/scope/pb-ground))
-- **sigrok과 PulseView**: sigrok은 이런 장비를 다루는 공개 소프트웨어이고 PulseView가 그 화면입니다. 장치를 고르고, 표본 속도와 개수를 정해 받은 뒤, UART나 I2C나 SPI의 해독기를 채널에 붙이면 파형 아래에 값이 적힙니다
+- **sigrok과 PulseView**: sigrok은 이런 장비를 다루는 공개 소프트웨어이고 PulseView가 그 화면입니다. 장치를 고르고, 샘플링 속도와 점의 수를 정해 받은 뒤, UART나 I2C나 SPI의 해독기를 채널에 붙이면 파형 아래에 값이 적힙니다
 - **둘을 합친 장비도 있다**: 오실로스코프에 디지털 채널을 더한 것을 MSO라고 부릅니다. 한 선의 모양과 여러 선의 값을 같은 시간축에서 봅니다
 
 ## 둘을 쓰는 순서
@@ -84,14 +84,14 @@ for rate in (24e6, 4e6, 2.5e6, 2e6):
 - **둘 다 없을 때**: 프로그램이 받은 값을 그대로 찍어 보는 것이 첫걸음입니다. 파형을 읽는 연습은 장비 없이도 할 수 있습니다([「시뮬레이터의 파형을 오실로스코프처럼 읽기」](#/read/scope/pr-sim))
 
 <Note>
-첫 그림의 전압은 [「논리 레벨과 문턱」](#/read/scope/bs-levels)의 두 그림을 이어 붙인 것이고, D0과 D1은 그 전압을 1.2V와 1.8V에서 가른 계산입니다. 진짜 분석기의 값이 0.8V와 2.0V 사이의 어디에서 바뀌는지는 장비마다 다르고, 두 문턱은 견주어 보려고 고른 값입니다. 둘째 그림과 예제도 계산이며 표본을 뽑는 때가 조금도 흔들리지 않는다고 놓았습니다. 장비를 찍은 화면이 아닙니다. 싼 분석기의 사양은 참고 문서의 sigrok과 SparkFun의 글에서 옮겼고, 제품마다 다를 수 있습니다.
+첫 그림의 전압은 [「논리 레벨과 문턱」](#/read/scope/bs-levels)의 두 그림을 이어 붙인 것이고, D0과 D1은 그 전압을 1.2V와 1.8V에서 가른 계산입니다. 진짜 분석기의 값이 0.8V와 2.0V 사이의 어디에서 바뀌는지는 장비마다 다르고, 두 문턱은 견주어 보려고 고른 값입니다. 둘째 그림과 예제도 계산이며 점을 찍는 때가 조금도 흔들리지 않는다고 놓았습니다. 장비를 찍은 화면이 아닙니다. 싼 분석기의 사양은 참고 문서의 sigrok과 SparkFun의 글에서 옮겼고, 제품마다 다를 수 있습니다.
 </Note>
 
 ## 정리
 
 - 로직 분석기는 문턱으로 가른 0과 1을 여러 선에서 길게 적고, 프로그램이 그것을 주소와 값으로 풀어 준다
 - 문턱 사이의 전압, 느린 변, 울림은 분석기의 화면에서 사라진다. 반듯한 화면이 반듯한 선을 뜻하지는 않는다
-- 표본 속도는 신호의 네 배를 넘게 잡는다. 모양은 오실로스코프로 먼저 보고, 내용은 분석기로 읽는다
+- 샘플링 속도는 신호의 네 배를 넘게 잡는다. 모양은 오실로스코프로 먼저 보고, 내용은 분석기로 읽는다
 
 ## 참고 문서
 
@@ -99,5 +99,5 @@ for rate in (24e6, 4e6, 2.5e6, 2e6):
 - [Saleae: What Sampling Rate Should I Use(디지털 신호는 네 배 넘게, I2C와 SPI의 보기)](https://support.saleae.com/faq/technical-faq/what-sample-rate-is-required)
 - [sigrok 위키: Saleae Logic(여덟 채널, 24MHz, 공개 펌웨어 fx2lafw, 입력 전압의 범위)](https://sigrok.org/wiki/Saleae_Logic)
 - [SparkFun: USB Logic Analyzer 24MHz/8-Channel(0.8V와 2.0V의 문턱, 입력 5.25V까지)](https://sparkfun.com/products/retired/15033)
-- [SparkFun: Using the USB Logic Analyzer with sigrok PulseView(장치 고르기, 표본 속도, 해독기 붙이기)](https://learn.sparkfun.com/tutorials/using-the-usb-logic-analyzer-with-sigrok-pulseview/all)
+- [SparkFun: Using the USB Logic Analyzer with sigrok PulseView(장치 고르기, 샘플링 속도, 해독기 붙이기)](https://learn.sparkfun.com/tutorials/using-the-usb-logic-analyzer-with-sigrok-pulseview/all)
 - [Tektronix: Mixed Signal Oscilloscope(아날로그 채널과 디지털 채널을 함께 가진 장비)](https://Tektronix.com/en/oscilloscope-mixed-signal-oscilloscope)
