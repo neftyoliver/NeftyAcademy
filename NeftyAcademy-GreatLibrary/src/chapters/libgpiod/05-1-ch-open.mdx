@@ -1,0 +1,107 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'gpiod_chip_open이 하는 검사와 errno, 칩 정보 읽기, 칩을 닫는 때와 경로를 고르는 법, 함수들의 약속';
+export const terms = ['gpiod_chip_open', 'gpiod_chip_close', 'gpiod_chip_get_info', 'gpiod_chip_get_path'];
+
+libgpiod로 하는 모든 일은 칩을 여는 데서 시작합니다. 칩 객체는 `/dev/gpiochipN`을 연 파일 하나를 감싼 것이고, 이것으로 칩과 줄의 정보를 읽고 줄을 요청합니다. 여닫는 함수는 둘뿐이지만, 이 책에 나오는 나머지 함수들이 모두 따르는 약속이 여기서 처음 나옵니다.
+
+## 열고 닫기
+
+```c gpiosim
+// 경로 넷을 열어 본다: 칩, 없는 파일, GPIO가 아닌 장치, 보통 파일
+#include <errno.h>
+#include <gpiod.h>
+#include <stdio.h>
+#include <string.h>
+
+// 경로를 칩으로 열어 보고 결과를 한 줄로 적는다
+static void try_open(const char* path) {
+    struct gpiod_chip* chip = gpiod_chip_open(path);
+    if (!chip) {
+        int why = errno;                     // 다음 호출이 덮어쓰기 전에 옮겨 둔다
+        printf("%-15s errno %2d  %s\n", path, why, strerror(why));
+        return;
+    }
+    struct gpiod_chip_info* info = gpiod_chip_get_info(chip);
+    if (info) {
+        printf("%-15s %s [%s] (%zu lines)\n", gpiod_chip_get_path(chip),
+               gpiod_chip_info_get_name(info), gpiod_chip_info_get_label(info),
+               gpiod_chip_info_get_num_lines(info));
+        gpiod_chip_info_free(info);
+    }
+    gpiod_chip_close(chip);
+}
+
+int main(void) {
+    try_open("/dev/gpiochip0");
+    try_open("/dev/gpiochip7");
+    try_open("/dev/null");
+    try_open("/etc/passwd");
+    gpiod_chip_close(nullptr);               // 아무 일도 하지 않는다
+}
+```
+
+```text
+/dev/gpiochip0  gpiochip0 [pinctrl-bcm2711] (58 lines)
+/dev/gpiochip7  errno  2  No such file or directory
+/dev/null       errno 19  No such device
+/etc/passwd     errno 25  Inappropriate ioctl for device
+```
+
+- **돌려받는 것은 포인터 하나**: `struct gpiod_chip`의 속은 보이지 않습니다. 함수에 넘겨서만 씁니다. 이 책의 다른 객체들도 같습니다
+- **실패는 `nullptr`와 `errno`로 안다**: 포인터를 돌려주는 함수는 `nullptr`를, `int`를 돌려주는 함수는 -1을 돌려주고 까닭을 `errno`에 둡니다. libgpiod의 함수가 모두 이 꼴입니다
+- **`errno`는 바로 옮겨 둔다**: 다음에 부르는 함수가 덮어씁니다. `gpiod_is_gpiochip_device`는 묻기만 하는 함수라 `errno`를 0으로 만들어 놓고 돌아옵니다
+- **닫을 때는 `nullptr`도 받는다**: 마지막 줄처럼 넘겨도 아무 일이 없습니다. 닫거나 풀어 주는 함수들만 그렇고, 다른 함수에 객체 대신 `nullptr`를 넘기면 프로그램이 그 자리에서 멈춥니다
+
+## 열 때 나는 오류
+
+| `errno` | 뜻 | 볼 것 |
+| --- | --- | --- |
+| `ENOENT` | 그 경로에 파일이 없다 | `gpiodetect`로 칩의 번호를 본다 |
+| `EACCES` | 열 권한이 없다 | 사용자가 `gpio` 그룹에 들었는지 |
+| `ENOTTY` | 파일은 있지만 문자 장치가 아니다 | 경로를 잘못 적었다 |
+| `ENODEV` | 문자 장치이지만 GPIO 칩이 아니다 | 경로를 잘못 적었다 |
+| `EINVAL` | 경로 자리에 `nullptr`를 넘겼다 | 코드를 고친다 |
+
+- **파일을 열기 전에 먼저 살핀다**: 라이브러리는 그 경로가 GPIO 칩의 장치 파일인지부터 확인합니다. 문자 장치인지, 커널이 GPIO의 것이라고 하는 장치인지를 봅니다. 그래서 `/dev/null`을 넘겨도 열어서 엉뚱한 요청을 보내는 일이 없습니다
+- **심볼릭 링크는 따라간다**: 링크가 가리키는 곳을 찾아가 같은 검사를 합니다
+- **권한은 마지막에 걸린다**: 검사를 지난 뒤에 읽고 쓰기로 엽니다. `EACCES`는 [「권한: gpio 그룹과 udev」](#/read/libgpiod/st-permission)에서 다뤘습니다
+
+## 칩 정보
+
+- **`gpiod_chip_get_info`**: 칩의 이름, 이름표, 줄의 수를 담은 새 객체를 돌려줍니다. 다 쓰면 `gpiod_chip_info_free`로 풀어 줍니다
+- **글자열은 객체에 딸려 있다**: `gpiod_chip_info_get_name`과 `gpiod_chip_info_get_label`이 돌려준 포인터는 그 정보 객체를 풀어 주면 쓸 수 없습니다. 오래 들고 있을 것이면 복사해 둡니다. `gpiod_chip_get_path`가 돌려준 경로는 칩을 닫을 때까지입니다
+- **이름표가 없는 칩**: 드라이버가 이름표를 붙이지 않은 칩은 `unknown`으로 나옵니다
+- **예제의 첫 줄**: 이 셋으로 `gpiodetect`와 같은 꼴을 만들었습니다([「gpiodetect와 gpioinfo」](#/read/libgpiod/tl-detect))
+
+## 칩을 언제 닫나
+
+- **요청은 칩과 따로 산다**: 줄을 요청해 받은 객체는 칩을 닫아도 그대로 쓸 수 있습니다. 그래서 짧은 프로그램은 요청을 받자마자 칩을 닫습니다([「gpiod_chip_request_lines」](#/read/libgpiod/rq-request))
+- **열어 둘 까닭이 있을 때**: 줄의 정보를 거듭 읽거나 지켜볼 때, 줄을 나중에 더 요청할 때입니다([「줄 정보 읽기」](#/read/libgpiod/ch-info))
+- **다른 프로그램을 띄워도 넘어가지 않는다**: 칩의 파일은 `exec` 때 닫히도록 열립니다. 내 프로그램이 띄운 다른 프로그램이 칩을 물려받는 일은 없습니다
+
+## 경로를 고르는 법
+
+- **경로로만 연다**: 1.6에는 이름, 번호, 이름표로 여는 `gpiod_chip_open_by_name` 같은 함수가 있었지만 2에는 없습니다. 경로를 직접 적습니다
+- **라즈베리파이의 헤더**: `/dev/gpiochip0`입니다. 여러 보드에서 돌 프로그램은 이름표로 칩을 찾습니다([「라즈베리파이 5에서 깨진 것들」](#/read/libgpiod/hs-pi5))
+- **경로를 코드 밖에 둔다**: 명령줄 인수나 환경 변수로 받게 해 두면 보드가 바뀌어도 다시 빌드하지 않습니다
+
+## 여러 스레드에서
+
+- **객체 하나는 한 번에 한 스레드만**: libgpiod는 객체를 잠가 주지 않습니다. 칩 객체 하나를 두 스레드가 함께 쓰려면 뮤텍스로 차례를 세웁니다
+- **서로 다른 객체는 따로 써도 된다**: 스레드마다 제 칩 객체를 열어 쓰는 것은 괜찮습니다
+
+<Note>
+예제는 이 책의 흉내 칩에서 돌린 것입니다. 진짜 libgpiod 2.2.4의 머리 파일로 x86-64와 aarch64에서 컴파일되는지 따로 확인했고, 경로마다의 `errno`는 2.2.4의 소스에서 칩을 여는 차례를 읽어 흉내 칩이 같은 값을 내게 했습니다. `/dev/null`과 `/etc/passwd`는 검사 환경에 실제로 있는 파일입니다. `nullptr`와 스레드에 대한 약속은 libgpiod의 문서에 적힌 것입니다. 보드에서 돌려 보지는 못했습니다.
+</Note>
+
+## 정리
+
+- `gpiod_chip_open`은 경로가 GPIO 칩의 장치 파일인지 살핀 뒤에 열고, 실패하면 `nullptr`와 `errno`를 준다
+- 칩 정보는 새 객체로 받아 다 쓰면 풀어 주고, 거기서 얻은 글자열은 그 객체가 살아 있는 동안만 쓴다
+- 요청은 칩을 닫아도 남는다. 2에서는 칩을 경로로만 연다
+
+## 참고 문서
+
+- [libgpiod 문서: GPIO chips(gpiod_chip_open, gpiod_chip_close, gpiod_chip_get_info)](https://libgpiod.readthedocs.io/en/master/core_chips.html)
+- [libgpiod 문서(C API의 약속: 오류를 알리는 법, 객체와 스레드)](https://libgpiod.readthedocs.io/)
