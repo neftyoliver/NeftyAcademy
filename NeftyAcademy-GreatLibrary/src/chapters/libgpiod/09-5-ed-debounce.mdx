@@ -1,0 +1,187 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '거르는 기간을 적는 함수, 커널이 거르는 방법, 기간에 따라 남는 것과 사라지는 것, 기간 고르기';
+export const terms = ['gpiod_line_settings_set_debounce_period_us', 'E2BIG'];
+
+접점이 떨리면 에지가 여러 개 난다는 것은 [「gpiomon」](#/read/libgpiod/tl-mon)에서 재 봤고, [「단추 읽기」](#/read/libgpiod/in-button)에서는 프로그램이 스스로 걸렀습니다. 에지 이벤트를 쓸 때에는 그 일을 커널에 맡깁니다. 요청에 기간 하나를 적으면 됩니다. 다만 그 기간이 무엇을 남기고 무엇을 버리는지는 알고 적어야 합니다.
+
+## 거르는 기간 적기
+
+- **`gpiod_line_settings_set_debounce_period_us`**: settings에 거르는 기간을 마이크로초로 적습니다. 10ms는 `10'000`입니다. 0은 거르지 않는다는 뜻이고 기본값입니다
+- **입력에만 적는다**: 출력으로 요청하는 줄이나 방향을 그대로 두는 줄에 적으면 요청이 `EINVAL`로 거절됩니다
+- **에지 감지와는 따로다**: 에지를 켜지 않고 기간만 적어도 됩니다. 그때는 읽어 가는 값이 걸러집니다
+- **줄마다 따로 정한다**: settings를 달리 붙이면 줄마다 기간이 다릅니다. 요청 하나에 담을 수 있는 서로 다른 설정은 열 가지쯤이어서, 기간을 줄마다 제각각으로 주다 보면 `E2BIG`이 납니다
+- **줄 정보에 보인다**: `gpioinfo`는 `debounce-period=10ms`를 적고, 프로그램에서는 `gpiod_line_info_get_debounce_period_us`로 읽습니다([「줄 정보 읽기」](#/read/libgpiod/ch-info))
+
+## 커널이 거르는 방법
+
+- **에지가 올 때마다 다시 잰다**: 커널은 에지를 봐도 곧바로 이벤트를 내지 않고, 기간만큼 뒤에 할 일을 맞춰 둡니다. 그 전에 에지가 또 오면 거기서부터 다시 잽니다
+- **조용해진 뒤에 값을 본다**: 기간 동안 에지가 없었으면 그때 줄의 값을 읽습니다. 마지막으로 받아들인 값과 다르면 이벤트 하나를 내고, 같으면 아무 일도 하지 않습니다
+- **타임스탬프는 그때의 시각이다**: 이벤트에 적히는 것은 처음 에지가 난 때가 아니라 조용해진 것을 확인한 때입니다([「타임스탬프와 시계 고르기」](#/read/libgpiod/ed-timestamp))
+- **칩이 할 수 있으면 칩에 맡긴다**: 커널은 먼저 GPIO 칩에 거르는 일을 맡겨 보고, 칩이 못 한다고 하면 위의 방법으로 직접 합니다. 프로그램에서는 어느 쪽인지 구별되지 않습니다
+- **커널이 할 때의 눈금은 틱이다**: 기간은 커널의 틱 단위로 올림됩니다. 틱은 커널을 빌드할 때 정해지고 1ms에서 10ms 사이입니다. 1ms를 적어도 그보다 길게 걸릴 수 있습니다
+
+## 기간에 따라 남는 것과 사라지는 것
+
+아래 예제는 [「단추 읽기」](#/read/libgpiod/in-button)의 단추를 다시 씁니다. 0.15초 동안 한 번, 1.4초 동안 한 번 누르고, 붙고 뗄 때 접점이 떨리며, 길게 누르는 도중에 1ms 동안 접점이 뜹니다. 거르는 기간은 인수로 받고, 주지 않으면 10ms입니다.
+
+```c gpiosim=press
+// 같은 단추를 거르는 기간만 바꿔 가며 지켜본다. 기간은 인수로 받는다(ms, 기본 10)
+#define _POSIX_C_SOURCE 200809L              // clock_gettime을 쓰려고
+#include <gpiod.h>
+#include <inttypes.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <threads.h>
+#include <time.h>
+
+enum { BUTTON = 27, ROOM = 16 };             // GPIO 27, 핀 13. 건너편은 GND
+
+// 풀업을 켠 액티브 로 입력. 두 방향의 에지를 보고, period_us 동안 떨림을 거른다
+static struct gpiod_line_request* request_button(struct gpiod_chip* chip,
+                                                 unsigned int offset,
+                                                 unsigned long period_us) {
+    struct gpiod_line_settings* settings = gpiod_line_settings_new();
+    struct gpiod_line_config* config = gpiod_line_config_new();
+    struct gpiod_line_request* request = nullptr;
+    if (settings && config) {
+        gpiod_line_settings_set_direction(settings, GPIOD_LINE_DIRECTION_INPUT);
+        gpiod_line_settings_set_bias(settings, GPIOD_LINE_BIAS_PULL_UP);
+        gpiod_line_settings_set_active_low(settings, true);
+        gpiod_line_settings_set_edge_detection(settings, GPIOD_LINE_EDGE_BOTH);
+        gpiod_line_settings_set_debounce_period_us(settings, period_us);
+        gpiod_line_config_add_line_settings(config, &offset, 1, settings);
+        request = gpiod_chip_request_lines(chip, nullptr, config);
+    }
+    gpiod_line_config_free(config);
+    gpiod_line_settings_free(settings);
+    return request;
+}
+
+// 단조 시계의 지금을 나노초로 읽는다. 타임스탬프와 같은 시계다
+static uint64_t now_ns(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * 1'000'000'000 + (uint64_t)now.tv_nsec;
+}
+
+int main(int argc, char** argv) {
+    unsigned long period_ms = argc > 1 ? strtoul(argv[1], nullptr, 10) : 10;
+    struct gpiod_chip* chip = gpiod_chip_open("/dev/gpiochip0");
+    if (!chip) {
+        perror("/dev/gpiochip0");
+        return 1;
+    }
+    uint64_t start = now_ns();
+    struct gpiod_line_request* button =
+        request_button(chip, BUTTON, period_ms * 1000);
+    gpiod_chip_close(chip);
+    struct gpiod_edge_event_buffer* buffer = gpiod_edge_event_buffer_new(ROOM);
+    if (!button || !buffer) {
+        perror("요청");
+        return 1;
+    }
+    printf("거르는 기간 %lums\n", period_ms);
+
+    // 단추는 1.0045초부터 눌려 있다. 1.1초에 값을 읽어 본다
+    thrd_sleep(&(struct timespec){.tv_sec = 1, .tv_nsec = 100'000'000}, nullptr);
+    bool active =
+        gpiod_line_request_get_value(button, BUTTON) == GPIOD_LINE_VALUE_ACTIVE;
+    printf("1.1초에 읽은 값은 %s\n", active ? "active" : "inactive");
+
+    // 쌓여 있던 이벤트부터 차례로 받는다. 2초 동안 조용하면 끝낸다
+    int events = 0;
+    while (gpiod_line_request_wait_edge_events(button, 2'000'000'000) == 1) {
+        int count = gpiod_line_request_read_edge_events(button, buffer, ROOM);
+        for (int i = 0; i < count; ++i) {
+            struct gpiod_edge_event* event =
+                gpiod_edge_event_buffer_get_event(buffer, (unsigned long)i);
+            uint64_t micros =
+                (gpiod_edge_event_get_timestamp_ns(event) - start) / 1000;
+            bool pressed = gpiod_edge_event_get_event_type(event) ==
+                           GPIOD_EDGE_EVENT_RISING_EDGE;
+            printf("%4" PRIu64 ".%" PRIu64 "ms  %s\n", micros / 1000,
+                   micros % 1000 / 100, pressed ? "눌림" : "뗌");
+            ++events;
+        }
+    }
+    printf("이벤트 %d개\n", events);
+    gpiod_edge_event_buffer_free(buffer);
+    gpiod_line_request_release(button);
+}
+```
+
+```text
+거르는 기간 10ms
+1.1초에 읽은 값은 active
+1020.5ms  눌림
+1170.5ms  뗌
+2013.5ms  눌림
+3413.5ms  뗌
+이벤트 4개
+```
+
+- **넷만 남았다**: 떨림과 도중에 뜬 것이 걸러지고 눌림 둘과 뗌 둘이 남았습니다
+- **시각은 늦고 길이는 맞다**: 첫 눌림은 접점이 처음 닿은 1004.5ms가 아니라, 떨림이 끝난 1010.5ms에 10ms를 더한 1020.5ms에 찍혔습니다. 뗌도 떨림이 끝나고 10ms 뒤에 찍혔고, 두 떨림의 길이가 같아서 차이는 150ms 그대로입니다
+
+기간을 0으로 주면 접점이 오간 것이 모두 옵니다.
+
+```text
+거르는 기간 0ms
+1.1초에 읽은 값은 active
+1004.5ms  눌림
+1008.5ms  뗌
+1010.5ms  눌림
+1154.5ms  뗌
+1158.5ms  눌림
+1160.5ms  뗌
+2001.5ms  눌림
+2002.5ms  뗌
+2003.5ms  눌림
+2609.5ms  뗌
+2610.5ms  눌림
+3401.5ms  뗌
+3402.5ms  눌림
+3403.5ms  뗌
+이벤트 14개
+```
+
+기간을 200ms로 늘리면 반대쪽의 문제가 생깁니다.
+
+```text
+거르는 기간 200ms
+1.1초에 읽은 값은 inactive
+2203.5ms  눌림
+3603.5ms  뗌
+이벤트 2개
+```
+
+- **짧게 누른 것이 통째로 사라졌다**: 0.15초의 눌림은 200ms 동안 가만히 있은 적이 없어서 받아들여지지 않았습니다. 기간보다 짧은 신호는 없던 일이 됩니다
+- **읽은 값도 걸러진 값이다**: 단추가 눌려 있던 1.1초에 읽은 값이 inactive입니다. 기간을 적은 줄에서는 값을 읽는 함수도 받아들여진 값을 돌려줍니다
+- **반응이 그만큼 늦다**: 2001.5ms에 누른 것을 2203.5ms에야 알았습니다
+
+## 기간 고르기
+
+- **가장 긴 떨림보다 길게**: 내 단추의 떨림을 재고 그보다 넉넉히 잡습니다([「gpiomon」](#/read/libgpiod/tl-mon))
+- **재 보지 못했으면**: libgpiod에 딸린 예제는 단추에 10ms를 적고, 갠슬의 글은 20ms에서 50ms를 권합니다. 그 사이에서 시작합니다([「단추 읽기」](#/read/libgpiod/in-button))
+- **받아야 할 가장 짧은 신호보다 짧게**: 0.1초짜리 신호를 내는 감지기에 0.2초를 적으면 그 신호는 오지 않습니다
+- **빠른 신호에는 조심해서**: 엔코더처럼 에지 하나하나가 뜻을 갖는 신호에는, 그 신호의 가장 짧은 간격보다 짧은 기간만 겁니다([「로터리 엔코더」](#/read/libgpiod/pj-encoder))
+- **시각이 필요하면 기간을 뺀다**: 타임스탬프에서 기간을 빼면 떨림이 끝난 때가 나옵니다. 두 이벤트 사이의 간격은 둘이 같이 늦으므로 빼지 않아도 됩니다
+
+<Note>
+예제는 이 책의 흉내 칩에서 세 번 돌린 것이고, 단추가 눌리고 떨리는 것은 대본으로 넣었습니다. 흉내 칩은 기간을 적힌 그대로 지키지만, 진짜 커널이 직접 거를 때에는 틱 단위로 올림하므로 찍히는 시각이 예제보다 조금 늦습니다. 커널이 거르는 방법과 `EINVAL`, 읽는 값도 걸러진다는 것은 리눅스 커널의 문서와 소스에서 읽은 것입니다. 라즈베리파이의 GPIO 칩이 스스로 거르는지 커널이 대신하는지는 확인하지 못했습니다. 진짜 libgpiod 2.2.4의 머리 파일로 x86-64와 aarch64에서 컴파일되는지 따로 확인했고, 보드와 단추로 돌려 보지는 못했습니다.
+</Note>
+
+## 정리
+
+- 거르는 기간은 `gpiod_line_settings_set_debounce_period_us`로 줄마다 적는다. 단위는 마이크로초다
+- 커널은 줄이 그 기간 동안 조용했을 때에야 이벤트를 낸다. 타임스탬프도 그만큼 늦는다
+- 기간보다 짧은 신호는 사라진다. 떨림보다는 길게, 받아야 할 신호보다는 짧게 잡는다
+
+## 참고 문서
+
+- [리눅스 커널 문서: GPIO_V2_GET_LINE_IOCTL(디바운스가 이벤트를 내는 때와 그 시각, 읽는 값에도 듣는다는 것)](https://docs.kernel.org/userspace-api/gpio/gpio-v2-get-line-ioctl.html)
+- [리눅스 커널 소스: gpiolib-cdev.c(칩에 먼저 맡기고 못 하면 커널이 거르는 차례, 기간을 틱으로 바꾸는 것)](https://android.googlesource.com/kernel/common/+/android-mainline/drivers/gpio/gpiolib-cdev.c)
+- [libgpiod 문서: Line settings(거르는 기간을 적는 함수와 단위)](https://libgpiod.readthedocs.io/en/master/core_line_settings.html)
+- [libgpiod 저장소(examples의 예제가 단추에 적는 기간)](https://github.com/brgl/libgpiod)
+- [Jack Ganssle: A Guide to Debouncing(거르는 시간으로 권하는 범위)](https://my.eng.utah.edu/%7Ecs5780/debouncing.pdf)
