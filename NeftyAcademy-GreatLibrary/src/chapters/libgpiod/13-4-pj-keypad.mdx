@@ -1,0 +1,187 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = '행과 열의 격자와 배선, 한 행씩 몰고 열 읽기, 행을 오픈 드레인으로 두는 까닭, 훑는 박자, 유령 키';
+export const terms = [];
+
+숫자 키패드에는 키가 열둘이지만 선은 일곱뿐입니다. 키마다 선을 하나씩 주지 않고 행과 열의 격자로 엮었기 때문입니다. 이런 격자는 가만히 읽을 수 없고, 프로그램이 한 줄씩 건드려 가며 훑어야 합니다. 출력과 입력을 한 요청에서 함께 쓰는 마지막 연습입니다.
+
+## 격자와 배선
+
+4행 3열 키패드에는 행 선 넷과 열 선 셋이 있고, 키는 행 하나와 열 하나가 만나는 곳의 스위치입니다. 누르면 그 행과 그 열이 이어집니다.
+
+| | 열 1 (GPIO 12, 핀 32) | 열 2 (GPIO 16, 핀 36) | 열 3 (GPIO 20, 핀 38) |
+| --- | --- | --- | --- |
+| 행 1 (GPIO 5, 핀 29) | 1 | 2 | 3 |
+| 행 2 (GPIO 6, 핀 31) | 4 | 5 | 6 |
+| 행 3 (GPIO 13, 핀 33) | 7 | 8 | 9 |
+| 행 4 (GPIO 19, 핀 35) | * | 0 | # |
+
+- **선의 수**: 행과 열을 더한 만큼만 듭니다. 키 열둘에 일곱, 4행 4열의 열여섯에 여덟입니다
+- **열은 풀업을 켠 입력**: 아무 키도 눌리지 않으면 열은 모두 HIGH입니다
+- **행은 하나씩 LOW로 몬다**: 행 하나를 LOW로 몰았을 때 어느 열이 LOW로 내려오면, 그 행과 그 열이 만나는 키가 눌린 것입니다
+- **어느 다리가 어느 선인지**: 키패드마다 커넥터의 차례가 다릅니다. 부품의 문서를 보거나 테스터로 찾습니다
+
+## 훑기
+
+```c gpiosim=keypad
+// 4행 3열 키패드 훑기: 행을 하나씩 LOW로 몰고 열을 읽어, 눌린 키와 뗀 키를 적는다
+#define _POSIX_C_SOURCE 200809L              // clock_nanosleep을 쓰려고
+#include <gpiod.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+
+enum { ROWS = 4, COLS = 3, SCANS = 50 };
+static const unsigned int ROW[ROWS] = {5, 6, 13, 19};   // 핀 29, 31, 33, 35
+static const unsigned int COL[COLS] = {12, 16, 20};     // 핀 32, 36, 38
+static const char KEYS[ROWS][COLS + 1] = {"123", "456", "789", "*0#"};
+static const int64_t SECOND = 1'000'000'000;
+static const int64_t PACE = 20'000'000;      // 20ms마다 한 번 훑는다
+
+static int64_t now_ns(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return now.tv_sec * SECOND + now.tv_nsec;
+}
+
+static void sleep_until(int64_t when) {
+    struct timespec at = {.tv_sec = when / SECOND, .tv_nsec = when % SECOND};
+    clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &at, nullptr);
+}
+
+// 행은 손을 뗀 오픈 드레인 출력으로, 열은 풀업을 켠 입력으로 요청한다
+static struct gpiod_line_request* request_keypad(struct gpiod_chip* chip) {
+    struct gpiod_line_settings* row = gpiod_line_settings_new();
+    struct gpiod_line_settings* col = gpiod_line_settings_new();
+    struct gpiod_line_config* config = gpiod_line_config_new();
+    struct gpiod_request_config* request_config = gpiod_request_config_new();
+    struct gpiod_line_request* request = nullptr;
+    if (row && col && config && request_config) {
+        gpiod_line_settings_set_direction(row, GPIOD_LINE_DIRECTION_OUTPUT);
+        gpiod_line_settings_set_drive(row, GPIOD_LINE_DRIVE_OPEN_DRAIN);
+        gpiod_line_settings_set_output_value(row, GPIOD_LINE_VALUE_ACTIVE);
+        gpiod_line_settings_set_direction(col, GPIOD_LINE_DIRECTION_INPUT);
+        gpiod_line_settings_set_bias(col, GPIOD_LINE_BIAS_PULL_UP);
+        gpiod_line_config_add_line_settings(config, ROW, ROWS, row);
+        gpiod_line_config_add_line_settings(config, COL, COLS, col);
+        gpiod_request_config_set_consumer(request_config, "keypad");
+        request = gpiod_chip_request_lines(chip, request_config, config);
+    }
+    gpiod_request_config_free(request_config);
+    gpiod_line_config_free(config);
+    gpiod_line_settings_free(col);
+    gpiod_line_settings_free(row);
+    return request;
+}
+
+// 한 번 훑어 down[행][열]을 채운다
+static void scan(struct gpiod_line_request* keypad, bool down[ROWS][COLS]) {
+    for (int r = 0; r < ROWS; ++r) {
+        // 이 행만 LOW로 몬다. 눌린 키가 있으면 그 열이 LOW로 끌려 내려온다
+        gpiod_line_request_set_value(keypad, ROW[r], GPIOD_LINE_VALUE_INACTIVE);
+        enum gpiod_line_value seen[COLS];
+        gpiod_line_request_get_values_subset(keypad, COLS, COL, seen);
+        gpiod_line_request_set_value(keypad, ROW[r], GPIOD_LINE_VALUE_ACTIVE);
+        for (int c = 0; c < COLS; ++c)
+            down[r][c] = seen[c] == GPIOD_LINE_VALUE_INACTIVE;
+    }
+}
+
+int main(void) {
+    struct gpiod_chip* chip = gpiod_chip_open("/dev/gpiochip0");
+    if (!chip) {
+        perror("/dev/gpiochip0");
+        return 1;
+    }
+    struct gpiod_line_request* keypad = request_keypad(chip);
+    gpiod_chip_close(chip);
+    if (!keypad) {
+        perror("요청");
+        return 1;
+    }
+    bool before[ROWS][COLS] = {};            // 바로 앞에 훑은 결과
+    bool held[ROWS][COLS] = {};              // 눌렸다고 받아들인 키
+    const int64_t origin = now_ns();
+    for (int i = 1; i <= SCANS; ++i) {
+        sleep_until(origin + i * PACE);
+        bool down[ROWS][COLS];
+        scan(keypad, down);
+        int count = 0;
+        for (int r = 0; r < ROWS; ++r)
+            for (int c = 0; c < COLS; ++c) {
+                count += down[r][c];
+                // 두 번 잇달아 같은 값일 때만 받아들인다(떨림 거르기)
+                if (down[r][c] != before[r][c] || down[r][c] == held[r][c])
+                    continue;
+                held[r][c] = down[r][c];
+                printf("%.2fs %c %s\n", (double)(i * PACE) / 1e9, KEYS[r][c],
+                       down[r][c] ? "눌림" : "뗌");
+            }
+        if (count >= 3 && memcmp(down, before, sizeof down) != 0)
+            printf("%.2fs 키 %d개가 함께 보인다. 유령 키일 수 있다\n",
+                   (double)(i * PACE) / 1e9, count);
+        memcpy(before, down, sizeof before);
+    }
+    gpiod_line_request_release(keypad);
+}
+```
+
+```text
+0.14s 5 눌림
+0.34s 5 뗌
+0.44s 1 눌림
+0.48s 2 눌림
+0.64s 1 뗌
+0.64s 2 뗌
+0.74s 1 눌림
+0.76s 2 눌림
+0.78s 키 4개가 함께 보인다. 유령 키일 수 있다
+0.80s 4 눌림
+0.80s 5 눌림
+0.94s 1 뗌
+0.94s 2 뗌
+0.94s 4 뗌
+0.94s 5 뗌
+```
+
+- **일곱 줄이 한 요청이다**: 행 넷은 출력으로, 열 셋은 입력으로 한 요청에 담았습니다([「설정 객체 셋: line_settings, line_config, request_config」](#/read/libgpiod/rq-objects))
+- **열은 한 번에 읽는다**: 행 하나를 몬 채로 열 셋을 `gpiod_line_request_get_values_subset` 한 번에 읽습니다. 같은 순간의 값입니다([「값 읽기」](#/read/libgpiod/in-read))
+- **두 번 같아야 받는다**: 20ms마다 훑고, 잇달아 두 번 같은 값이 나온 키만 받아들입니다. 접점의 떨림은 한 번의 훑기에만 걸리므로 걸러집니다. 0.105초에 누른 5가 0.14초에 받아들여진 것은 그래서입니다
+- **이벤트를 쓰지 않는다**: 열의 레벨은 프로그램이 행을 몰 때마다 바뀝니다. 에지 감지를 켜면 훑을 때마다 이벤트가 쏟아지므로 값을 읽습니다
+- **느린 박자로 충분하다**: 사람이 키를 누르고 있는 시간은 0.1초쯤입니다. 20ms마다 훑으면 놓치지 않고, 프로그램이 몇 ms 늦게 깨어도 달라지는 것이 없습니다([「비트뱅잉」](#/read/libgpiod/tm-bitbang))
+
+## 행을 오픈 드레인으로 두는 까닭
+
+행은 푸시풀이 아니라 오픈 드레인입니다. 쉬는 행은 HIGH를 내지 않고 선을 놓습니다([「푸시풀, 오픈 드레인, 오픈 소스」](#/read/libgpiod/out-drive)).
+
+- **두 키가 행 둘을 잇는다**: 같은 열의 1과 4를 함께 누르면 행 1과 행 2가 그 열을 거쳐 이어집니다
+- **푸시풀이면 합선이다**: 행 1을 LOW로 몰 때 행 2가 HIGH를 내고 있으면, 두 핀이 서로를 반대로 몹니다. 큰 전류가 흐르고 핀이 상할 수 있습니다. 흉내 칩에서 행을 푸시풀로 바꿔 돌리자 합선 알림이 나왔습니다
+- **놓은 선은 다투지 않는다**: 오픈 드레인으로 쉬는 행은 선을 놓고 있으므로, LOW로 끌려 내려갈 뿐입니다
+- **입력으로 바꾸는 방법도 있다**: 쉬는 행을 입력으로 바꿔 두는 것도 같은 효과입니다. 그러려면 훑을 때마다 줄을 다시 설정해야 해서, 여기서는 오픈 드레인을 썼습니다([「도중에 바꾸기」](#/read/libgpiod/reconfigure))
+
+## 유령 키
+
+0.7초부터는 1, 2, 4를 차례로 눌렀습니다. 0.80초에 4와 함께, 누르지 않은 5가 눌렸다고 나옵니다.
+
+- **돌아가는 길이 생긴다**: 행 2를 LOW로 몰면 4를 거쳐 열 1이 내려갑니다. 열 1은 1을 거쳐 행 1을, 행 1은 2를 거쳐 열 2를 끌어내립니다. 행 2를 모는 동안 열 2가 LOW이므로 5로 읽힙니다
+- **네모의 세 귀퉁이**: 격자에서 네모를 이루는 네 키 가운데 셋을 누르면 넷째가 유령으로 보입니다. 프로그램으로는 진짜와 가릴 수 없습니다
+- **알아채기만 한다**: 예제는 셋 넘게 보이면 알려 주기만 합니다. 흔한 대응은 그런 훑기를 통째로 버리는 것입니다
+- **다이오드로 막는다**: 키마다 다이오드를 하나씩 달면 전류가 한 방향으로만 흘러 돌아가는 길이 끊깁니다. 값싼 숫자 키패드에는 대개 없습니다
+
+<Note>
+예제는 이 책의 흉내 칩에서 돌린 것이고, 키를 누르고 떼는 때는 대본으로 넣었습니다. 흉내 칩은 이어진 줄들을 한 도선으로 보고 레벨을 셈합니다. 진짜 선은 행을 몬 뒤 열이 내려오기까지 시간이 조금 걸리는데, 그것은 흉내 내지 않았습니다. 보드에서 값이 흔들리면 행을 몬 뒤 잠깐 쉬었다가 읽습니다. 진짜 libgpiod 2.2.4의 머리 파일로 x86-64와 aarch64에서 컴파일되는지 확인했고, 키패드를 단 보드에서 돌려 보지는 못했습니다. 라즈베리파이의 오버레이 목록에서 키패드라는 이름의 오버레이는 찾지 못했습니다.
+</Note>
+
+## 정리
+
+- 키패드는 행 하나씩을 LOW로 몰고 풀업된 열을 한 번에 읽어 훑는다. 20ms쯤의 느린 박자로 충분하다
+- 쉬는 행은 선을 놓게 한다. HIGH를 내게 두면 두 키가 눌릴 때 핀끼리 다툰다
+- 다이오드가 없는 격자에서는 세 키가 네모를 이루면 유령 키가 보인다
+
+## 참고 문서
+
+- [KEYENCE: Implementing Key Matrix Scanning(행과 열의 격자, 쉬는 행을 입력이나 오픈 드레인으로, 유령 키와 막는 방법)](https://www.keyence.com/ss/general/embedded-software/peripheral-drivers/key-matrix-scanning.jsp)
+- [Microchip 문서: Matrix keypad, Theory of Operation(한 선씩 LOW로 몰고 다른 축을 읽는 방법, 유령 키)](https://onlinedocs.microchip.com/oxy/GUID-7F7FEA3F-1F4B-4C3B-B4FE-12A7D22A4773-en-US-8/GUID-0FB8ED2D-33E0-4E92-8BBE-325061B16578.html)
+- [Zephyr 문서: GPIO Keyboard Matrix(다이오드 없는 격자와 유령 키 검사, 몬 뒤 기다리는 시간)](https://docs.zephyrproject.org/4.2.0/services/input/gpio-kbd.html)
+- [libgpiod 문서: GPIO line request(값을 한꺼번에 읽는 함수)](https://libgpiod.readthedocs.io/en/master/core_line_request.html)
