@@ -1,0 +1,93 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'pkg-config로 한 줄 빌드, Makefile과 CMake, 판이 어긋나거나 링크가 빠졌을 때 보이는 오류와 고치는 길';
+export const terms = ['pkg_check_modules', 'LDLIBS'];
+
+libgpiod를 쓰는 프로그램을 빌드하는 데 컴파일러가 알아야 할 것은 둘입니다. `gpiod.h`가 어디 있는지와 어느 라이브러리를 물릴지입니다. 둘 다 `pkg-config`에 물으면 답해 줍니다. 손으로 적어도 되지만, 물어서 쓰면 라이브러리가 `/usr/local`에 깔린 기기에서도 같은 명령이 통합니다.
+
+## 한 줄로 빌드하기
+
+```sh
+gcc -std=c23 -Wall -Wextra ver.c -o ver $(pkg-config --cflags --libs libgpiod)
+./ver
+```
+
+- **`ver.c`**: [「libgpiod 2.x 설치와 버전 확인」](#/read/libgpiod/st-install)의 예제입니다. 이것이 빌드되고 돌면 준비가 끝난 것입니다
+- **`pkg-config`가 내주는 것**: 꾸러미로 깔았으면 `-lgpiod` 하나입니다. 머리 파일이 컴파일러가 원래 찾는 자리에 있어서 덧붙일 것이 없습니다. `/usr/local`에 깔았으면 `-I`와 `-L`이 그 자리를 가리키며 따라 나옵니다
+- **라이브러리는 소스 뒤에 적는다**: `gcc -lgpiod ver.c`처럼 앞에 두면 배포판에 따라 링크가 실패합니다. 이 책의 검사 환경에서도 실패했습니다
+- **`-std=c23`**: 이 책의 예제는 `nullptr`와 `1'000` 같은 C23의 표기를 씁니다. 트릭시의 GCC 14는 그대로 받고, 북웜의 GCC 12는 받지 못합니다
+
+## Makefile
+
+```make
+CC      := gcc
+CFLAGS  := -std=c23 -Wall -Wextra -O2 $(shell pkg-config --cflags libgpiod)
+LDLIBS  := $(shell pkg-config --libs libgpiod)
+
+blink: blink.c
+```
+
+```text
+gcc -std=c23 -Wall -Wextra -O2     blink.c  -lgpiod  -o blink
+```
+
+- **규칙을 적지 않았다**: `blink: blink.c`만 있어도 make가 제 규칙으로 위의 명령을 만들어 냅니다. 둘째 블록이 `make`를 쳤을 때 찍힌 줄입니다
+- **`LDLIBS`에 넣는다**: make는 이 변수를 소스의 뒤에 놓습니다. `LDFLAGS`에 `-lgpiod`를 넣으면 소스 앞에 놓여 위에서 말한 문제가 생깁니다
+
+## CMake
+
+```cmake
+cmake_minimum_required(VERSION 3.25)
+project(blink C)
+set(CMAKE_C_STANDARD 23)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(GPIOD REQUIRED IMPORTED_TARGET libgpiod>=2)
+
+add_executable(blink blink.c)
+target_link_libraries(blink PRIVATE PkgConfig::GPIOD)
+```
+
+```text
+-- Checking for module 'libgpiod>=2'
+--   Package dependency requirement 'libgpiod >= 2' could not be satisfied.
+Package 'libgpiod' has version '1.6.3', required version is '>= 2'
+```
+
+- **`libgpiod>=2`**: 판이 낮으면 컴파일까지 가지 않고 구성 단계에서 멈춥니다. 위는 1.6.3이 깔린 기기에서 `cmake`가 낸 글귀입니다. 오류의 까닭이 한눈에 보입니다
+- **`PkgConfig::GPIOD`**: `pkg-config`가 알려 준 머리 파일의 자리와 라이브러리를 함께 실은 타깃입니다. 이것 하나를 물리면 됩니다
+- **셸에서 같은 검사**: `pkg-config --atleast-version=2 libgpiod`는 판이 낮으면 0이 아닌 값으로 끝납니다. 빌드 스크립트의 첫 줄에 둡니다
+
+## 오류가 났을 때
+
+| 보이는 글귀 | 까닭 | 고치는 길 |
+| --- | --- | --- |
+| `fatal error: gpiod.h: No such file or directory` | 머리 파일이 없다 | `libgpiod-dev`를 깐다 |
+| `implicit declaration of function 'gpiod_api_version'` | 2의 코드를 1.6의 머리 파일로 컴파일했다 | 2를 깐다 |
+| `implicit declaration of function 'gpiod_chip_open_by_name'` | 1.6의 코드를 2의 머리 파일로 컴파일했다 | 코드를 2의 함수로 옮긴다 |
+| `undefined reference to 'gpiod_chip_open'` | 링크에 라이브러리가 빠졌다 | 소스 뒤에 `-lgpiod`를 적는다 |
+
+- **둘째와 셋째가 판이 어긋난 것**: 함수 이름이 낯설다는 오류가 줄줄이 나옵니다. 컴파일러는 이름이 닮은 함수를 권하는데, 그것을 따라 고칠 일이 아니라 판을 맞출 일입니다
+- **옛 글의 코드를 알아보는 법**: `gpiod_chip_get_line`, `gpiod_line_request_output`, `gpiod_line_set_value`가 보이면 1.6의 코드입니다. 2에는 `gpiod_line`이라는 것이 없고 줄은 요청으로만 다룹니다([「설정 객체 셋: line_settings, line_config, request_config」](#/read/libgpiod/rq-objects))
+- **빌드는 됐는데 돌지 않는다면**: `error while loading shared libraries: libgpiod.so.3`은 도는 기기에 `libgpiod3`이 없다는 말이고, `Permission denied`는 다음 쪽의 일입니다([「권한: gpio 그룹과 udev」](#/read/libgpiod/st-permission))
+
+## 어디에서 빌드할까
+
+- **보드에서**: 가장 쉽습니다. 꾸러미만 깔면 되고, 이 책의 프로그램은 파일 하나짜리라 금방 빌드됩니다. 편집은 PC에서 하고 빌드만 보드에 시키는 길은 「라즈베리파이 시작하기」의 [「원격 편집: VS Code Remote와 CLion」](#/read/sbc-start/rem-editor)에 있습니다
+- **PC에서 교차 컴파일**: PC에 aarch64용 컴파일러와, 보드와 같은 판의 aarch64용 `libgpiod-dev`가 있어야 합니다. 큰 프로젝트나 느린 보드에서 값을 합니다. 「교차 컴파일과 배포」에서 다룹니다
+
+<Note>
+이 쪽의 글귀들은 지어낸 것이 아니라 이 책의 검사 환경에서 찍힌 것입니다. 그 환경은 북웜과 같은 libgpiod 1.6.3이 꾸러미로 깔린 x86-64 리눅스이고 컴파일러는 GCC 14.2, CMake는 3.28입니다. make와 cmake의 출력(컴파일러의 이름만 `gcc-14`에서 `gcc`로 바꿔 적었습니다), 머리 파일이 없을 때와 링크가 빠졌을 때의 오류, 2의 코드를 1.6의 머리 파일로 컴파일한 오류가 거기서 나왔습니다. 1.6의 코드를 2의 머리 파일에 견준 것은 진짜 libgpiod 2.2.4의 `gpiod.h`로 문법만 검사한 결과입니다. 2가 깔린 기기에서 끝까지 빌드해 돌려 보지는 못했습니다.
+</Note>
+
+## 정리
+
+- `gcc ... $(pkg-config --cflags --libs libgpiod)`로 빌드한다. 라이브러리는 소스 뒤에 온다
+- Makefile에서는 `LDLIBS`에, CMake에서는 `pkg_check_modules`의 `libgpiod>=2`와 `PkgConfig::GPIOD`로 물린다
+- 낯선 함수 이름이라는 오류가 줄줄이 나오면 코드와 머리 파일의 판이 어긋난 것이다
+
+## 참고 문서
+
+- [libgpiod 문서(내려받기와 빌드, C API)](https://libgpiod.readthedocs.io/)
+- [데비안 꾸러미: libgpiod(libgpiod-dev에 든 것과 배포판마다의 판)](https://packages.debian.org/source/libgpiod)
