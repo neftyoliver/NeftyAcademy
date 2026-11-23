@@ -4,7 +4,8 @@
  *   <DotGrid rows={3} cols={4} />                         점 3줄 4칸
  *   <DotGrid rows={3} cols={7} cutCol={4} top={['4', '3']} left="3" />     세로로 갈라 색을 나눈다(분배법칙)
  *   <Pairing top={5} bottom={4} topLabel="컵" bottomLabel="받침" />        하나씩 짝짓기. 남는 것이 보인다
- *   <Pairing top={5} bottom={5} marks={['1', '2', '3', '4', '5']} />      아래 칸에 글자를 적는다(세기)
+ *   <Pairing top={5} bottom={5} marks={['1', '2', '3', '4', '5']} />      아래 칸에 글자를 적는다(세기). tops 는 위 칸의 글자
+ *   <Nest sets={[{ label: 'ℕ', items: ['1', '2'] }, { label: 'ℤ', items: ['0', '−1'] }]} />   안쪽부터 적는 겹친 모임
  *   <Base10 n={347} />                                    백 모눈 3, 십 막대 4, 낱개 7
  *   <AreaModel rows={[10, 4]} cols={[20, 3]} />           직사각형을 갈라 곱을 나눠 셈하기
  *   <FigRow>…</FigRow>                                    그림 여럿을 옆으로 나란히(좁으면 아래로 내려간다)
@@ -115,7 +116,7 @@ export function DotGrid({
 }
 
 /** 두 줄의 것을 하나씩 짝짓는다. 짝이 없는 것은 테두리만 그린다 */
-export function Pairing({ top, bottom, topLabel, bottomLabel, marks, gap = 30 }: { top: number; bottom: number; topLabel?: string; bottomLabel?: string; marks?: string[]; gap?: number }) {
+export function Pairing({ top, bottom, topLabel, bottomLabel, marks, tops, gap = 30 }: { top: number; bottom: number; topLabel?: string; bottomLabel?: string; marks?: string[]; tops?: string[]; gap?: number }) {
   const n = Math.max(top, bottom);
   const pairs = Math.min(top, bottom);
   const padL = topLabel || bottomLabel ? 44 : 10;
@@ -127,9 +128,18 @@ export function Pairing({ top, bottom, topLabel, bottomLabel, marks, gap = 30 }:
       {Array.from({ length: pairs }, (_, i) => (
         <line key={`p${i}`} x1={x(i)} x2={x(i)} y1={26} y2={60} className="nf-pair" />
       ))}
-      {Array.from({ length: top }, (_, i) => (
-        <circle key={`a${i}`} cx={x(i)} cy={18} r={8} fill={i < pairs ? paint(0) : 'none'} stroke={paint(0)} strokeWidth={1.6} />
-      ))}
+      {Array.from({ length: top }, (_, i) =>
+        tops ? (
+          <g key={`a${i}`}>
+            <rect x={x(i) - 12} y={6} width={24} height={20} rx={10} fill={paint(0)} fillOpacity={i < pairs ? 0.2 : 0} stroke={paint(0)} strokeWidth={1.4} />
+            <text x={x(i)} y={20.5} textAnchor="middle" className="pl-label">
+              {mathLabel(tops[i] ?? '')}
+            </text>
+          </g>
+        ) : (
+          <circle key={`a${i}`} cx={x(i)} cy={18} r={8} fill={i < pairs ? paint(0) : 'none'} stroke={paint(0)} strokeWidth={1.6} />
+        ),
+      )}
       {Array.from({ length: bottom }, (_, i) =>
         marks ? (
           <g key={`b${i}`}>
@@ -552,6 +562,53 @@ export function FracArea({ rows, cols, size = 150 }: { rows: [number, number]; c
       <text x={padL - 8} y={padT + (rn * ch) / 2 + 4.5} textAnchor="end" className="pl-label" style={{ fill: paint(1) }}>
         {mathLabel(`${rn}/${rd}`)}
       </text>
+    </svg>
+  );
+}
+
+/**
+ * 겹쳐 있는 모임. sets 는 가장 안쪽 것부터 적는다. 모임마다 이름(label)과, 그 모임에서 처음 나오는 수(items)를 적는다.
+ * 안쪽 모임의 수는 바깥 모임에도 든다는 것이 상자의 겹침으로 보인다.
+ */
+export function Nest({ sets, band = 58 }: { sets: { label: string; items: string[] }[]; band?: number }) {
+  const n = sets.length;
+  const m = 7; // 상자 사이의 틈
+  const head = 20; // 이름 줄의 높이
+  const line = 19; // 수 한 줄의 높이
+  const rowsMax = Math.max(...sets.map((s) => s.items.length), 1);
+  const innerW = band + 6;
+  const innerH = head + rowsMax * line + 6;
+  const W = 2 + (n - 1) * m + innerW + (n - 1) * (band + m) + 2;
+  const H = 2 + (n - 1) * (m + head) + innerH + (n - 1) * m + 2;
+  const body: ReactNode[] = [];
+  for (let i = n - 1; i >= 0; i--) {
+    const k = n - 1 - i; // 바깥에서 몇 번째인가
+    const left = 2 + k * m;
+    const top = 2 + k * (m + head);
+    const right = 2 + (n - 1) * m + innerW + i * (band + m);
+    const bottom = 2 + (n - 1) * (m + head) + innerH + i * m;
+    const set = sets[i];
+    if (!set) continue;
+    body.push(<rect key={`r${i}`} x={left} y={top} width={right - left} height={bottom - top} rx={9} fill={paint(i)} fillOpacity={0.09} stroke={paint(i)} strokeWidth={1.4} />);
+    body.push(
+      <text key={`l${i}`} x={left + 9} y={top + 15} className="pl-label nf-setname" style={{ fill: paint(i) }}>
+        {set.label}
+      </text>,
+    );
+    // 이 모임에서 처음 나오는 수: 안쪽 상자의 오른쪽 띠(가장 안쪽은 상자 안)에 세로로 적는다
+    const cx = i === 0 ? left + innerW / 2 : right - (band + m) / 2;
+    const baseY = 2 + (n - 1) * (m + head) + head + 13;
+    set.items.forEach((item, j) => {
+      body.push(
+        <text key={`i${i}-${j}`} x={cx} y={baseY + j * line} textAnchor="middle" className="pl-label">
+          {mathLabel(item)}
+        </text>,
+      );
+    });
+  }
+  return (
+    <svg className="pl nf" viewBox={`0 0 ${W} ${H}`} width={W} role="img">
+      {body}
     </svg>
   );
 }

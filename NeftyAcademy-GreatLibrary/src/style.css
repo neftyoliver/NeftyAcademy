@@ -189,3 +189,4 @@ mtable.tex-sm > mtr > mtd { padding: 0.05em 0.2em; }
 .pl text.nf-legend { font-size: 11.5px; fill: var(--bf-muted); }
 .nf-branch { stroke: var(--bf-muted); stroke-width: 1.2; }
 .bf-figure-body .nf-bar + .nf-bar { margin-top: 5px; }
+.pl text.nf-setname { font-size: 14px; font-weight: 700; }

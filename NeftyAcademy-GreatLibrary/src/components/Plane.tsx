@@ -264,12 +264,28 @@ export function Curve({ f, from, to, color = 0, dashed, n = 240 }: { f: (x: numb
   return <path d={pathOf(points, view)} className="pl-curve" stroke={paint(color)} strokeDasharray={dashed ? '5 4' : undefined} clipPath={`url(#${view.clip})`} />;
 }
 
-/** 매개변수 곡선 t ↦ (x, y) */
-export function Param({ f, from, to, color = 0, dashed, n = 240 }: { f: (t: number) => Pt; from: number; to: number; color?: Color; dashed?: boolean; n?: number }) {
+/** 매개변수 곡선 t ↦ (x, y). arrow: 끝에 화살촉 */
+export function Param({ f, from, to, color = 0, dashed, arrow, n = 240 }: { f: (t: number) => Pt; from: number; to: number; color?: Color; dashed?: boolean; arrow?: boolean; n?: number }) {
   const view = useView();
   const points: Pt[] = [];
   for (let i = 0; i <= n; i++) points.push(f(from + ((to - from) * i) / n));
-  return <path d={pathOf(points, view)} className="pl-curve" stroke={paint(color)} strokeDasharray={dashed ? '5 4' : undefined} clipPath={`url(#${view.clip})`} />;
+  if (!arrow) return <path d={pathOf(points, view)} className="pl-curve" stroke={paint(color)} strokeDasharray={dashed ? '5 4' : undefined} clipPath={`url(#${view.clip})`} />;
+  // 화살촉 밑으로 선이 삐져나오지 않게, 끝에서 5px 안쪽의 점들은 그리지 않는다
+  const tip = f(to);
+  const far = (p: Pt) => Math.hypot(view.sx(p[0]) - view.sx(tip[0]), view.sy(p[1]) - view.sy(tip[1])) >= 5;
+  let last = n - 1;
+  for (; last > 1; last--) {
+    const p = points[last];
+    if (p && far(p)) break;
+  }
+  const body = points.slice(0, last + 1);
+  const back = body[body.length - 1] ?? tip;
+  return (
+    <g>
+      <path d={pathOf(body, view)} className="pl-curve" stroke={paint(color)} strokeDasharray={dashed ? '5 4' : undefined} clipPath={`url(#${view.clip})`} />
+      <path d={arrowHead(view.sx(back[0]), view.sy(back[1]), view.sx(tip[0]), view.sy(tip[1]))} fill={paint(color)} />
+    </g>
+  );
 }
 
 /** 곡선 아래(또는 두 곡선 사이)의 넓이를 칠한다. g 를 적지 않으면 x축까지 */

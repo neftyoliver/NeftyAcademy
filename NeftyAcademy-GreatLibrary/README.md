@@ -158,9 +158,9 @@ $$
 | 파일 | 들어 있는 것 |
 | --- | --- |
 | `components/MathBox.tsx` | `Def`(정의), `Thm`(정리), `Proof`(증명), `Ex`(예제), `Sol`(풀이), `Prob`·`Hint`·`Ans`(문제집) |
-| `components/Plane.tsx` | 좌표평면 `Plane`과 그 안에 넣는 `Curve`, `Dot`, `Seg`, `Vec`, `Line`, `Poly`, `Rect`, `Circle`, `Angle`, `Area`, `Label`, `Guide` |
+| `components/Plane.tsx` | 좌표평면 `Plane`과 그 안에 넣는 `Curve`, `Param`, `Dot`, `Seg`, `Vec`, `Line`, `Poly`, `Rect`, `Circle`, `Angle`, `Area`, `Label`, `Guide` |
 | `components/NumLine.tsx` | 수직선 `NumLine`(점, 구간, 뜀, 이름) |
-| `components/NumberFigs.tsx` | 점의 배열 `DotGrid`, 짝짓기 `Pairing`, 자릿값 블록 `Base10`, 넓이 모형 `AreaModel`, 나란히 놓기 `FigRow` |
+| `components/NumberFigs.tsx` | 점의 배열 `DotGrid`, 짝짓기 `Pairing`, 자릿값 블록 `Base10`, 넓이 모형 `AreaModel`, 둘씩 묶기 `Pairs`, 체스판 `Checker`, 소수의 체 `Sieve`, 소인수 나무 `FactorTree`, 호제법 직사각형 `EuclidRect`, 분수 막대 `FracBar`, 분수의 곱 `FracArea`, 겹친 모임 `Nest`, 나란히 놓기 `FigRow` |
 
 곡선은 함수를 그대로 넘긴다: `<Plane x={[-3, 3]} y={[-1, 5]}><Curve f={(x) => x * x} /></Plane>`. 쓰는 법은 파일마다 머리말에 있다.
 
