@@ -1,0 +1,147 @@
+import { Figure, Note } from 'neftyacademy-paragons-bookshelf';
+import { Scope } from '../../components/Scope';
+import { srcPulse, srcPwl, srcSin } from './data/nl-sources';
+
+export const summary = '값 자리에 함수를 적는다. PULSE의 일곱 숫자, 변을 0으로 적는 함정, SIN과 PWL, 동작점에서의 값';
+export const terms = ['PULSE', 'SIN', 'PWL'];
+
+전압원의 값 자리에 숫자 대신 함수를 적으면 시간에 따라 변하는 신호원이 됩니다. 네모파를 내는 `PULSE`, 사인파를 내는 `SIN`, 점을 이어 그리는 `PWL`의 셋이면 이 책의 회로를 모두 몰 수 있습니다. 전류원에도 같은 함수를 같은 꼴로 적습니다.
+
+## 세 가지 파형
+
+```spice
+세 가지 신호원
+Va a 0 PULSE(0 3.3 0.5m 1u 1u 499u 1m)
+Vb b 0 SIN(1.65 1.65 1k)
+Vc c 0 PWL(0 0 1m 0 1.2m 3.3
++ 3m 3.3 4m 0)
+.tran 1u 5m
+.meas tran period
++ TRIG v(a) VAL=1.65 RISE=1
++ TARG v(a) VAL=1.65 RISE=2
+.meas tran thigh
++ TRIG v(a) VAL=1.65 RISE=1
++ TARG v(a) VAL=1.65 FALL=1
+.meas tran sinmax MAX v(b)
+.meas tran sinmin MIN v(b)
+.meas tran pwl20 FIND v(c) AT=2m
+.meas tran pwl35 FIND v(c) AT=3.5m
+.meas tran pwl45 FIND v(c) AT=4.5m
+.end
+```
+
+```text
+$ ngspice -b sources.cir
+period = 1.000000e-03 targ= 1.500500e-03 trig= 5.005000e-04
+thigh  = 5.000000e-04 targ= 1.000500e-03 trig= 5.005000e-04
+sinmax = 3.299999e+00 at= 4.250200e-03
+sinmin = 1.302788e-06 at= 1.750200e-03
+pwl20  = 3.300000e+00
+pwl35  = 1.650000e+00
+pwl45  = 0.000000e+00
+```
+
+<Figure caption="세 신호원이 낸 전압. 위에서부터 PULSE, SIN, PWL이고 가로 한 칸이 0.5ms다">
+  <Scope tdiv={5e-4} dt={5e-6} traces={[{ name: 'a PULSE', data: srcPulse, vdiv: 2, pos: 2 }, { name: 'b SIN', data: srcSin, vdiv: 2, pos: -0.5 }, { name: 'c PWL', data: srcPwl, vdiv: 2, pos: -3 }]} />
+</Figure>
+
+- **값 자리에 함수 이름과 숫자들을 적는다**: 숫자는 차례로 뜻이 정해져 있습니다. 괄호는 빈칸과 같은 구실이라 빼고 적어도 읽힙니다
+- **긴 줄은 `+`로 이었다**: 첫 칸이 `+`인 줄은 윗줄에 이어집니다. `PWL`의 짝이 많거나 `.meas`가 길 때 이렇게 나눠 적습니다
+- **`.tran 1u 5m`**: 1µs 간격으로 5ms 동안 풀라는 뜻입니다([「과도 해석 (.tran)」](#/read/circuit-sim/an-tran))
+- **`.meas`는 파형에서 숫자를 뽑는다**: 그림을 보지 않고도 파형이 내가 적은 대로인지 확인할 수 있습니다. 쓰는 법은 [「.meas로 숫자 뽑기」](#/read/circuit-sim/an-meas)에서 봅니다
+
+## PULSE: 네모파
+
+| 차례 | 이름 | 뜻 | 위의 값 |
+| --- | --- | --- | --- |
+| 1 | V1 | 처음 전압 | 0 |
+| 2 | V2 | 펄스의 전압 | 3.3 |
+| 3 | TD | 시작하기까지 기다리는 시간 | 0.5m |
+| 4 | TR | 오르는 데 걸리는 시간 | 1u |
+| 5 | TF | 내리는 데 걸리는 시간 | 1u |
+| 6 | PW | 펄스의 전압에 머무는 시간 | 499u |
+| 7 | PER | 주기 | 1m |
+
+- **주기는 1ms다**: `period`가 1.000ms로 나왔습니다. 1kHz입니다
+- **절반 높이에서 잰 폭은 PW보다 길다**: `thigh`는 0.5ms입니다. 오르는 변의 절반과 내리는 변의 절반이 더해져 499µs + 1µs가 됩니다. 듀티 50%를 꼭 맞추려면 이렇게 PW에서 변의 시간을 뺍니다
+- **한 번의 계단**: 주기를 해석 시간보다 길게 적으면 한 번만 오릅니다. `PULSE(0 5 1m 1u 1u 1 2)`는 1ms에 5V로 올라 그대로 있습니다. 전원을 켜는 순간을 이렇게 흉내 냅니다
+- **뒤집힌 펄스**: V1에 3.3, V2에 0을 적으면 평소에 HIGH이다가 LOW로 내려가는 펄스가 됩니다
+
+## 변의 시간을 0으로 적으면
+
+```spice
+PULSE의 변을 0으로 적으면
+V1 in 0 PULSE(0 3.3 0 0 0 0.5m 1m)
+.tran 10u 3m
+.meas tran trise
++ TRIG v(in) VAL=0.33 RISE=2
++ TARG v(in) VAL=2.97 RISE=2
+.meas tran thigh
++ TRIG v(in) VAL=1.65 RISE=2
++ TARG v(in) VAL=1.65 FALL=2
+.end
+```
+
+```text
+$ ngspice -b zero-edge.cir
+trise = 8.000000e-06 targ= 1.009000e-03 trig= 1.001000e-03
+thigh = 5.100000e-04 targ= 1.515000e-03 trig= 1.005000e-03
+```
+
+- **0은 "가장 빠르게"가 아니다**: TR과 TF를 0으로 적거나 빼면 `.tran`의 첫 숫자가 그 자리에 들어갑니다. 여기서는 10µs입니다. 10%에서 90%까지 오르는 데 8µs가 걸렸습니다
+- **듀티가 달라진다**: 0.5ms를 적었는데 절반 높이에서 잰 폭은 0.51ms입니다
+- **같은 줄이 다른 파형이 된다**: `.tran 50u 3m`으로만 바꿔 돌리면 변이 50µs로 늘어 `trise`가 40µs, `thigh`가 0.55ms가 됩니다. 해석의 줄을 고쳤는데 신호가 달라지는 것입니다
+- **변의 시간은 늘 적는다**: 이 책에서는 주기의 천분의 일쯤을 적습니다
+
+## SIN과 PWL
+
+- **`SIN`의 세 숫자**: 가운데 전압, 진폭, 주파수입니다. 그 뒤로 시작을 늦추는 시간, 줄어드는 빠르기, 위상을 더 적을 수 있고 빼면 0입니다
+- **진폭은 가운데에서 꼭대기까지다**: 0V와 3.3V 사이를 오가게 하려면 가운데 1.65, 진폭 1.65를 적습니다. `sinmax`와 `sinmin`이 3.3V와 0V로 나왔습니다. 진폭에 3.3을 적으면 −1.65V에서 4.95V까지 오갑니다
+- **`PWL`은 시각과 전압의 짝을 차례로 적는다**: 짝과 짝 사이는 곧은 선으로 잇습니다. 2ms에서는 3.3V이고, 3ms와 4ms의 한가운데인 3.5ms에서는 1.65V입니다
+- **마지막 짝 뒤로는 그 전압에 머문다**: 4.5ms에서 0V입니다
+- **되풀이하려면 `r=0`을 붙인다**: `PWL(0 0 1m 3.3 2m 0) r=0`은 2ms짜리 세모 모양을 처음부터 되풀이합니다. 돌려 보면 2.5ms에 1.65V, 3ms에 3.3V입니다
+- **`PWL`의 쓸모**: 전원이 천천히 올라오는 모습, 단추를 눌렀다 떼는 모습처럼 한 번뿐인 일을 그릴 때 씁니다
+
+## 동작점에서의 값
+
+```spice
+동작점은 시각 0의 값을 쓴다
+Va a 0 PULSE(3.3 0 1m 1u 1u 1m 2m)
+Vb b 0 SIN(1.65 1.65 1k)
+Vc c 0 PWL(0 2.5 1m 2.5 2m 0)
+Vd d 0 DC 1 SIN(0 0.5 1k)
+.op
+.end
+```
+
+```text
+$ ngspice -b time-zero.cir
+Note: vd: dc value used for op instead of transient time=0 value.
+d           1.000000e+00
+c           2.500000e+00
+b           1.650000e+00
+a           3.300000e+00
+```
+
+- **동작점은 함수의 시각 0의 값을 쓴다**: `PULSE`는 처음 전압인 3.3V, `SIN`은 가운데 전압인 1.65V, `PWL`은 첫 짝의 전압인 2.5V입니다
+- **`DC`를 따로 적으면 그 값이 쓰인다**: `DC 1 SIN(0 0.5 1k)`는 동작점에서 1V이고, ngspice가 그렇게 했다고 알려 줍니다. 숫자 하나만 적은 `V1 in 0 5`는 `DC 5`를 줄여 적은 것입니다
+- **과도 해석은 함수만 쓴다**: 회로가 함수의 시각 0의 값으로 자리 잡은 상태에서 시간이 흐르기 시작합니다. `DC 1 SIN(0 0.5 1k)`를 과도 해석으로 돌리면 `DC`의 1V는 쓰이지 않아서, 0V에서 출발해 −0.5V와 0.5V 사이를 오갑니다. 1V 위에 얹으려면 `SIN`의 가운데 전압에 1을 적습니다
+- **`AC 1`은 주파수 훑기에서만 쓰인다**: `V1 in 0 DC 1.65 AC 1`처럼 함께 적습니다([「주파수 훑기 (.ac)와 보드 선도」](#/read/circuit-sim/an-ac))
+- **LTspice도 숫자의 차례가 같다**: LTspice의 도움말은 `PULSE`와 `PWL`을 같은 차례로 적고, 사인파는 `SINE`이라는 이름으로 적습니다. `PWL`을 되풀이하는 법만은 `r=0`이 아니라 `REPEAT`와 `ENDREPEAT`로 적는다고 되어 있습니다
+
+<Note>
+이 쪽의 넷리스트 셋과 그림은 ngspice 42로 돌린 결과이고, 글머리에 적은 숫자들(괄호를 뺀 `PULSE`, 한 번의 계단, `.tran 50u`로 바꾼 결과, 진폭 3.3의 사인파, `r=0`을 붙인 `PWL`, `DC`와 `SIN`을 함께 적은 전원의 과도 해석)도 따로 돌려 확인했습니다. 전압과 주파수는 제가 고른 값입니다. `sinmax`가 3.3에 꼭 맞지 않는 것은 사인파의 꼭대기가 시뮬레이터가 푼 시각들 사이에 있기 때문입니다. LTspice의 이야기는 Analog Devices의 글과 도움말에서 옮긴 것이고, 제가 돌려 보지는 못했습니다.
+</Note>
+
+## 정리
+
+- 전압원과 전류원의 값 자리에 `PULSE`, `SIN`, `PWL`을 적으면 시간에 따라 변하는 신호원이 된다
+- `PULSE`의 오르고 내리는 시간을 0으로 적거나 빼면 `.tran`의 간격이 그 자리에 들어가 파형이 달라진다. 늘 직접 적는다
+- 동작점과 과도 해석의 출발은 함수의 시각 0의 값을 쓰고, `DC`를 따로 적으면 동작점에서 그 값이 쓰인다
+
+## 참고 문서
+
+- [ngspice: User's Manual(독립 전압원과 전류원의 절: PULSE, SIN, EXP, PWL의 숫자 차례와 기본값, 동작점에서 시각 0의 값을 쓴다는 것)](https://ngspice.sourceforge.io/docs/ngspice-html-manual/manual.xhtml)
+- [Analog Devices: LTspice: Generating Triangular & Sawtooth Waveforms(LTspice에서 PULSE에 적는 숫자의 차례)](https://www.analog.com/en/resources/technical-articles/ltspice-generating-triangular-sawtooth-waveforms.html)
+- [Analog Devices: LTspice How-to: Defining Piecewise Linear Functions for Voltage and Current Sources(PWL의 짝, REPEAT와 ENDREPEAT로 되풀이하기)](https://www.analog.com/en/resources/technical-articles/ltspice-piecewise-linear-functions-for-voltage-current-sources.html)
+- [LTspice Help: V. Voltage Source(PULSE와 SINE의 숫자 차례와 이름)](https://ltspicehelpmanual.azurewebsites.net/VVoltageSource.htm)
