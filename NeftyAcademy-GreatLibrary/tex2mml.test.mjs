@@ -59,6 +59,19 @@ test('빈칸: 맨 앞이나 관계 뒤의 이항 연산자는 부호다', () => 
   assert.equal(inner('(-x)'), '<mo lspace="0" rspace="0" stretchy="false">(</mo><mo lspace="0" rspace="0">−</mo><mi>x</mi><mo lspace="0" rspace="0" stretchy="false">)</mo>');
 });
 
+test('빈칸: 세로줄 | 은 여는 것과 닫는 것을 앞뒤로 가린다', () => {
+  const minus = (tex) => [...inner(tex).matchAll(/<mo lspace="([^"]*)" rspace="[^"]*">−<\/mo>/g)].map((m) => m[1]);
+  // 절댓값 안의 맨 앞 빼기는 부호다
+  assert.deepEqual(minus('|-3|'), ['0']);
+  assert.deepEqual(minus('2|-x|'), ['0']);
+  // 닫는 세로줄 뒤의 빼기는 이항 연산자다
+  assert.deepEqual(minus('|a|-|b|'), [MED]);
+  assert.deepEqual(minus('||a|-|b||'), [MED]);
+  // 이웃한 두 절댓값: 둘째도 다시 여는 것으로 읽는다
+  assert.deepEqual(minus('|a||-b|'), ['0']);
+  assert.deepEqual(minus('-|-a|'), ['0', '0']);
+});
+
 test('빈칸: 첨자 안에서는 이항과 관계의 빈칸을 뺀다', () => {
   assert.equal(inner('x^{n+1}'), '<msup><mi>x</mi><mrow><mi>n</mi><mo lspace="0" rspace="0">+</mo><mn>1</mn></mrow></msup>');
 });

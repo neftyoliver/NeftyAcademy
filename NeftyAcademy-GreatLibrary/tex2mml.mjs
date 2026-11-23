@@ -16,6 +16,7 @@
  *   위아래         x^2, a_n, x_i^2, f', \frac \dfrac \tfrac \binom, \sqrt[n]{x}
  *   큰 연산자      \sum \prod \int \lim \max … (따로 놓는 수식에서는 위아래에, 글 안에서는 옆에 붙는다)
  *   괄호           ( ) [ ] \{ \} \langle \rangle \lvert \rvert \lfloor \rceil, \left … \middle … \right, \big \Big \bigg \Bigg
+ *                  절댓값은 |x| 로 적으면 된다. 여는 | 와 닫는 | 는 앞뒤를 보고 가린다(|-3| 의 빼기는 부호가 된다)
  *   글꼴           \mathrm \mathbf \mathbb \mathcal \mathfrak \mathsf \mathtt \bm, \text \textbf \textit, \operatorname
  *   위에 얹는 것   \hat \bar \vec \dot \ddot \tilde \overline \underline \overrightarrow \overbrace \underbrace \overset \underset
  *   여러 줄        aligned, gathered, cases, matrix pmatrix bmatrix vmatrix Vmatrix, array
@@ -409,8 +410,10 @@ class Parser {
       case '!':
       case '?':
         return { k: 'mo', cls: 'close', text: ch };
-      case '/':
       case '|':
+        // 여는 것인지 닫는 것인지는 줄을 쓸 때 앞뒤를 보고 정한다(classes)
+        return { k: 'mo', cls: 'ord', text: ch, bar: true };
+      case '/':
       case '.':
       case '@':
       case '"':
@@ -659,6 +662,17 @@ function one(nodes, ctx) {
 function classes(nodes) {
   const live = nodes.filter((n) => !(n.k === 'space') && !n.skip);
   const cls = live.map((n) => [n.lc ?? n.cls, n.rc ?? n.cls]);
+  // 세로줄 | 는 글자만으로는 여는 것인지 닫는 것인지 알 수 없다. 앞이 비었거나 연산자, 관계, 여는 괄호, 구두점이면 여는 것으로 보고,
+  // 그 밖에는 열린 세로줄이 있으면 닫는 것으로, 없으면 여는 것으로 본다. 그래야 |-3| 과 2|-x| 의 빼기가 부호로 읽힌다
+  // (TeX 는 이럴 때 \lvert, \rvert 를 쓰라고 한다. 여기서는 그냥 | 로 적어도 되게 했다)
+  let bars = 0;
+  for (let i = 0; i < live.length; i++) {
+    if (!live[i].bar) continue;
+    const prev = i > 0 ? cls[i - 1][1] : undefined;
+    const open = prev === undefined || ['bin', 'op', 'rel', 'open', 'punct'].includes(prev) || bars === 0;
+    bars += open ? 1 : -1;
+    cls[i] = open ? ['open', 'open'] : ['close', 'close'];
+  }
   for (let i = 0; i < live.length; i++) {
     if (cls[i][0] !== 'bin') continue;
     const prev = i > 0 ? cls[i - 1][1] : undefined;

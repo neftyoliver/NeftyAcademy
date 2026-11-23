@@ -526,6 +526,7 @@ operations       셈 기호
   sy-equals        등호
   sy-inequality    부등호
   sy-root          근호
+  sy-abs           절댓값 기호
   sy-exponent      지수 표기
   sy-parentheses   괄호
 algebra          대수의 기호
