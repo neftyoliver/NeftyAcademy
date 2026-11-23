@@ -8,8 +8,9 @@
  *  - vdiv: 그 채널의 V/칸. pos: 0V 선을 가운데에서 몇 칸 위에 둘지(음수면 아래)
  *  - trigger: 트리거 레벨 표시(첫 채널 기준). cursorsT/cursorsV: 세로 커서 둘(초), 가로 커서 둘(V, 첫 채널 기준)
  *  - triggerAt: 트리거 점의 시각(초). 화면 위쪽의 T 표시와 세로 점선으로 그린다
+ *  - logic: 0과 1만 가진 줄(로직 분석기의 채널)이라는 표시. vdiv를 1로 두면 한 칸 높이로 그려지고, 범례에 V/칸을 적지 않는다
  */
-type Trace = { name: string; data: number[]; vdiv: number; pos?: number };
+type Trace = { name: string; data: number[]; vdiv: number; pos?: number; logic?: boolean };
 type Props = {
   traces: Trace[];
   dt: number;
@@ -87,7 +88,7 @@ export function Scope({ traces, dt, tdiv, t0 = 0, trigger, triggerAt, cursorsT, 
       <div style={{ fontSize: 14, lineHeight: 1.7, marginTop: 4 }}>
         {traces.map((tr, k) => (
           <span key={tr.name} style={{ marginRight: 14, whiteSpace: 'nowrap' }}>
-            <span style={{ color: COLORS[k % COLORS.length] }}>■</span> {tr.name} {eng(tr.vdiv, 'V')}/칸
+            <span style={{ color: COLORS[k % COLORS.length] }}>■</span> {tr.name}{tr.logic ? '' : ` ${eng(tr.vdiv, 'V')}/칸`}
           </span>
         ))}
         <span style={{ marginRight: 14, whiteSpace: 'nowrap' }}>가로 {eng(tdiv, 's')}/칸</span>

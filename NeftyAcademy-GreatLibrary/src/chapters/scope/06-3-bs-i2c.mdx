@@ -1,0 +1,116 @@
+import { Figure, Note } from 'neftyacademy-paragons-bookshelf';
+import { Scope } from '../../components/Scope';
+import { sclEdge, sclNo, sclOk, sdaNo, sdaOk } from './data/bs-i2c';
+
+export const summary = '두 선에서 시작, 주소, ACK, 정지 찾기, 대답이 없는 화면, 오르는 변의 시간 재기, 잡는 설정';
+export const terms = [];
+
+I2C는 선 둘로 여러 장치와 말합니다. SCL이 박자를 치고 SDA가 값을 나릅니다. 두 선을 채널 둘에 나란히 물리면, 누구를 불렀고 그 장치가 대답했는지를 화면에서 읽을 수 있습니다.
+
+## 두 선의 약속
+
+<Figure caption="주소 0x48에 쓰기를 알리는 바이트 하나. 위가 SCL, 아래가 SDA다. T는 시작 조건이고, 세로 커서 사이가 아홉째 클럭이다">
+  <Scope tdiv={2e-5} dt={1e-7} traces={[{ name: 'CH1 SDA', data: sdaOk, vdiv: 1, pos: -3.7 }, { name: 'CH2 SCL', data: sclOk, vdiv: 1, pos: 0.4 }]} trigger={{ level: 1.65 }} triggerAt={2e-5} cursorsT={[1.065e-4, 1.165e-4]} />
+</Figure>
+
+- **쉴 때는 둘 다 HIGH다**: 두 선은 풀업 저항이 올려 두고, 장치들은 LOW로 당기기만 합니다. 그래서 오르는 변만 둥급니다([「RC 충전 곡선과 시정수」](#/read/scope/sh-rc))
+- **시작 조건**: SCL이 HIGH인 동안 SDA가 내려갑니다. 그림의 T 자리입니다
+- **SCL의 봉우리마다 SDA를 읽는다**: SDA는 SCL이 LOW인 동안에만 바뀌고, SCL이 HIGH인 동안에는 가만히 있습니다. 봉우리 여덟 개 아래의 SDA를 차례로 읽으면 1, 0, 0, 1, 0, 0, 0, 0입니다
+- **높은 비트부터, 주소 일곱 비트와 방향 한 비트**: 앞의 일곱 비트 1001000이 주소 0x48이고, 여덟째 비트 0은 쓰기입니다. 읽기면 1입니다
+- **아홉째 봉우리는 대답이다**: 보낸 쪽이 SDA를 놓고, 받은 쪽이 LOW로 당기면 ACK입니다. 커서 사이의 10µs가 클럭 한 주기이므로 이 버스는 100kHz로 돕니다
+- **정지 조건**: SCL이 HIGH인 동안 SDA가 올라갑니다. 그림의 끝에서 SCL이 먼저 오르고 SDA가 뒤따라 오릅니다
+
+## 프로그램으로 읽어 보기
+
+```python
+def bus(byte_list, acks):                # (SCL, SDA)의 표본들. 비트 하나에 표본 넷
+    s = [(1, 1), (1, 0)]                 # 쉬는 선, 그리고 시작 조건
+    for byte, ack in zip(byte_list, acks):
+        bits = [byte >> i & 1 for i in range(7, -1, -1)] + [0 if ack else 1]
+        for b in bits:
+            s += [(0, b), (1, b), (1, b), (0, b)]
+    return s + [(0, 0), (1, 0), (1, 1)]  # 정지 조건
+
+def decode(samples):
+    bits, first = [], True
+    for (c0, d0), (c1, d1) in zip(samples, samples[1:]):
+        if c0 and c1 and d0 != d1:       # SCL이 HIGH인 동안 SDA가 움직였다
+            print("시작" if d0 else "정지")
+            bits, first = [], True
+        elif not c0 and c1:              # SCL이 올라갈 때 SDA를 읽는다
+            bits.append(d1)
+        if len(bits) == 9:
+            byte = int("".join(map(str, bits[:8])), 2)
+            ack = "ACK" if bits[8] == 0 else "NACK"
+            if first:
+                way = "읽기" if byte & 1 else "쓰기"
+                print(f"0x{byte:02X}: 주소 0x{byte >> 1:02X}, {way}, {ack}")
+            else:
+                print(f"0x{byte:02X}: 데이터, {ack}")
+            bits, first = [], False
+
+decode(bus([0x90, 0x01], [True, True]))
+decode(bus([0x92], [False]))
+```
+
+```text
+시작
+0x90: 주소 0x48, 쓰기, ACK
+0x01: 데이터, ACK
+정지
+시작
+0x92: 주소 0x49, 쓰기, NACK
+정지
+```
+
+- **바이트로 보면 0x90이다**: 주소 0x48을 왼쪽으로 한 칸 밀고 방향 비트를 붙인 값입니다. 프로그램에는 0x48이라고 적었는데 화면에서 0x90이 읽힌다면 둘은 같은 것입니다
+- **SCL이 HIGH인 동안 SDA가 움직이면 조건이다**: 내려가면 시작, 올라가면 정지입니다. 데이터 비트는 그때 움직이지 않으므로 둘이 헷갈릴 일이 없습니다
+- **둘째 바이트부터는 데이터다**: 쓰기에서는 흔히 장치 안의 레지스터 번호가 먼저 옵니다([「시작, 주소, ACK, 정지」](#/read/i2c-dev/bs-frame))
+
+## 대답이 없을 때
+
+<Figure caption="주소 0x49를 불렀는데 아무도 대답하지 않은 화면. 세로 커서 사이의 아홉째 클럭에서 SDA가 HIGH에 머문다">
+  <Scope tdiv={2e-5} dt={1e-7} traces={[{ name: 'CH1 SDA', data: sdaNo, vdiv: 1, pos: -3.7 }, { name: 'CH2 SCL', data: sclNo, vdiv: 1, pos: 0.4 }]} trigger={{ level: 1.65 }} triggerAt={2e-5} cursorsT={[1.065e-4, 1.165e-4]} />
+</Figure>
+
+- **아홉째 봉우리에서 SDA가 HIGH다**: 아무도 당기지 않았다는 뜻이고 NACK이라고 부릅니다. 그 주소의 장치가 없거나, 전원이 꺼져 있거나, 선이 빠졌습니다([「응답이 없다」](#/read/i2c-dev/tr-nack))
+- **보낸 주소부터 읽는다**: 화면의 일곱 비트가 내가 뜻한 주소인지 확인합니다. 장치의 주소 핀을 다르게 묶으면 주소의 아래쪽 비트가 달라집니다
+- **NACK이 정상인 곳도 있다**: 읽기에서는 컨트롤러가 마지막 바이트를 받고 일부러 NACK을 보냅니다. 그만 읽겠다는 표시입니다
+- **LOW의 높이로 누가 당기는지 가린다**: 첫 그림에서 ACK의 LOW는 0.16V이고 나머지 LOW는 0.01V입니다. 장치 쪽에 직렬 저항이 있어서, 장치가 당길 때의 LOW가 조금 높습니다. 이 차이로 지금 누가 말하는 중인지를 압니다
+
+## 변과 높이
+
+<Figure caption="SCL의 오르는 변 하나를 500ns/칸으로 늘린 것. 가로 커서는 전원의 30%와 70%, 세로 커서는 변이 그 높이를 지나는 곳">
+  <Scope tdiv={5e-7} dt={1e-8} t0={2.9e-5} traces={[{ name: 'CH1 SCL', data: sclEdge, vdiv: 1, pos: -2 }]} cursorsT={[3.034e-5, 3.1136e-5]} cursorsV={[0.99, 2.31]} />
+</Figure>
+
+- **상승 시간을 커서로 잰다**: 가로 커서를 전원의 30%(0.99V)와 70%(2.31V)에 놓고, 변이 그 선들을 지나는 곳에 세로 커서를 놓습니다. 그림은 796ns입니다. 표준 모드의 한도 1000ns 안이지만 고속 모드의 300ns에는 들지 못합니다
+- **LOW가 충분히 낮은가**: LOW의 평평한 곳이 0.99V보다 넉넉히 아래에 있어야 합니다. 풀업이 너무 세면 LOW가 떠오릅니다([「논리 레벨과 문턱」](#/read/scope/bs-levels))
+- **SCL의 LOW가 유난히 길다**: 장치가 준비될 때까지 SCL을 붙들고 있는 것입니다. 규격이 허용하는 동작입니다([「클럭 스트레칭」](#/read/i2c-dev/bs-stretch))
+- **SDA가 LOW인 채로 멈춰 있다**: 어느 장치가 SDA를 놓지 않는 것입니다. 규격은 이럴 때 컨트롤러가 클럭을 아홉 번 보내 풀어 보라고 합니다([「버스가 붙들렸을 때」](#/read/i2c-dev/tr-stuck))
+
+## 잡는 설정
+
+- **트리거는 SDA의 내려가는 변**: 쉬는 선에서 가장 먼저 움직이는 것이 시작 조건의 SDA입니다. 일반 모드로 두고, 홀드오프를 대화 한 번보다 길게 줍니다([「홀드오프와 흐르는 화면 멈추기」](#/read/scope/tr-holdoff))
+- **가로는 클럭 한 주기가 반 칸**: 라즈베리파이의 I2C는 바꾸지 않으면 100kHz이고, 한 주기가 10µs입니다. 20µs/칸이면 주소 바이트와 ACK가 다섯 칸에 담깁니다
+- **두 채널을 같은 V/칸으로**: 위아래로 떼어 놓으면 봉우리와 그 아래의 SDA를 짝짓기 쉽습니다
+- **10배 프로브로**: 1배 프로브의 100pF는 선의 커패시턴스에 그대로 더해져 변을 더 눕힙니다([「프로브가 회로를 바꾼다」](#/read/scope/pb-loading))
+- **긴 대화는 로직 분석기로**: 화면 하나에는 두세 바이트가 담깁니다. 레지스터 여러 개를 읽고 쓰는 대화를 따라가는 일은 로직 분석기가 맡습니다([「로직 분석기를 쓸 때」](#/read/scope/bs-logic))
+
+<Note>
+세 그림은 ngspice 42로 돌린 결과입니다. 풀업 4.7kΩ, 선의 커패시턴스 200pF, 컨트롤러와 장치의 스위치 20Ω, 장치 쪽의 직렬 저항 220Ω은 제가 고른 값입니다. 직렬 저항이 없는 버스에서는 LOW의 높이 차이가 훨씬 작아서 가리기 어렵습니다. 규격의 숫자와 약속은 NXP의 UM10204에서 옮겼습니다. 장비를 찍은 화면이 아니라는 점은 앞 쪽들과 같습니다.
+</Note>
+
+## 정리
+
+- SCL이 HIGH인 동안 SDA가 내려가면 시작, 올라가면 정지다. 그 사이에서는 SCL의 봉우리마다 SDA를 읽는다
+- 첫 바이트는 주소 일곱 비트와 방향 한 비트다. 아홉째 봉우리에서 SDA가 LOW면 ACK, HIGH면 NACK이다
+- 오르는 변은 전원의 30%와 70% 사이를 지나는 시간을 커서로 재어 규격의 한도와 견준다
+
+## 참고 문서
+
+- [NXP: UM10204 I2C-bus specification and user manual(시작과 정지 조건, ACK, 클럭 스트레칭, 붙들린 버스 풀기, 상승 시간의 한도)](https://www.NXP.com/docs/en/user-guide/UM10204.pdf)
+- [Texas Instruments: SLVA704 Understanding the I2C Bus(높은 비트부터 보낸다는 것, SDA가 바뀌어도 되는 때, NACK이 나오는 경우)](https://www.ti.com/document-viewer/lit/html/SLVA704)
+- [Texas Instruments: SCPA063 How to Debug I2C(화면에 프레임 하나를 담기, 틀린 주소의 NACK, 30%에서 70%까지의 상승 시간)](https://edgeworker.ti.com/lit/pdf/scpa063)
+- [I2C-Bus.org: Serial Resistance And Debugging(직렬 저항이 있을 때 LOW의 높이로 당기는 장치를 가리는 것)](https://www.i2c-bus.org/i2c-primer/serial-resistances-and-debugging/)
+- [Raspberry Pi 펌웨어: overlays/README(i2c_arm_baudrate의 기본값 100000)](https://raw.githubusercontent.com/raspberrypi/firmware/master/boot/overlays/README)
