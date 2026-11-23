@@ -1,4 +1,5 @@
-import { Note } from 'neftyacademy-paragons-bookshelf';
+import { Figure, Note } from 'neftyacademy-paragons-bookshelf';
+import { Circuit } from '../../components/Circuit';
 
 export const summary = '첫 글자가 소자의 종류다. 전압원과 전류원의 방향, 전류의 부호, 동작점에서의 커패시터와 인덕터';
 export const terms = [];
@@ -22,6 +23,10 @@ export const terms = [];
 - **다른 글자들**: `D`는 다이오드, `Q`는 트랜지스터, `M`은 MOSFET, `X`는 여러 소자를 묶은 하위 회로입니다. 4장에서 씁니다([「다이오드와 .model」](#/read/circuit-sim/dv-diode))
 
 ## 전압원의 방향과 전류의 부호
+
+<Figure caption="전압원 둘이 든 회로. 넷리스트에 먼저 적은 마디가 +다. Vsense는 0V라서 mid와 a를 그대로 잇는다">
+  <Circuit spec="V 0,2 0,0 V1 5V; W 0,0 0.5,0; O 0.5,0 ^in; R 0.5,0 2,0 R1 1kΩ; O 2,0 ^mid; V 3.5,0 2,0 Vsense 0V; O 3.5,0 ^a; R 3.5,0 3.5,2 R2 2kΩ; W 3.5,0 5,0; R 5,0 5,2 R3 3kΩ; W 5,2 0,2; D 3.5,2; G 0,2" label="5볼트 전원 V1에서 마디 in, 1킬로옴 R1, 마디 mid, 0볼트 전압원 Vsense, 마디 a로 이어지고, a에서 2킬로옴 R2와 3킬로옴 R3이 나란히 접지로 가는 회로. Vsense의 플러스는 mid 쪽이다" />
+</Figure>
 
 ```spice
 전압원의 전류와, 전류를 재는 0V 전압원

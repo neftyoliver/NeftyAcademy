@@ -1,4 +1,5 @@
-import { Note } from 'neftyacademy-paragons-bookshelf';
+import { Figure, Note } from 'neftyacademy-paragons-bookshelf';
+import { Circuit } from '../../components/Circuit';
 
 export const summary = '분배기 하나를 넷리스트로 적어 돌리고 답을 읽는다. 오류 없이 틀린 답이 나오는 실수들';
 export const terms = [];
@@ -6,6 +7,12 @@ export const terms = [];
 앞 장에서는 넷리스트를 구경했습니다. 이번에는 처음부터 끝까지 직접 적습니다. 회로는 5V 신호를 3.3V 핀에 맞게 낮추는 저항 둘입니다. 파일을 만들어 돌리고 답을 읽은 다음, 처음 적을 때 흔히 하는 실수 넷을 일부러 해 봅니다. 넷 모두 ngspice가 멈추지 않고 틀린 답을 내놓습니다.
 
 ## 파일 한 개
+
+회로도에서 선으로 이어진 덩어리마다 이름을 붙이고, 소자마다 한 줄씩 적으면 넷리스트가 됩니다.
+
+<Figure caption="분배기의 회로도. 선으로 이어진 덩어리 셋에 in, out, 0이라는 이름을 붙였다">
+  <Circuit spec="V 0,2 0,0 V1 5V; W 0,0 1,0; O 1,0 ^in; R 1,0 3,0 R1 10kΩ; O 3,0 ^out; R 3,0 3,2 R2 20kΩ; W 3,2 0,2; O 1.5,2 ^0; G 0,2" label="5볼트 전원 V1의 위쪽이 마디 in이고, 10킬로옴 저항 R1을 지나 마디 out으로 가며, out에서 20킬로옴 저항 R2가 접지인 마디 0으로 이어지는 회로" />
+</Figure>
 
 ```spice
 5V를 3.3V 핀에 맞게 낮추는 분배기

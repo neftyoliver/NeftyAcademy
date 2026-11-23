@@ -1,0 +1,123 @@
+import { Figure, Note } from 'neftyacademy-paragons-bookshelf';
+import { Scope } from '../../components/Scope';
+import { parC1u, parC2u2, parC470n } from './data/an-param';
+
+export const summary = '.param으로 값에 이름을 붙이고, 저항과 온도와 커패시터의 값을 바꿔 가며 같은 해석을 되풀이한다';
+export const terms = ['alterparam'];
+
+회로를 한 번 돌리고 나면 곧 "이 값을 바꾸면 어떻게 되나"가 궁금해집니다. 값을 손으로 고쳐 다시 돌리는 대신, 값에 이름을 붙이고 그 값을 바꿔 가며 되풀이해 돌립니다.
+
+## 값에 이름 붙이기
+
+```spice
+값에 이름 붙이기: .param
+.param vcc=3.3 vf=1.8 iled=5m
+.param rled={(vcc-vf)/iled}
+V1 vcc 0 {vcc}
+R1 vcc a {rled}
+D1 a 0 RED
+.model RED D(IS=1e-18 N=1.9 RS=5)
+.op
+.end
+```
+
+```text
+$ ngspice -b param.cir
+a            1.801376e+00
+vcc          3.300000e+00
+v1#branch    -4.99541e-03
+...
+resistance   300
+```
+
+- **`.param 이름=값`**: 숫자에 이름을 붙입니다. 한 줄에 여럿을 적을 수 있습니다
+- **`{ }` 안에 식을 적는다**: 소자의 값 자리에 `{rled}`처럼 적으면 그 이름의 값이 들어갑니다. 식에는 사칙연산과 다른 이름을 쓸 수 있습니다. `rled`는 (3.3 − 1.8) ÷ 5mA인 300Ω이 되었습니다
+- **넷리스트에 까닭이 남는다**: 300이라는 숫자만 적으면 왜 300인지가 사라집니다. 식으로 적어 두면 "LED를 1.8V로 보고 5mA를 흘리려는 저항"이라는 것이 남습니다
+- **결과는 4.995mA다**: 5mA에 조금 못 미칩니다. LED의 전압이 어림한 1.8V가 아니라 1.801V이기 때문입니다
+
+## 저항과 온도는 .dc로 훑는다
+
+```spice
+온도에 따른 다이오드의 전압
+I1 0 a 1m
+D1 a 0 DSI
+.model DSI D(IS=1e-14)
+.dc temp -20 80 20
+.print dc v(a)
+.end
+```
+
+```text
+$ ngspice -b temperature.cir
+Index  temp-sweep    v(a)
+0      -2.00000e+01  7.374923e-01
+1      0.000000e+00  7.031332e-01
+2      2.000000e+01  6.675457e-01
+3      4.000000e+01  6.319837e-01
+4      6.000000e+01  5.961236e-01
+5      8.000000e+01  5.599514e-01
+```
+
+- **`.dc temp 처음 끝 걸음`**: 회로 전체의 온도를 바꿔 가며 동작점을 구합니다. 단위는 섭씨입니다
+- **다이오드의 전압은 온도가 오르면 내려간다**: 1mA를 흘린 다이오드가 −20°C에서 0.737V, 80°C에서 0.560V입니다. 1°C에 1.8mV쯤씩 내려갑니다
+- **온도를 하나로 정할 때**: `.options temp=85`나 `.temp 85`를 적습니다. 적지 않으면 27°C입니다. 출력의 `Doing analysis at TEMP = …` 줄에 쓰인 온도가 나옵니다
+- **저항도 같은 꼴이다**: `.dc R1 220 1k 10`은 `R1`의 값을 220Ω에서 1kΩ까지 10Ω씩 바꿉니다
+- **밖에 두는 회로는 온도를 훑어 본다**: 책상 위의 27°C에서만 맞는 회로가 아닌지, 겨울과 여름의 온도로 한 번씩 돌려 봅니다
+
+## 과도 해석을 값마다 되풀이하기
+
+```spice
+커패시터의 값을 바꿔 가며 과도 해석
+.param cval=1u
+V1 in 0 PULSE(0 3.3 0 1u 1u 1 2)
+R1 in out 1k
+C1 out 0 {cval}
+.control
+foreach c 470n 1u 2.2u
+  alterparam cval = $c
+  reset
+  tran 10u 10m
+  meas tran t63 when v(out)=2.086
+end
+.endc
+.end
+```
+
+```text
+$ ngspice -b sweep-c.cir
+t63 = 4.704966e-04
+t63 = 1.000500e-03
+t63 = 2.200503e-03
+```
+
+<Figure caption="커패시터를 470nF, 1µF, 2.2µF로 바꿔 가며 본 충전 곡선. 가로 점선은 0V와 63%인 2.086V">
+  <Scope tdiv={1e-3} dt={1e-5} traces={[{ name: '470nF', data: parC470n, vdiv: 1, pos: -2 }, { name: '1µF', data: parC1u, vdiv: 1, pos: -2 }, { name: '2.2µF', data: parC2u2, vdiv: 1, pos: -2 }]} cursorsV={[0, 2.086]} />
+</Figure>
+
+- **`.dc`는 동작점만 되풀이한다**: 과도 해석이나 주파수 훑기를 값마다 되풀이하려면 ngspice에서는 `.control` 블록을 씁니다
+- **`.control`과 `.endc` 사이는 차례로 시킬 일이다**: 넷리스트의 줄이 회로를 적는다면, 이 사이의 줄은 ngspice에게 내리는 명령입니다. 점을 떼고 `tran`, `meas`라고 적습니다. 자세한 것은 [「.control 블록」](#/read/circuit-sim/ng-control)에서 봅니다
+- **`foreach c 값들 … end`**: 값마다 사이의 줄들을 되풀이합니다. `$c`가 그때의 값입니다
+- **`alterparam`과 `reset`**: `.param`으로 붙인 이름의 값을 바꾸고, 회로를 다시 읽어 그 값이 소자에 들어가게 합니다. `reset`을 빼면 세 번 모두 1µF로 돌아서 `t63`이 셋 다 1.0005ms로 나옵니다. 오류는 없습니다
+- **결과**: 63%에 닿는 시각이 0.47ms, 1.0ms, 2.2ms입니다. 1kΩ에 커패시터의 값을 곱한 시정수 그대로입니다
+- **소자 하나의 값만 바꿀 때**: `alter R1 = 470`처럼 적습니다. 이때는 `reset`이 필요 없습니다
+
+## 프로그램마다 다른 곳
+
+- **LTspice는 `.step` 한 줄이다**: `.step param cval list 470n 1u 2.2u`라고 적으면 값마다 해석을 되풀이합니다. ngspice는 이 줄을 모릅니다([「무엇을 고를까」](#/read/circuit-sim/ls-choose))
+- **`.param`과 `{ }`는 같다**: 두 프로그램 모두 이 꼴을 씁니다. 값을 바꾸는 줄만 프로그램에 맞게 고치면 됩니다
+
+<Note>
+넷리스트 셋과 그림은 ngspice 42로 돌린 결과이고, `reset`을 뺀 경우, `.options temp=85`와 `.temp 85`, `alter`로 저항을 바꾸는 것도 따로 돌려 확인했습니다. 다이오드의 모델은 `IS`만 적고 나머지는 ngspice의 기본값(실리콘 다이오드에 맞는 값)을 쓴 것입니다. LTspice의 `.step`은 Analog Devices의 글에서 옮긴 것이고 제가 돌려 보지는 못했습니다.
+</Note>
+
+## 정리
+
+- `.param`으로 값에 이름을 붙이고 `{ }` 안에 식을 적는다. 값이 어디서 나왔는지가 넷리스트에 남는다
+- 저항과 온도는 `.dc`로 훑는다. 과도 해석을 값마다 되풀이하려면 `.control` 안에서 `foreach`, `alterparam`, `reset`을 쓴다
+- LTspice는 같은 일을 `.step` 한 줄로 한다. 넷리스트를 옮길 때 이 부분을 고쳐야 한다
+
+## 참고 문서
+
+- [ngspice 43 User's Manual(.param과 중괄호 식, 11.3.2 .dc의 저항과 온도 훑기, 11.1.1 .options의 TEMP)](https://ftp.fau.de/gentoo/distfiles/d4/ngspice-43-manual.pdf)
+- [ngspice: Tutorial: ngspice control language(.control 블록에서 해석을 되풀이하는 법)](https://ngspice.sourceforge.io/ngspice-control-language-tutorial.html)
+- [Analog Devices: Using the .STEP Directive to Perform Repeated Analysis(.step으로 값을 바꿔 가며 되풀이하는 법)](https://www.analog.com/en/resources/technical-articles/ltspice-using-the-step-command-to-perform-repeated-analysis.html)
