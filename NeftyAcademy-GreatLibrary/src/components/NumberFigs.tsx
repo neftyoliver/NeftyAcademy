@@ -14,6 +14,9 @@
  *   <Sieve />                                             에라토스테네스의 체(1부터 100까지)
  *   <FactorTree n={360} />                                소인수분해 나무. splits 로 쪼개는 방법을 고른다
  *   <EuclidRect a={21} b={15} />                          직사각형을 정사각형으로 채워 가는 호제법
+ *   <FracBar parts={4} shade={3} label="3/4" />           넷으로 나눈 띠에서 셋을 칠한다. 여럿을 이어 쓰면 아래로 쌓인다
+ *   <FracBar parts={4} shade={7} wholes={2} />            1보다 큰 분수는 띠를 여럿 놓는다
+ *   <FracArea rows={[2, 3]} cols={[4, 5]} />              분수의 곱: 정사각형을 가로세로로 나눠 겹치는 곳을 본다
  *
  * 색은 0~3(주황, 파랑, 초록, 보라). 이름표의 글은 Plane 의 mathLabel 규칙을 따른다(한 글자 로마자는 기울인다).
  */
@@ -480,6 +483,74 @@ export function EuclidRect({ a, b, width = 252 }: { a: number; b: number; width?
       </text>
       <text x={padL - 8} y={padT + (b * unit) / 2 + 4.5} textAnchor="end" className="pl-label">
         {mathLabel(String(b))}
+      </text>
+    </svg>
+  );
+}
+
+/**
+ * 분수의 띠. 띠 하나가 1이다. parts 조각으로 나누고 왼쪽부터 shade 조각을 칠한다.
+ *  - wholes: 띠의 수(1보다 큰 분수). sub: 조각 하나를 다시 몇으로 잘게 나누는지(점선)
+ *  - label: 오른쪽에 적는 글. 3/4 처럼 적는다
+ */
+export function FracBar({ parts, shade, wholes = 1, sub = 1, label, color = 0, width = 236 }: { parts: number; shade: number; wholes?: number; sub?: number; label?: string; color?: number; width?: number }) {
+  const gap = 8;
+  const bar = (width - gap * (wholes - 1)) / wholes;
+  const piece = bar / parts;
+  const h = 26;
+  const W = width + 4 + (label ? 52 : 0);
+  const body: ReactNode[] = [];
+  for (let w = 0; w < wholes; w++) {
+    const ox = 2 + w * (bar + gap);
+    for (let i = 0; i < parts; i++) {
+      const on = w * parts + i < shade;
+      body.push(<rect key={`${w}-${i}`} x={ox + i * piece} y={3} width={piece} height={h} fill={on ? paint(color) : 'none'} fillOpacity={0.34} stroke="currentColor" strokeWidth={1.1} />);
+      for (let k = 1; k < sub; k++) body.push(<line key={`${w}-${i}-${k}`} x1={ox + i * piece + (k * piece) / sub} x2={ox + i * piece + (k * piece) / sub} y1={3} y2={3 + h} className="nf-cut" />);
+    }
+  }
+  return (
+    <svg className="pl nf nf-bar" viewBox={`0 0 ${W} ${h + 6}`} width={W} role="img">
+      {body}
+      {label ? (
+        <text x={width + 12} y={3 + h / 2 + 4.5} className="pl-label">
+          {mathLabel(label)}
+        </text>
+      ) : null}
+    </svg>
+  );
+}
+
+/**
+ * 분수의 곱을 넓이로. 한 변이 1인 정사각형을 세로로 rows[1]줄, 가로로 cols[1]칸으로 나누고,
+ * 위에서 rows[0]줄과 왼쪽에서 cols[0]칸을 칠한다. 둘이 겹치는 곳이 곱이다.
+ */
+export function FracArea({ rows, cols, size = 150 }: { rows: [number, number]; cols: [number, number]; size?: number }) {
+  const [rn, rd] = rows;
+  const [cn, cd] = cols;
+  const padL = 40;
+  const padT = 24;
+  const cw = size / cd;
+  const ch = size / rd;
+  const W = padL + size + 6;
+  const H = padT + size + 6;
+  const cells: ReactNode[] = [];
+  for (let r = 0; r < rd; r++) {
+    for (let c = 0; c < cd; c++) {
+      const inRow = r < rn;
+      const inCol = c < cn;
+      const fill = inRow && inCol ? paint(3) : inRow ? paint(1) : inCol ? paint(0) : 'none';
+      cells.push(<rect key={`${r}-${c}`} x={padL + c * cw} y={padT + r * ch} width={cw} height={ch} fill={fill} fillOpacity={inRow && inCol ? 0.5 : 0.16} stroke="currentColor" strokeWidth={0.9} />);
+    }
+  }
+  return (
+    <svg className="pl nf" viewBox={`0 0 ${W} ${H}`} width={W} role="img">
+      {cells}
+      <rect x={padL} y={padT} width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.6} />
+      <text x={padL + (cn * cw) / 2} y={padT - 8} textAnchor="middle" className="pl-label" style={{ fill: paint(0) }}>
+        {mathLabel(`${cn}/${cd}`)}
+      </text>
+      <text x={padL - 8} y={padT + (rn * ch) / 2 + 4.5} textAnchor="end" className="pl-label" style={{ fill: paint(1) }}>
+        {mathLabel(`${rn}/${rd}`)}
       </text>
     </svg>
   );
