@@ -1,0 +1,134 @@
+import { Note } from 'neftyacademy-paragons-bookshelf';
+
+export const summary = 'busy의 뜻과 흔한 까닭, 누가 쥐었는지 알아내기, 놓이기를 기다렸다가 다시 요청하기, 하면 안 되는 일';
+export const terms = ['EBUSY', 'gpiod_chip_wait_info_event'];
+
+`Device or resource busy`는 libgpiod를 쓰다 보면 반드시 한 번은 만나는 글귀입니다. 뜻은 하나뿐입니다. 요청한 줄 가운데 하나를 누가 이미 쥐고 있습니다. 줄은 한 번에 한 임자만 가지므로 커널은 둘째 요청을 받아 주지 않습니다. 남은 물음은 그 임자가 누구냐입니다.
+
+## 누가 쥐고 있나
+
+| 쥔 쪽 | 알아보는 단서 | 푸는 길 |
+| --- | --- | --- |
+| 앞서 띄운 내 프로그램 | `consumer`가 내 프로그램의 이름이다 | 그 프로세스를 끝낸다 |
+| 뒤에 남은 `gpioset` | `consumer="gpioset"` | `pkill gpioset` |
+| 같은 프로그램의 다른 요청 | 한 프로그램 안에서 같은 줄을 두 번 요청했다 | 앞의 요청을 놓거나 하나로 합친다 |
+| 커널의 드라이버 | `consumer`가 `led0` 같은 드라이버의 이름이다 | 그 기능을 끄거나 다른 핀을 쓴다 |
+
+```sh
+gpioinfo GPIO17                                   # consumer= 칸을 본다
+sudo find /proc/[0-9]*/fd -lname 'anon_inode:gpio-line'   # 줄을 쥔 프로세스들
+```
+
+- **첫 명령으로 대개 끝난다**: 이름이 보이면 그 프로그램을 찾아 끝냅니다. 이름을 잘 지어야 하는 까닭이 여기 있습니다([「소비자 이름」](#/read/libgpiod/rq-consumer))
+- **이름이 `?`일 때**: 둘째 명령이 줄 요청을 쥔 프로세스의 번호를 `/proc/1234/fd/5` 꼴로 보여 줍니다. 커널은 줄 요청의 파일에 `gpio-line`이라는 이름을 붙입니다. 어느 줄인지까지는 나오지 않으므로 후보를 좁히는 데 씁니다
+- **커널이 쥔 줄은 프로세스가 없다**: 오버레이가 그 핀을 LED나 단추, 버스의 선으로 쓰고 있는 것입니다. `config.txt`에서 그 오버레이를 빼거나 내 회로를 다른 핀으로 옮깁니다
+- **끝난 프로그램은 쥐고 있지 않다**: 프로세스가 사라지면 줄은 풀립니다. busy가 난다면 어딘가에 살아 있는 임자가 있습니다
+
+## 기다렸다가 다시 요청하기
+
+아래 예제는 앞서 띄운 프로그램이 GPIO 17을 쥐고 있는 가운데 시작합니다. 임자를 적고, 줄이 놓이기를 기다렸다가 다시 요청합니다.
+
+```c gpiosim=busy
+// 쥐인 줄을 만났을 때: 누가 쥐었는지 적고, 놓이기를 기다렸다가 다시 요청한다
+#include <errno.h>
+#include <gpiod.h>
+#include <stdio.h>
+#include <string.h>
+
+enum { LED = 17 };                           // GPIO 17, 헤더의 핀 11
+
+// GPIO 17을 출력으로 요청한다. 받지 못하면 nullptr이고 까닭은 errno에 있다
+static struct gpiod_line_request* hold_led(struct gpiod_chip* chip) {
+    struct gpiod_line_settings* settings = gpiod_line_settings_new();
+    struct gpiod_line_config* config = gpiod_line_config_new();
+    struct gpiod_request_config* request_config = gpiod_request_config_new();
+    struct gpiod_line_request* request = nullptr;
+    unsigned int offset = LED;
+    if (settings && config && request_config) {
+        gpiod_line_settings_set_direction(settings, GPIOD_LINE_DIRECTION_OUTPUT);
+        gpiod_line_config_add_line_settings(config, &offset, 1, settings);
+        gpiod_request_config_set_consumer(request_config, "lamp");
+        request = gpiod_chip_request_lines(chip, request_config, config);
+    }
+    int why = errno;                         // 풀어 주는 동안 바뀌지 않게 옮겨 둔다
+    gpiod_request_config_free(request_config);
+    gpiod_line_config_free(config);
+    gpiod_line_settings_free(settings);
+    errno = why;
+    return request;
+}
+
+// 지켜보는 줄이 놓일 때까지 기다린다. 그 시간 안에 놓이면 true
+static bool wait_release(struct gpiod_chip* chip, int64_t timeout_ns) {
+    while (gpiod_chip_wait_info_event(chip, timeout_ns) == 1) {
+        struct gpiod_info_event* event = gpiod_chip_read_info_event(chip);
+        if (!event) return false;
+        bool freed = gpiod_info_event_get_event_type(event) ==
+                     GPIOD_INFO_EVENT_LINE_RELEASED;
+        gpiod_info_event_free(event);
+        if (freed) return true;
+    }
+    return false;
+}
+
+int main(void) {
+    struct gpiod_chip* chip = gpiod_chip_open("/dev/gpiochip0");
+    if (!chip) {
+        perror("/dev/gpiochip0");
+        return 1;
+    }
+    // 요청하기 전에 지켜보기부터 건다. 그래야 그 사이의 놓임을 놓치지 않는다
+    struct gpiod_line_info* info = gpiod_chip_watch_line_info(chip, LED);
+    struct gpiod_line_request* request = hold_led(chip);
+    if (!request && errno == EBUSY) {
+        const char* who = info ? gpiod_line_info_get_consumer(info) : nullptr;
+        printf("GPIO17: %s, consumer=%s\n", strerror(EBUSY), who ? who : "?");
+        printf("놓이기를 10초까지 기다린다\n");
+        if (wait_release(chip, 10'000'000'000)) {
+            printf("놓였다. 다시 요청한다\n");
+            request = hold_led(chip);
+        }
+    }
+    gpiod_line_info_free(info);
+    printf("%s\n", request ? "줄을 받았다" : "줄을 받지 못했다");
+    gpiod_line_request_release(request);
+    gpiod_chip_close(chip);
+}
+```
+
+```text
+GPIO17: Device or resource busy, consumer=old-blinker
+놓이기를 10초까지 기다린다
+놓였다. 다시 요청한다
+줄을 받았다
+```
+
+- **실패한 까닭을 가른다**: `errno`가 `EBUSY`일 때만 기다립니다. 다른 오류는 기다려도 풀리지 않습니다
+- **임자의 이름을 오류에 넣는다**: 줄 정보의 `gpiod_line_info_get_consumer`가 알려 줍니다. busy라고만 적힌 로그와 누구 때문인지까지 적힌 로그는 고치는 데 드는 시간이 다릅니다
+- **지켜보기를 먼저 건다**: 요청이 실패한 뒤에 지켜보기를 걸면 그 사이에 줄이 놓인 것을 놓치고 끝없이 기다릴 수 있습니다. 그래서 `gpiod_chip_watch_line_info`를 요청보다 앞에 두었습니다([「줄 정보 읽기」](#/read/libgpiod/ch-info))
+- **기다림에는 끝을 둔다**: 10초 안에 놓이지 않으면 그만둡니다. 임자가 영영 놓지 않을 수도 있습니다
+- **다시 요청해도 질 수 있다**: 놓인 줄을 다른 프로그램이 먼저 쥘 수 있습니다. 둘째 요청의 결과도 살핍니다
+- **`hold_led`가 `errno`를 지킨다**: 설정 객체들을 풀어 주는 사이에 `errno`가 바뀌지 않게 옮겨 두었다가 되돌려 놓습니다
+
+## 하면 안 되는 일
+
+- **미리 확인하고 요청하기**: 줄 정보로 비었는지 본 다음 요청하면, 그 둘 사이에 남이 쥘 수 있습니다. 확인은 건너뛰고 요청의 결과를 봅니다
+- **쉬지 않고 다시 요청하기**: 반복문에서 요청을 되풀이하면 CPU만 태웁니다. 놓였다는 소식을 기다리거나, 적어도 사이사이에 잡니다
+- **커널을 건너뛰어 핀을 바꾸기**: `pinctrl set`으로는 남이 쥔 핀도 바뀝니다. 그러면 그 프로그램과 내 프로그램이 같은 핀을 두고 다투게 됩니다([「pinctrl」](#/read/libgpiod/tl-pinctrl))
+- **두 프로그램이 한 줄을 나눠 쓰려 하기**: 한 줄의 임자는 하나입니다. 둘이 같은 핀을 다뤄야 한다면 한쪽이 줄을 쥐고, 다른 쪽은 그 프로그램에 부탁하는 구조로 만듭니다
+
+<Note>
+예제는 이 책의 흉내 칩에서 돌린 것이고, 앞서 띄운 프로그램이 줄을 쥐고 있다가 3초에 놓는 것은 대본으로 넣었습니다. 진짜 libgpiod 2.2.4의 머리 파일로 x86-64와 aarch64에서 컴파일되는지 따로 확인했습니다. 줄 요청의 파일에 `gpio-line`이라는 이름이 붙는다는 것은 리눅스 커널의 소스에서 읽었고, `find` 명령은 돌려 보지 못했습니다. 내 보드에서 다른 꼴로 나오면 `sudo ls -l /proc/프로세스번호/fd`로 직접 봅니다.
+</Note>
+
+## 정리
+
+- busy는 요청한 줄 가운데 하나에 이미 임자가 있다는 뜻이다. `gpioinfo`의 `consumer`로 누구인지 찾는다
+- 프로그램에서는 `EBUSY`일 때 임자의 이름을 적고, 지켜보기를 먼저 건 다음 놓이기를 기다렸다가 다시 요청한다
+- 미리 확인하지 않고, 쉬지 않고 되풀이하지 않고, 커널을 건너뛰지 않는다
+
+## 참고 문서
+
+- [리눅스 커널 문서: GPIO_V2_GET_LINE_IOCTL(쥐인 줄을 요청하면 EBUSY)](https://docs.kernel.org/userspace-api/gpio/gpio-v2-get-line-ioctl.html)
+- [리눅스 커널 소스: gpiolib-cdev.c(줄 요청의 파일에 붙는 이름)](https://android.googlesource.com/kernel/common/+/android-mainline/drivers/gpio/gpiolib-cdev.c)
+- [libgpiod 문서: GPIO chips(줄 정보를 지켜보고 정보 이벤트를 기다리는 함수)](https://libgpiod.readthedocs.io/en/master/core_chips.html)
