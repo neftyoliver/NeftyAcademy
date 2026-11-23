@@ -72,7 +72,8 @@ const NUMERIC = /^[\d.,+\-−=()[\] √·×÷<>≤≥≠≈∞/:%°|]+$/u;
 
 /**
  * 이름표의 글을 SVG 의 tspan 들로. 한 글자짜리 로마자와 그리스 소문자는 기울이고, _ 와 ^ 뒤의 것은 첨자로 쓴다.
- * 예) "y = x^2", "a_1", "(x_1, y_1)", "넓이 S"
+ * 로마자가 이어지면 낱말(sin, cm)로 보고 세워 쓰므로, 문자끼리의 곱은 별표로 끊어 적는다. 별표는 그리지 않는다.
+ * 예) "y = x^2", "a_1", "(x_1, y_1)", "넓이 S", "2a*b"
  */
 export function mathLabel(text: string): ReactNode[] {
   const out: ReactNode[] = [];
@@ -105,7 +106,7 @@ export function mathLabel(text: string): ReactNode[] {
         shift = 0;
       }
     } else if (m[4]) {
-      for (const part of m[4].match(/[α-ω]|[^α-ω]+/gu) ?? []) piece(part, 0, false);
+      for (const part of m[4].replace(/\*/g, '').match(/[α-ω]|[^α-ω]+/gu) ?? []) piece(part, 0, false);
     }
   }
   return out;
