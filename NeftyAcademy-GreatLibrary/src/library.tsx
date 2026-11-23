@@ -1,6 +1,6 @@
 /**
  * Great Library 전체 차례. IoT까지 닿는 것을 목표로 한 네 권, C++·파이썬 서가,
- * 소형 기기 서가 여섯 개, 그리고 네트워킹·OpenMP·MPI.
+ * 소형 기기 서가 여섯 개, 네트워킹·OpenMP·MPI, 그리고 수학 서가(분야 스물셋).
  * 서가(책 속의 책)와 뒤쪽 책들의 차례는 src/books/ 아래 파일에 글로 적혀 있다.
  *
  * 새 챕터를 쓰면 .mdx 파일을 만들고, 아래 해당 줄의 draft(...)를 written(..., Content)로 바꾼다.
@@ -22,6 +22,7 @@ import CEcosystem from './chapters/basics/08-c-ecosystem.mdx';
 import { writtenIn } from './books/written';
 import { cpp } from './books/cpp';
 import { analogDigital, circuitSim, scope } from './books/ee';
+import { math } from './books/math';
 import { networking } from './books/networking';
 import { mpi, openmp } from './books/parallel';
 import { python } from './books/python';
@@ -85,7 +86,7 @@ const group = (id: string, title: string, children: Chapter[]): Chapter => ({ id
 
 export const library: Library = {
   title: 'Great Library',
-  subtitle: '컴퓨터 입문에서 C와 C++, 파이썬, 소형 기기, 네트워크와 병렬 계산까지',
+  subtitle: '컴퓨터 입문에서 C와 C++, 파이썬, 소형 기기, 네트워크와 병렬 계산, 그리고 수학까지',
   storageKey: 'neftyacademy-great-library',
   categories: [
     { id: 'intro', name: '입문', color: '#4f7f78' },
@@ -96,6 +97,7 @@ export const library: Library = {
     { id: 'sbc', name: '소형 기기', color: '#b24d6b' },
     { id: 'net', name: '네트워크', color: '#2f8a9e' },
     { id: 'parallel', name: '병렬 계산', color: '#5f8a3c' },
+    { id: 'math', name: '수학', color: '#3d4f9a' },
   ],
   books: [
     // =====================================================================
@@ -304,6 +306,8 @@ export const library: Library = {
     networking,
     openmp,
     mpi,
+    // 수학 서가: 분야마다 기본서와 문제집, 그리고 수학사. src/books/math/
+    math,
   ],
   footer: 'Nefty Academy · Great Library · AGPL-3.0-or-later',
 };

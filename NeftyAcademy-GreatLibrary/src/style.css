@@ -100,3 +100,82 @@
   .tm-rules { font-size: 13px; }
   .tm-rule span { padding: 3px 6px; }
 }
+
+/* ---------- 수식 (tex2mml.mjs 가 빌드할 때 만든 MathML) ----------
+   글꼴은 넣지 않는다. 기기에 있는 수학 글꼴로 그린다. */
+math { font-family: "STIX Two Math", "Cambria Math", "Latin Modern Math", "Noto Sans Math", math; font-size: 1.08em; }
+math mtext { font-family: var(--bf-font); font-size: 0.93em; }
+.tex-block { margin: 14px 0; padding: 3px 0; overflow-x: auto; overflow-y: hidden; }
+/* 글줄 안의 분수는 글자가 너무 작아지지 않게 한다(전화기에서 읽기 위해) */
+.tex mfrac > * { font-size: 0.82em; }
+mrow.tex-ol { border-top: 0.05em solid; padding-top: 0.14em; }
+mrow.tex-ul { border-bottom: 0.05em solid; padding-bottom: 0.14em; }
+mrow.tex-box { border: 0.05em solid; padding: 0.25em 0.4em; }
+/* 칸 안의 맞춤. 크롬은 칸의 내용을 블록으로 놓으므로 text-align 만으로는 움직이지 않는다 */
+mtd.tex-l { text-align: left; text-align: -webkit-left; justify-items: start; }
+mtd.tex-r { text-align: right; text-align: -webkit-right; justify-items: end; }
+mtable.tex-al > mtr > mtd { padding: 0.28em 0; }
+mtable.tex-ga > mtr > mtd { padding: 0.28em 0; }
+mtable.tex-ca > mtr > mtd { padding: 0.18em 0.9em 0.18em 0; }
+mtable.tex-ma > mtr > mtd { padding: 0.3em 0.42em; }
+mtable.tex-ma > mtr > mtd:first-child { padding-left: 0.12em; }
+mtable.tex-ma > mtr > mtd:last-child { padding-right: 0.12em; }
+mtable.tex-ss > mtr > mtd { padding: 0; }
+mtable.tex-sm > mtr > mtd { padding: 0.05em 0.2em; }
+
+/* ---------- 정의, 정리, 증명, 예제, 풀이 (MathBox.tsx) ---------- */
+.mb { --mb: var(--node, var(--bf-accent)); margin: 1.2em 0; padding: 11px 16px 12px; border: 1px solid color-mix(in srgb, var(--mb) 38%, var(--bf-line)); border-radius: 10px; background: var(--bf-paper); }
+.mb-def { --mb: #1c7ed6; }
+.mb-thm { --mb: #e8590c; }
+.mb-ex { --mb: #2f9e44; }
+.mb-prob { --mb: #9c36b5; }
+.mb-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 8px; margin-bottom: 4px; }
+.mb-kind { padding: 0 8px; border-radius: 6px; background: color-mix(in srgb, var(--mb) 15%, transparent); color: color-mix(in srgb, var(--mb) 76%, var(--bf-ink)); font-size: 12.5px; font-weight: 700; line-height: 1.7; white-space: nowrap; }
+.mb-title { font-weight: 700; font-size: 15px; }
+.mb > div > :first-child, .mb-plain > div > :first-child { margin-top: 0; }
+.mb > div > :last-child, .mb-plain > div > :last-child { margin-bottom: 0; }
+.mb-plain { margin: 1em 0; padding: 2px 0 2px 14px; border-left: 3px solid var(--bf-line); }
+.mb-plain > .mb-head { margin-bottom: 2px; }
+.mb-plain .mb-kind { padding: 0; background: none; color: var(--bf-muted); }
+.mb-qed { display: block; text-align: right; color: var(--bf-muted); font-size: 13px; line-height: 1; margin-top: -0.4em; }
+.mb + .mb-plain { margin-top: -0.4em; }
+.mb details { margin-top: 8px; }
+.mb summary { width: fit-content; padding: 2px 10px; border: 1px solid var(--bf-line); border-radius: 8px; color: var(--bf-muted); font-size: 13.5px; cursor: pointer; list-style: none; }
+.mb summary::-webkit-details-marker { display: none; }
+.mb summary::before { content: '▸ '; }
+.mb details[open] > summary::before { content: '▾ '; }
+.mb details[open] > summary { margin-bottom: 6px; }
+.mb details > div > :first-child { margin-top: 0; }
+.mb details > div > :last-child { margin-bottom: 0; }
+
+/* ---------- 좌표평면과 수직선 (Plane.tsx, NumLine.tsx) ---------- */
+.pl { color: var(--bf-ink); overflow: visible; }
+.pl text { fill: currentColor; font-size: 13px; }
+.pl-grid line { stroke: var(--bf-line); stroke-width: 1; }
+.pl-axes line { stroke: currentColor; stroke-width: 1.2; }
+.pl-head { fill: currentColor; }
+.pl text.pl-tick { font-size: 11.5px; fill: var(--bf-muted); font-family: "STIX Two Text", "Cambria", "Latin Modern Roman", "Noto Serif", serif; }
+.pl text.pl-name { font-size: 13.5px; }
+.pl-var { font-family: "STIX Two Text", "Cambria", "Latin Modern Roman", "Noto Serif", serif; font-style: italic; font-size: 1.08em; }
+.pl-num { font-family: "STIX Two Text", "Cambria", "Latin Modern Roman", "Noto Serif", serif; }
+.pl-origin { font-family: "STIX Two Text", "Cambria", "Latin Modern Roman", "Noto Serif", serif; }
+.pl-curve { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.pl-area { fill-opacity: 0.16; stroke: none; }
+.pl-dot { stroke-width: 1.6; }
+.pl-dot.is-open { fill: var(--bf-paper); }
+.pl-seg { stroke-width: 1.6; stroke-linecap: round; }
+.pl-seg.is-bold { stroke-width: 2.2; }
+.pl-shape { stroke-width: 1.6; stroke-linejoin: round; }
+.pl-shape.is-fill { fill-opacity: 0.13; }
+.pl-angle { fill: none; stroke-width: 1.2; }
+.pl-guide line { stroke: var(--bf-muted); stroke-width: 1; stroke-dasharray: 3 3; }
+.pl-label { paint-order: stroke; stroke: var(--bf-paper); stroke-width: 3px; stroke-linejoin: round; }
+.nl-range { stroke-width: 4; stroke-linecap: round; }
+.nl-arc { fill: none; stroke-width: 1.5; }
+
+/* ---------- 수의 그림 (NumberFigs.tsx) ---------- */
+.nf-row { display: flex; flex-wrap: wrap; gap: 14px 30px; justify-content: center; align-items: center; }
+.bf-figure-body .nf-row > svg { margin: 0; }
+.nf-cut { stroke: currentColor; stroke-width: 1.2; stroke-dasharray: 4 3; }
+.nf-pair { stroke: var(--bf-muted); stroke-width: 1.4; }
+.nf-row + .nf-row { margin-top: 16px; }

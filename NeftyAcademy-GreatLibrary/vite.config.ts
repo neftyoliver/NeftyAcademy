@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react';
 import remarkGfm from 'remark-gfm';
 import { defineConfig } from 'vite';
 import { viteSingleFile } from 'vite-plugin-singlefile';
+import mdxMath from './mdx-math.mjs';
 import rehypeTableCells from './rehype-table-cells.mjs';
 import remarkChapterLinks from './remark-chapter-links.mjs';
 import remarkTermLinks from './remark-term-links.mjs';
@@ -16,6 +17,9 @@ const terms = createTermIndex({
 
 export default defineConfig({
   plugins: [
+    // 수학 책(src/chapters/m-…, mh-…)의 .mdx 에 $…$ 로 적은 수식을 MathML 로 바꾼다. MDX 가 읽기 전에 해야 해서 맨 앞에 둔다.
+    // 바꾸는 일은 tex2mml.mjs 가 하고, 결과물에는 MathML 만 남는다. 다른 책의 본문에 있는 $ 는 건드리지 않는다.
+    mdxMath({ include: /\/src\/chapters\/mh?-[^/]+\/[^/]+\.mdx$/ }),
     // .mdx → React 컴포넌트. remark-gfm은 표·취소선 같은 깃허브식 마크다운을 켠다.
     // remarkTermLinks는 코드에 나온 용어를 그 용어를 설명하는 쪽으로 가는 링크로 만든다(term-index.mjs).
     // remarkChapterLinks는 본문의 챕터 링크(와 용어 링크)를 모아 지도의 줄과 「같이 보기」에 쓸 수 있게 내보낸다.

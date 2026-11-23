@@ -1,6 +1,6 @@
 # NeftyAcademy-GreatLibrary
 
-Nefty Academy의 책 묶음(컴퓨터 입문, C 초급·중급, 전자공학 입문, C++, 파이썬, 소형 기기, 네트워킹, OpenMP, MPI). 틀은 [ParagonsBookShelf](../NeftyAcademy-ParagonsBookShelf), 이 프로젝트는 **내용만** 가진다.
+Nefty Academy의 책 묶음(컴퓨터 입문, C 초급·중급, 전자공학 입문, C++, 파이썬, 소형 기기, 네트워킹, OpenMP, MPI, 수학). 틀은 [ParagonsBookShelf](../NeftyAcademy-ParagonsBookShelf), 이 프로젝트는 **내용만** 가진다.
 
 ## 준비
 
@@ -115,6 +115,55 @@ MDX 주의: 본문 글에 `{`, `<`를 그냥 쓰면 코드로 읽힌다 → 백�
 표는 되도록 세 칸까지. 칸이 많으면 폰에서 옆으로 밀어 봐야 한다.
 표에서 글이 여덟 자 넘는 칸에는 빌드할 때 `bf-wide`가 붙어서(`rehype-table-cells.mjs`), 폰에서 그 칸이 한 낱말 폭으로 찌그러지지 않는다.
 
+## 수학 책
+
+수학 서가(`src/books/math/`)는 분야 스물셋으로 나뉘고, 분야마다 기본서와 문제집이 나란히 놓인다. 수학사는 따로 둔 열일곱 권이다.
+
+```
+수학
+├─ 대수 (서가)
+│  ├─ 수의 체계          기본서. id 는 m-이름
+│  ├─ 수의 체계 문제집   차례가 같은 문제집. id 는 m-이름-w (workbook.ts 가 기본서의 차례를 베낀다)
+│  └─ …
+├─ 함수, 기하, 미적분, …
+└─ 수학사 (서가)         id 는 mh-이름. 문제집이 없다
+```
+
+- 차례는 우선 장 단위로 적어 두고, 책을 쓰기 시작할 때 장을 쪽으로 쪼갠다(장의 id 는 그대로 묶음이 된다)
+- 기본서와 문제집의 본문에는 역사 이야기를 쓰지 않는다. 쪽 끝의 `## 참고 문서`에 수학사의 쪽으로 가는 링크만 단다: `- [「무리수의 발견」](#/read/mh-thm-algebra/nu-irrational)`
+- 쪽 끝의 간추림은 `## 정리`가 아니라 `## 요점`이다(수학에서 정리는 theorem 이다)
+- 한 쪽 안의 차례는 그림과 예 → 정의 → 정리와 증명
+
+### 수식
+
+`m-`, `mh-`로 시작하는 폴더의 `.mdx`에서만 수식을 읽는다(`vite.config.ts`의 `mdxMath`). TeX 로 적으면 빌드할 때 MathML 로 바뀐다.
+
+```mdx
+넓이는 $\pi r^2$입니다.                       글 안의 수식. $ 바로 안쪽에는 빈칸을 두지 않는다
+
+$$
+\int_0^1 x^2 \, dx = \frac{1}{3}            따로 놓는 수식. $$ 는 줄 맨 앞에, 앞뒤에 빈 줄
+$$
+
+<Figure caption={<>넓이 {TEX`x^2`}</>}>       JSX 의 { } 안에서는 TEX`…`
+```
+
+- 바꾸는 일은 `tex2mml.mjs`가 하고(바깥 꾸러미 없음), MDX 앞단은 `mdx-math.mjs`다. 쓸 수 있는 명령은 `tex2mml.mjs`의 머리말에 있고, 없는 명령을 쓰면 파일과 줄 번호를 붙여 빌드가 멈춘다
+- 결과물에는 MathML 만 들어간다. 글꼴은 넣지 않고 기기에 있는 수학 글꼴로 그린다(`src/style.css`의 `math`)
+- `node --test tex2mml.test.mjs`로 변환기를 시험한다
+- 달러 글자를 그대로 쓰려면 `\$`로 적는다
+
+### 상자와 그림
+
+| 파일 | 들어 있는 것 |
+| --- | --- |
+| `components/MathBox.tsx` | `Def`(정의), `Thm`(정리), `Proof`(증명), `Ex`(예제), `Sol`(풀이), `Prob`·`Hint`·`Ans`(문제집) |
+| `components/Plane.tsx` | 좌표평면 `Plane`과 그 안에 넣는 `Curve`, `Dot`, `Seg`, `Vec`, `Line`, `Poly`, `Rect`, `Circle`, `Angle`, `Area`, `Label`, `Guide` |
+| `components/NumLine.tsx` | 수직선 `NumLine`(점, 구간, 뜀, 이름) |
+| `components/NumberFigs.tsx` | 점의 배열 `DotGrid`, 짝짓기 `Pairing`, 자릿값 블록 `Base10`, 넓이 모형 `AreaModel`, 나란히 놓기 `FigRow` |
+
+곡선은 함수를 그대로 넘긴다: `<Plane x={[-3, 3]} y={[-1, 5]}><Curve f={(x) => x * x} /></Plane>`. 쓰는 법은 파일마다 머리말에 있다.
+
 ## 책 구성 (2026-11-22)
 
 | 책 | 챕터 | 쓴 것 |
@@ -134,6 +183,7 @@ MDX 주의: 본문 글에 `{`, `<`를 그냥 쓰면 코드로 읽힌다 → 백�
 | 네트워킹 | 20 (하위 145) | — (뼈대만) |
 | OpenMP | 20 (하위 94) | — (뼈대만) |
 | MPI | 24 (하위 111) | — (뼈대만) |
+| 수학 (서가) | 분야 23개: 기본서 126권, 문제집 126권, 수학사 17권 | 「수의 체계」를 쓰는 중(2026-11-24에 더한 서가). 나머지는 뼈대만 |
 
 `library.tsx`의 `draft(...)`는 같은 id의 MDX가 `src/chapters/<책 id>/`에 생기면 저절로 열린다.
 하위 챕터가 있는 묶음은 안에 쓴 것이 하나라도 있으면 "준비 중" 딱지가 빠진다.
