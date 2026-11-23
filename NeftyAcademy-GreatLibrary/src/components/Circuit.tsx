@@ -12,6 +12,11 @@
  *  O  단자(빈 동그라미, 점 하나, 이름표는 오른쪽, ^로 시작하면 위)    T  글자(T x,y 글)
  *  A  전류 화살표(도선 위에 그리는 표시, 첫 점 → 두 번째 점, 이름표 가능)
  *  K  다이오드(첫 점 → 두 번째 점이 순방향)      E  LED(다이오드 + 빛 화살표)
+ *  Q  NPN 트랜지스터(첫 점이 컬렉터, 두 번째 점이 이미터). 베이스는 가운데에서 옆으로 반 칸 나온다.
+ *     위에서 아래로 그리면 왼쪽, 아래에서 위로 그리면 오른쪽이다
+ *  M  N채널 MOSFET(첫 점이 드레인, 두 번째 점이 소스). 게이트가 나오는 쪽은 Q와 같다
+ *  U  연산 증폭기(첫 점이 − 입력, 두 번째 점이 출력). + 입력은 출력의 높이를 사이에 두고 맞은편에 있다.
+ *     이름표가 +로 시작하면 첫 점이 + 입력이 된다
  */
 
 type Pt = [number, number];
@@ -130,6 +135,33 @@ function body(kind: string, len: number) {
       );
     case 'A':
       return <path d={`M${mid + 7} 0L${mid - 5} -6L${mid - 5} 6Z`} fill="currentColor" stroke="none" />;
+    case 'Q':
+      // 컬렉터(왼쪽)와 이미터(오른쪽)가 축 위에 있고, 베이스의 막대는 축에서 12 떨어져 있다. 베이스 선은 반 칸(40)까지 나간다
+      return (
+        <>
+          <line x1={0} y1={0} x2={mid - 16} y2={0} />
+          <line x1={mid + 16} y1={0} x2={len} y2={0} />
+          <line x1={mid - 16} y1={0} x2={mid - 6} y2={12} />
+          <line x1={mid + 6} y1={12} x2={mid + 16} y2={0} />
+          <line x1={mid - 13} y1={12} x2={mid + 13} y2={12} strokeWidth={3} />
+          <line x1={mid} y1={12} x2={mid} y2={40} />
+          <path d={`M${mid + 16} 0L${mid + 7.8} 3.6L${mid + 13.9} 8.7Z`} fill="currentColor" stroke="none" />
+        </>
+      );
+    case 'M':
+      // 드레인(왼쪽)과 소스(오른쪽). 채널의 막대는 축에서 12, 게이트의 막대는 18 떨어져 있다
+      return (
+        <>
+          <line x1={0} y1={0} x2={mid - 11} y2={0} />
+          <line x1={mid + 11} y1={0} x2={len} y2={0} />
+          <line x1={mid - 11} y1={0} x2={mid - 11} y2={12} />
+          <line x1={mid + 11} y1={0} x2={mid + 11} y2={12} />
+          <line x1={mid - 15} y1={12} x2={mid + 15} y2={12} strokeWidth={3} />
+          <line x1={mid - 13} y1={18} x2={mid + 13} y2={18} />
+          <line x1={mid} y1={18} x2={mid} y2={40} />
+          <path d={`M${mid + 11} 1L${mid + 7} 9L${mid + 15} 9Z`} fill="currentColor" stroke="none" />
+        </>
+      );
     default:
       return <line x1={0} y1={0} x2={len} y2={0} />;
   }
@@ -137,7 +169,17 @@ function body(kind: string, len: number) {
 
 export function Circuit({ spec, label = '회로도', width }: { spec: string; label?: string; width?: number }) {
   const parts = parse(spec);
-  const pts = parts.flatMap((p) => [p.a, p.b]);
+  const pts = parts.flatMap((p): Pt[] => {
+    if (p.kind === 'U') return [p.a, p.b, [p.a[0], 2 * p.b[1] - p.a[1]]];
+    if (p.kind === 'Q' || p.kind === 'M') {
+      // 가운데에서 진행 방향의 왼쪽(화면에서는 오른손 쪽)으로 반 칸
+      const dx = p.b[0] - p.a[0];
+      const dy = p.b[1] - p.a[1];
+      const n = Math.hypot(dx, dy) || 1;
+      return [p.a, p.b, [(p.a[0] + p.b[0]) / 2 - (dy / n) * 0.5, (p.a[1] + p.b[1]) / 2 + (dx / n) * 0.5]];
+    }
+    return [p.a, p.b];
+  });
   const xs = pts.map((p) => p[0]);
   const ys = pts.map((p) => p[1]);
   const minX = Math.min(...xs);
@@ -185,6 +227,35 @@ export function Circuit({ spec, label = '회로도', width }: { spec: string; la
               <text key={i} x={x1} y={y1} fontSize={15} textAnchor="middle" dominantBaseline="central" stroke="none" fill="currentColor">
                 {p.label}
               </text>
+            );
+          }
+          if (p.kind === 'U') {
+            const xo = X(p.b);
+            const yo = Y(p.b);
+            const yOther = 2 * yo - y1;
+            const plusFirst = p.label.startsWith('+');
+            const name = plusFirst ? p.label.slice(1) : p.label;
+            const top = Math.min(y1, yOther) - 16;
+            const bot = Math.max(y1, yOther) + 16;
+            const sign = (yy: number, t: string) => (
+              <text x={x1 + 26} y={yy} fontSize={14} textAnchor="middle" dominantBaseline="central" stroke="none" fill="currentColor">
+                {t}
+              </text>
+            );
+            return (
+              <g key={i}>
+                <line x1={x1} y1={y1} x2={x1 + 16} y2={y1} />
+                <line x1={x1} y1={yOther} x2={x1 + 16} y2={yOther} />
+                <line x1={xo - 16} y1={yo} x2={xo} y2={yo} />
+                <path d={`M${x1 + 16} ${top}L${xo - 16} ${yo}L${x1 + 16} ${bot}Z`} fill="var(--bf-paper)" strokeLinejoin="round" />
+                {sign(y1, plusFirst ? '+' : '−')}
+                {sign(yOther, plusFirst ? '−' : '+')}
+                {name && (
+                  <text x={x1 + 16 + (xo - x1 - 32) * 0.4} y={yo} fontSize={13} textAnchor="middle" dominantBaseline="central" stroke="none" fill="currentColor">
+                    {name}
+                  </text>
+                )}
+              </g>
             );
           }
           const x2 = X(p.b);
