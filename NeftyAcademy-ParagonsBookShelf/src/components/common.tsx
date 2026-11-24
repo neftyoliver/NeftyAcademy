@@ -55,6 +55,9 @@ function pieces(title: string): { text: string; glue: boolean }[] {
   return out;
 }
 
+/** 노드 모양이 높이 y(가운데에서 위나 아래로 잰 거리)에서 글에 내줄 수 있는 폭의 절반 */
+export type HalfWidth = (y: number) => number;
+
 /**
  * 반지름 r 인 원 안에 넣을 제목을 줄로 나눈다(최대 lines 줄). 글자 크기 font, 줄 사이 leading.
  * 줄마다 그 높이에서의 원의 폭(현의 길이)을 넘지 않게 채우고, 끝내 넘치면 마지막 줄을 줄임표로 자른다(clipped).
@@ -63,10 +66,15 @@ function pieces(title: string): { text: string; glue: boolean }[] {
  * 뒤쪽 줄이 비어 있을 수 있다(그 자리를 비워 두어야 앞의 줄들이 원 안에 들어간다).
  */
 export function wrapInCircle(title: string, r: number, font: number, leading: number, lines = 3, shift = 0): { lines: string[]; clipped: boolean } {
+  return wrapInShape(title, (y) => Math.sqrt(Math.max(0, (r * 0.94) ** 2 - y * y)), font, leading, lines, shift);
+}
+
+/** wrapInCircle 과 같되, 원 대신 아무 모양(높이마다의 폭의 절반 half)에 맞춘다. 육각형과 사각형 노드가 쓴다 */
+export function wrapInShape(title: string, half: HalfWidth, font: number, leading: number, lines = 3, shift = 0): { lines: string[]; clipped: boolean } {
   const words = pieces(title);
   const room = (i: number, n: number): number => {
     const y = Math.abs(shift + (i - (n - 1) / 2) * leading) + font * 0.45;
-    return (2 * Math.sqrt(Math.max(0, (r * 0.94) ** 2 - y * y))) / font;
+    return (2 * Math.max(0, half(y))) / font;
   };
   for (let n = 1; n <= lines; n++) {
     const out: string[] = [];

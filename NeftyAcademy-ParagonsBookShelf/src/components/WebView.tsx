@@ -5,7 +5,7 @@ import { hexRingsFor, hexSpiral, type Point } from '../layout';
 import { layoutOnion } from '../onion';
 import { href } from '../router';
 import type { Book, Chapter } from '../types';
-import { chapterNumber, wrapInCircle } from './common';
+import { chapterNumber, wrapInShape, type HalfWidth } from './common';
 
 // 노드의 반지름과 글자 크기는 배율 1(전체 보기)에서의 값이다. 확대하면 함께 커진다(radiiAt)
 const BOOK_R = 48;
@@ -31,9 +31,19 @@ const TITLE_FONTS = [0.38, 0.34, 0.3, 0.27];
 const TITLE_LEADING = 1.16; // 줄 사이 = 글자 크기의 몇 배
 const ZOOM_MAX = 16; // 책이 많은 지도에서도 쪽 노드의 제목을 읽을 수 있을 만큼
 const HOVER_WAIT = 160; // 마우스가 노드에 이만큼(ms) 머물러야 그 노드를 고른다. 지나가다 스친 노드의 줄까지 그려져 남지 않게
-const FLOW_SPEED = 46; // 화살표가 흐르는 빠르기(화면 단위/초)
-const FLOW_GAP = 64; // 흐르는 화살표 사이의 거리
+// 흐르는 화살표는 화면의 픽셀로 크기를 정한다. 책이 많아 지도가 커져도 같은 크기로 보인다
+const FLOW_SPEED = 75; // 화살표가 흐르는 빠르기(화면 px/초)
+const FLOW_GAP = 90; // 흐르는 화살표 사이의 거리(화면 px)
+const HEAD_SCALE = 1.25; // 화살촉(HEAD: 길이 14.3, 폭 12.6)을 몇 배로 그리는가. 화면에서 길이 18px 쯤
 const PORTAL_R = 13; // 지도 밖의 책으로 이어지는 화이트홀의 반지름
+// 노드의 모양: 책은 둥근 사각형, 챕터는 육각형, 하위 챕터(쪽)는 원. 위의 반지름은 원으로 그리던 때의 값이고,
+// 사각형과 육각형은 줄이 비켜 가는 거리(CLEAR) 안에 들어가는 크기로 그린다
+const COS30 = Math.cos(Math.PI / 6);
+const BOOK_SQUARE = 0.82; // 책 사각형의 반폭(BOOK_R 의 몇 배). 모서리를 둥글려 가장 먼 점이 BOOK_R 의 1.04배(CLEAR.book 안)
+const BOOK_ROUND = 0.3; // 그 모서리의 반지름
+const INNER_SQUARE = 0.86; // 서가 안의 책(챕터 자리에 놓인 책)의 사각형. 가장 먼 점이 챕터 반지름의 1.1배
+const INNER_ROUND = 0.28;
+const BOOK_FONTS = [BOOK_FONT, 14, 12.5, 11.5, 10.5]; // 책 제목이 사각형에 다 들어가지 않으면 차례로 줄인다
 // 줄이 노드의 가운데에 이보다 가까이 오지 못하는 거리. 확대해서 노드가 커져도 줄이 노드에 닿지 않는 값이다
 const CLEAR = { book: BOOK_R + 2, hub: HUB_R + 2, chapter: 23, sub: 11.5 };
 
@@ -94,6 +104,34 @@ const polar = (c: Point, r: number, deg: number): Point => {
 };
 const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
 
+/** 챕터의 육각형. r = 안쪽 원의 반지름. 변이 하위 챕터 쪽(격자의 결, rotate + 60도씩)을 향하도록 꼭짓점을 결 사이에 둔다 */
+const hexPoints = (c: Point, r: number, rotate: number): string =>
+  Array.from({ length: 6 }, (_, i) => polar(c, r / COS30, rotate + 30 + 60 * i))
+    .map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`)
+    .join(' ');
+
+/** 모양을 s 배로 줄인 것의 폭. 글이 가장자리에 붙지 않게 한다 */
+const inset = (half: HalfWidth, s: number): HalfWidth => (y) => s * half(y / s);
+/** 반지름 r 인 원(하위 챕터) */
+const circleHalf = (r: number): HalfWidth => (y) => Math.sqrt(Math.max(0, (r * 0.94) ** 2 - y * y));
+/** 안쪽 원의 반지름이 r 인 육각형. 꼭짓점이 위아래이면 가운데 띠의 폭이 r 로 일정하고, 변이 위아래이면 가운데가 가장 넓다 */
+function hexHalf(r: number, rotate: number): HalfWidth {
+  const R = r / COS30;
+  const turn = (((rotate + 30) % 60) + 60) % 60;
+  if (turn < 1e-6 || turn > 60 - 1e-6) return inset((y) => (Math.abs(y) <= R / 2 ? r : (r * (R - Math.abs(y))) / (R / 2)), 0.92);
+  if (Math.abs(turn - 30) < 1e-6) return inset((y) => (Math.abs(y) <= r ? R - Math.abs(y) / Math.sqrt(3) : 0), 0.92);
+  return circleHalf(r);
+}
+/** 반폭 h, 모서리 반지름 c 인 둥근 사각형 */
+const squareHalf = (h: number, c: number): HalfWidth =>
+  inset((y) => {
+    const a = Math.abs(y);
+    if (a <= h - c) return h;
+    if (a > h) return 0;
+    const d = a - (h - c);
+    return h - c + Math.sqrt(c * c - d * d);
+  }, 0.9);
+
 /**
  * 배율 k 에서의 노드 반지름. 확대하면 노드 사이가 k배로 벌어지고, 노드도(그 속의 글자도) 함께 커진다.
  * 책, 가운데 표시, 하위 챕터는 그대로 k배가 된다. 챕터는 첫 하위 챕터까지의 거리(SUB_STEP * k)에서
@@ -149,6 +187,19 @@ function chaptersAt(book: Book, spots: Point[], rotate: number): PlacedChapter[]
   });
 }
 
+/** 책 제목을 책의 사각형에 맞춰 나눈다(배율 1의 크기). 다 들어가는 첫 글자 크기를 쓴다 */
+function bookTitle(title: string): { lines: string[]; font: number; leading: number } {
+  const half = squareHalf(BOOK_R * BOOK_SQUARE, BOOK_R * BOOK_ROUND);
+  let out = { lines: [title], font: BOOK_FONT, leading: BOOK_LEADING };
+  for (const font of BOOK_FONTS) {
+    const leading = font * (BOOK_LEADING / BOOK_FONT);
+    const fitted = wrapInShape(title, half, font, leading, 4);
+    out = { lines: fitted.lines, font, leading };
+    if (!fitted.clipped) break;
+  }
+  return out;
+}
+
 /** 꺾은선의 path 글 */
 const pathOf = (line: Line): string => line.map((p, i) => `${i ? 'L' : 'M'}${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ');
 const lengthOf = (line: Line): number => line.reduce((sum, p, i) => (i ? sum + Math.hypot(p.x - line[i - 1]!.x, p.y - line[i - 1]!.y) : 0), 0);
@@ -156,10 +207,11 @@ const lengthOf = (line: Line): number => line.reduce((sum, p, i) => (i ? sum + M
 /**
  * 남겨 둔 참조 줄의 바탕 그림(지금까지 고른 챕터들의 줄). 줄이 많아도 끌거나 확대할 때마다 다시 계산하지 않도록,
  * 지도 좌표로 한 번 그려 두고 이것을 감싼 묶음(g)의 변환만 바꾼다. 줄의 굵기는 변환을 타지 않는다(CSS 의 vector-effect).
+ * hidden 의 줄은 그리지 않는다: 고른 챕터의 화살표가 흐르는 동안에는 그 밑에 깔릴 점선을 가린다.
  * routed 는 길을 더 찾을 때마다 올라가는 수로, 새로 찾은 길을 그리게 하려는 것이다.
  */
-const LinkLayer = memo(function LinkLayer({ links, kept }: { links: CrossLink[]; kept: ReadonlySet<string>; routed: number }) {
-  return <>{links.map((l) => (l.d && kept.has(l.key) ? <path key={l.key} d={l.d} /> : null))}</>;
+const LinkLayer = memo(function LinkLayer({ links, kept, hidden }: { links: CrossLink[]; kept: ReadonlySet<string>; hidden: ReadonlySet<string>; routed: number }) {
+  return <>{links.map((l) => (l.d && kept.has(l.key) && !hidden.has(l.key) ? <path key={l.key} d={l.d} /> : null))}</>;
 });
 
 /**
@@ -173,15 +225,17 @@ const NONE: ReadonlySet<string> = new Set();
 const HEAD = 'M-7.5 -6.3 L6.8 0 L-7.5 6.3 L-3.6 0 Z'; // 흐르는 화살촉. 줄 위에서 잘 보이는 크기
 
 /**
- * 흐르는 화살표 한 줄. pts = 가리키는 쪽에서 가리킨 쪽으로 가는 길(화면 좌표), r = 도착하는 노드의 반지름.
+ * 흐르는 화살표 한 줄. pts = 가리키는 쪽에서 가리킨 쪽으로 가는 길(화면 좌표), r = 도착하는 노드의 반지름,
+ * px = 화면 1px 이 지도 그림(viewBox)의 몇 단위인가. 화살촉의 크기와 간격, 빠르기는 화면 px 로 정한다(줄의 굵기는 CSS).
  * 화살촉들이 길을 따라 흘러가고, 도착하는 노드 바로 앞에는 화살촉 하나가 서 있다.
  * still 이면(움직임을 줄이라는 설정) 흐르지 않고 서 있는 화살촉만 그린다.
  */
-function Flow({ pts, r, still }: { pts: Point[]; r: number; still: boolean }) {
+function Flow({ pts, r, still, px }: { pts: Point[]; r: number; still: boolean; px: number }) {
   const d = pathOf(pts);
   const len = lengthOf(pts);
-  const n = clamp(Math.round(len / FLOW_GAP), 1, 8);
-  const dur = Math.max(1.2, len / FLOW_SPEED);
+  const n = clamp(Math.round(len / (FLOW_GAP * px)), 1, 10);
+  const dur = Math.max(1.2, len / (FLOW_SPEED * px));
+  const size = HEAD_SCALE * px;
   const end = pts[pts.length - 1]!;
   const before = pts[pts.length - 2] ?? end;
   const seg = Math.hypot(end.x - before.x, end.y - before.y) || 1;
@@ -194,17 +248,18 @@ function Flow({ pts, r, still }: { pts: Point[]; r: number; still: boolean }) {
       {still
         ? null
         : Array.from({ length: n }, (_, i) => (
-            <path key={i} className="bf-flow-head" d={HEAD}>
+            <path key={i} className="bf-flow-head" d={HEAD} transform={`scale(${size.toFixed(3)})`}>
               <animateMotion dur={`${dur.toFixed(2)}s`} begin={`${(-(dur * i) / n).toFixed(2)}s`} repeatCount="indefinite" rotate="auto" path={d} />
             </path>
           ))}
-      <path className="bf-flow-head is-end" d={HEAD} transform={`translate(${(end.x - ux * (r + 6)).toFixed(1)} ${(end.y - uy * (r + 6)).toFixed(1)}) rotate(${turn.toFixed(1)})`} />
+      <path className="bf-flow-head is-end" d={HEAD} transform={`translate(${(end.x - ux * (r + 7.5 * size)).toFixed(1)} ${(end.y - uy * (r + 7.5 * size)).toFixed(1)}) rotate(${turn.toFixed(1)}) scale(${size.toFixed(3)})`} />
     </g>
   );
 }
 
 /**
- * 지도 보기. 책은 큰 노드, 챕터는 번호 붙은 노드, 하위 챕터는 챕터 둘레의 작은 육각형.
+ * 지도 보기. 책은 둥근 사각형, 챕터는 번호 붙은 육각형, 하위 챕터(쪽)는 챕터 둘레에 육각형을 그리며 놓인 작은 원.
+ * 서가 안의 책은 챕터 자리에 놓이되 작은 사각형이다. 지도 위에 모양과 줄, 조작법의 설명(MapGuide)이 붙는다.
  * 연한 빨강 화살표 줄은 읽는 순서(목록 보기와 같은 순서)다. 책마다 자기 색의 점선 테두리가 영역을 표시한다.
  *
  * 책이 여러 권이면 지도 전체가 육각형이 되고, 책들은 양파 껍질처럼 겹겹이(한 겹에 여섯 권 안팎) 놓인다(onion.ts).
@@ -219,10 +274,75 @@ function Flow({ pts, r, still }: { pts: Point[]; r: number; still: boolean }) {
  * 처음에는 아무 줄도 긋지 않는다(수천 개를 다 그으면 지도가 늦게 뜬다). 챕터에 올리면(손가락으로는 한 번 누르면)
  * 그 챕터가 "고른 챕터"가 되고, 그 챕터를 가리키는 쪽에서 화살표가 흘러온다.
  * R 키나 왼쪽 아래 단추로 방향을 뒤집으면, 고른 챕터가 가리키는 쪽으로 화살표가 흘러간다(들어오던 화살표는 가려진다).
- * 한 번 그린 줄은 다른 챕터를 골라도 옅은 점선으로 남는다. 「참조관계 지우기」 단추가 남은 줄을 모두 지운다.
+ * 한 번 그린 줄은 다른 챕터를 골라도 옅은 점선으로 남는다(화살표가 흐르는 동안에는 그 밑의 점선을 가린다). 「참조관계 지우기」 단추가 남은 줄을 모두 지운다.
  * 가리키는 쪽이 이 지도에 없는 책이면, 그 책(또는 그 책을 담은 서가)이 책 노드로라도 놓여 있을 때는 그 노드로 잇고,
  * 아예 없을 때는 챕터 옆에 화이트홀을 그려 지도 밖으로 이어짐을 보인다.
  */
+/** 육각형 아이콘의 꼭짓점(안쪽 원의 반지름 5.6, 꼭짓점이 위아래) */
+const GUIDE_HEX = Array.from({ length: 6 }, (_, i) => polar({ x: 0, y: 0 }, 5.6 / COS30, 60 * i))
+  .map((p) => `${p.x.toFixed(2)},${p.y.toFixed(2)}`)
+  .join(' ');
+
+/** 지도 위의 설명: 모양과 줄이 무엇을 뜻하는지, 어떻게 움직이는지. 접어 둘 수 있고, 좁은 화면(전화기)에서는 접힌 채로 시작한다 */
+function MapGuide() {
+  const [open] = useState(() => typeof window === 'undefined' || typeof window.matchMedia !== 'function' || window.matchMedia('(min-width: 640px)').matches);
+  const line = (cls: string, head: boolean, dashed = false) => (
+    <svg className="is-line" viewBox="0 0 28 10" aria-hidden="true">
+      <path className={cls} d="M1 5 H27" strokeDasharray={dashed ? '4 3' : undefined} />
+      {head ? <path className={`${cls}-head`} d="M21 5 L13.5 0.8 L15.6 5 L13.5 9.2 Z" /> : null}
+    </svg>
+  );
+  return (
+    <details className="bf-web-guide" open={open}>
+      <summary>지도 보는 법</summary>
+      <ul aria-label="모양과 줄">
+        <li>
+          <svg viewBox="-8 -8 16 16" aria-hidden="true">
+            <rect className="is-book" x="-6.6" y="-6.6" width="13.2" height="13.2" rx="3.6" />
+          </svg>
+          책
+        </li>
+        <li>
+          <svg viewBox="-8 -8 16 16" aria-hidden="true">
+            <polygon className="is-chapter" points={GUIDE_HEX} />
+          </svg>
+          챕터
+        </li>
+        <li>
+          <svg viewBox="-8 -8 16 16" aria-hidden="true">
+            <circle className="is-page" r="5" />
+          </svg>
+          쪽
+        </li>
+        <li>{line('is-order', true)}읽는 순서</li>
+        <li>{line('is-link', false, true)}참조(본문에서 가리킨 쪽)</li>
+        <li>{line('is-in', true)}고른 챕터를 가리키는 쪽에서</li>
+        <li>{line('is-out', true)}고른 챕터가 가리키는 쪽으로</li>
+      </ul>
+      <ul className="is-howto" aria-label="조작법">
+        <li>
+          <b>확대</b> 휠, ＋ －, 두 손가락 벌리기. 크게 할수록 노드 속에 제목이 보입니다
+        </li>
+        <li>
+          <b>옮기기</b> 끌기
+        </li>
+        <li>
+          <b>참조 보기</b> 노드에 마우스를 올리기(손가락은 한 번 누르기)
+        </li>
+        <li>
+          <b>열기</b> 누르기(손가락은 한 번 더 누르기)
+        </li>
+        <li>
+          <kbd>R</kbd> 화살표 방향 뒤집기
+        </li>
+        <li>
+          <kbd>Esc</kbd> 고른 챕터 풀기
+        </li>
+      </ul>
+    </details>
+  );
+}
+
 export function WebView({ books }: { books: Book[] }) {
   const { library, refs, record, readOf, bookPath } = useBook();
   const [hover, setHover] = useState<{ label: string; at: Point; sub: boolean; key: string } | null>(null);
@@ -233,6 +353,8 @@ export function WebView({ books }: { books: Book[] }) {
   const mapKey = useMemo(() => books.map((b) => b.id).join('|'), [books]);
   const [kept, setKept] = useState<ReadonlySet<string>>(() => KEPT.get(mapKey) ?? NONE);
   const [fit, setFit] = useState<number | null>(null);
+  /** 화면 1px 이 지도 그림(viewBox)의 몇 단위인가. 흐르는 화살표를 화면 px 로 그리는 데 쓴다 */
+  const [px, setPx] = useState(1);
   const svg = useRef<SVGSVGElement>(null);
   const drag = useRef<{ x: number; y: number; moved: boolean } | null>(null);
   const touches = useRef(new Map<number, { x: number; y: number }>());
@@ -382,6 +504,9 @@ export function WebView({ books }: { books: Book[] }) {
     return links.filter((l) => (mode === 'in' ? (l.b === at && l.ab) || (l.a === at && l.ba) : (l.a === at && l.ab) || (l.b === at && l.ba)));
   }, [focus, mode, links, spots]);
 
+  // 고른 챕터의 화살표가 흐르는 동안 가릴 점선들
+  const hidden = useMemo<ReadonlySet<string>>(() => (focusLinks.length ? new Set(focusLinks.map((l) => l.key)) : NONE), [focusLinks]);
+
   // 고른 챕터의 줄은 남겨 둔다
   useEffect(() => {
     if (focusLinks.length === 0) return;
@@ -468,6 +593,21 @@ export function WebView({ books }: { books: Book[] }) {
     window.addEventListener('resize', measureFit);
     return () => window.removeEventListener('resize', measureFit);
   }, [placed]);
+
+  // 화면 1px 이 viewBox 몇 단위인지 잰다. 지도의 크기가 바뀔 때마다(창 크기, 높이 맞추기) 다시 잰다
+  useLayoutEffect(() => {
+    const el = svg.current;
+    if (!el) return;
+    const measure = (): void => {
+      const a = el.getScreenCTM()?.a;
+      if (a) setPx(1 / a);
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [box.w, box.h, books.length === 0]);
 
   // R: 화살표의 방향 뒤집기, Esc: 고른 챕터 풀기
   useEffect(() => {
@@ -615,8 +755,8 @@ export function WebView({ books }: { books: Book[] }) {
       setHover({ label, at, sub, key });
     },
   });
-  /** 노드 안에 넣는 번호와 제목. r = 노드의 반지름 */
-  const titled = (at: Point, r: number, label: string, title: string) => {
+  /** 노드 안에 넣는 번호와 제목. r = 노드의 반지름(육각형은 안쪽 원의 반지름), half = 그 모양이 높이마다 내주는 폭 */
+  const titled = (at: Point, r: number, label: string, title: string, half: HalfWidth) => {
     const shift = r * 0.14;
     let font = 0;
     let leading = 0;
@@ -624,7 +764,7 @@ export function WebView({ books }: { books: Book[] }) {
     for (const f of TITLE_FONTS) {
       font = r * f;
       leading = font * TITLE_LEADING;
-      const fitted = wrapInCircle(title, r, font, leading, 3, shift);
+      const fitted = wrapInShape(title, half, font, leading, 3, shift);
       lines = fitted.lines;
       if (!fitted.clipped) break;
     }
@@ -692,6 +832,8 @@ export function WebView({ books }: { books: Book[] }) {
   };
 
   return (
+    <>
+    <MapGuide />
     <div className="bf-web">
       <div className="bf-web-tools" role="toolbar" aria-label="지도 확대">
         <button type="button" onClick={() => zoom(1.4)} aria-label="확대" disabled={k >= ZOOM_MAX}>＋</button>
@@ -742,14 +884,14 @@ export function WebView({ books }: { books: Book[] }) {
 
         {/* 지금까지 고른 챕터들의 참조 줄(옅게). 챕터를 고르고 있으면 더 옅어지고, 그 챕터의 화살표만 또렷해진다 */}
         <g className={`bf-web-links${focusSpot ? ' has-focus' : ''}`} transform={`matrix(${k} 0 0 ${k} ${(cx - (cx + view.dx) * k).toFixed(2)} ${(cy - (cy + view.dy) * k).toFixed(2)})`}>
-          <LinkLayer links={links} kept={kept} routed={routed} />
+          <LinkLayer links={links} kept={kept} hidden={hidden} routed={routed} />
         </g>
 
         <g className={`bf-web-flows is-${mode}`}>
           {flows.map((f) => (
-            <Flow key={f.key} pts={f.pts} r={f.r} still={still} />
+            <Flow key={f.key} pts={f.pts} r={f.r} still={still} px={px} />
           ))}
-          {portal ? <Flow pts={portal.pts} r={portal.end} still={still} /> : null}
+          {portal ? <Flow pts={portal.pts} r={portal.end} still={still} px={px} /> : null}
         </g>
 
         {hub && (
@@ -785,8 +927,8 @@ export function WebView({ books }: { books: Book[] }) {
                           aria-label={`${p.book.title} ${s.label} ${s.sub.title}${s.sub.draft ? ' (준비 중)' : ''}`}
                           {...tip(`${s.label} ${s.sub.title}${s.sub.draft ? ' · 준비 중' : ''}`, s.at, true, subKey)}
                         >
-                          <circle cx={subAt.x} cy={subAt.y} r={radii.sub} />
-                          {subTitled && titled(subAt, radii.sub, s.label, s.sub.title)}
+                          <circle className="bf-shape" cx={subAt.x} cy={subAt.y} r={radii.sub} />
+                          {subTitled && titled(subAt, radii.sub, s.label, s.sub.title, circleHalf(radii.sub))}
                         </a>
                       );
                     })}
@@ -796,9 +938,13 @@ export function WebView({ books }: { books: Book[] }) {
                       aria-label={`${p.book.title} ${c.label}. ${c.chapter.title}${c.chapter.draft ? ' (준비 중)' : ''}`}
                       {...tip(`${c.label}. ${c.chapter.title}${c.chapter.draft ? ' · 준비 중' : ''}`, c.at, false, key)}
                     >
-                      <circle cx={at.x} cy={at.y} r={radii.chapter} />
+                      {c.innerBook ? (
+                        <rect className="bf-shape" x={at.x - radii.chapter * INNER_SQUARE} y={at.y - radii.chapter * INNER_SQUARE} width={2 * radii.chapter * INNER_SQUARE} height={2 * radii.chapter * INNER_SQUARE} rx={radii.chapter * INNER_ROUND} />
+                      ) : (
+                        <polygon className="bf-shape" points={hexPoints(at, radii.chapter, rotate)} />
+                      )}
                       {chapterTitled ? (
-                        titled(at, radii.chapter, c.label, c.chapter.title)
+                        titled(at, radii.chapter, c.label, c.chapter.title, c.innerBook ? squareHalf(radii.chapter * INNER_SQUARE, radii.chapter * INNER_ROUND) : hexHalf(radii.chapter, rotate))
                       ) : (
                         <text x={at.x} y={at.y} dy="0.35em" style={{ fontSize: radii.chapter * CHAPTER_FONT }}>
                           {c.label}
@@ -809,14 +955,17 @@ export function WebView({ books }: { books: Book[] }) {
                 );
               })}
               <a href={href({ name: 'book', bookId: p.book.id })} className={`bf-node bf-node-book${reading && readOf(p.book).complete ? ' is-complete' : ''}`} aria-label={p.book.title}>
-                <circle cx={bookAt.x} cy={bookAt.y} r={radii.book} />
-                {wrapInCircle(p.book.title, BOOK_R, BOOK_FONT, BOOK_LEADING).lines.map((line, i, all) =>
-                  line ? (
-                    <text key={i} x={bookAt.x} y={bookAt.y + (i - (all.length - 1) / 2) * BOOK_LEADING * k} dy="0.35em" style={{ fontSize: BOOK_FONT * k }}>
-                      {line}
-                    </text>
-                  ) : null,
-                )}
+                <rect className="bf-shape" x={bookAt.x - radii.book * BOOK_SQUARE} y={bookAt.y - radii.book * BOOK_SQUARE} width={2 * radii.book * BOOK_SQUARE} height={2 * radii.book * BOOK_SQUARE} rx={radii.book * BOOK_ROUND} />
+                {(() => {
+                  const t = bookTitle(p.book.title);
+                  return t.lines.map((line, i, all) =>
+                    line ? (
+                      <text key={i} x={bookAt.x} y={bookAt.y + (i - (all.length - 1) / 2) * t.leading * k} dy="0.35em" style={{ fontSize: t.font * k }}>
+                        {line}
+                      </text>
+                    ) : null,
+                  );
+                })()}
               </a>
             </g>
           );
@@ -835,7 +984,7 @@ export function WebView({ books }: { books: Book[] }) {
         )}
 
         {hover && (
-          <g className="bf-web-tip" transform={`translate(${T(hover.at).x} ${T(hover.at).y - (hover.sub ? radii.sub : radii.chapter) - 10 * Math.sqrt(k)})`} pointerEvents="none">
+          <g className="bf-web-tip" transform={`translate(${T(hover.at).x} ${T(hover.at).y - (hover.sub ? radii.sub : radii.chapter / COS30) - 10 * Math.sqrt(k)})`} pointerEvents="none">
             <text textAnchor="middle" style={{ fontSize: TIP_FONT * Math.sqrt(k), strokeWidth: 5 * Math.sqrt(k) }}>
               {hover.label}
             </text>
@@ -895,5 +1044,6 @@ export function WebView({ books }: { books: Book[] }) {
         </div>
       </div>
     </div>
+    </>
   );
 }
