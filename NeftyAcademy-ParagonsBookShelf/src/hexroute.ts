@@ -8,8 +8,8 @@
  */
 import type { Point } from './layout';
 
-/** 격자점 사이의 거리. 하위 챕터 간격(27)의 절반이다. */
-export const GRID = 13.5;
+/** 격자점 사이의 거리. 하위 챕터 간격(WebView 의 SUB_STEP = 29)의 절반이다. */
+export const GRID = 14.5;
 
 /** 격자의 두 축(60도). 0도 = 12시, 시계 방향. */
 export interface HexAxes {

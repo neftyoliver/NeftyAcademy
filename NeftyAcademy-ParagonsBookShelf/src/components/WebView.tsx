@@ -1,6 +1,6 @@
 import { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as RMouseEvent, type PointerEvent as RPointerEvent } from 'react';
 import { bookColor, useBook } from '../context';
-import { HexGrid } from '../hexroute';
+import { GRID, HexGrid } from '../hexroute';
 import { hexRingsFor, hexSpiral, type Point } from '../layout';
 import { layoutOnion } from '../onion';
 import { href } from '../router';
@@ -14,7 +14,7 @@ const BOOK_LEADING = 18.5;
 const CHAPTER_R = 15;
 const CHAPTER_FONT = 0.8; // 번호만 보일 때 번호의 글자 크기(챕터 반지름의 몇 배인가)
 const SUB_R = 7;
-const SUB_STEP = 27; // 하위 챕터 점 사이 간격(= 챕터에서 첫 고리까지의 거리). 길 찾기 격자(hexroute 의 GRID)의 두 배
+const SUB_STEP = 2 * GRID; // 하위 챕터 점 사이 간격(= 챕터에서 첫 고리까지의 거리, 29). 길 찾기 격자(hexroute 의 GRID)의 두 배
 const CHAPTER_STEP = 124; // 챕터 사이 간격의 최소값. 하위 챕터가 많으면 더 벌어진다. 실제 값은 SUB_STEP 의 배수로 올림한다
 const BOOK_GAP = 14; // 책 영역과 영역 사이의 틈
 const REGION_PAD = 20; // 노드에서 책 영역의 테두리까지
@@ -31,10 +31,23 @@ const TITLE_FONTS = [0.38, 0.34, 0.3, 0.27];
 const TITLE_LEADING = 1.16; // 줄 사이 = 글자 크기의 몇 배
 const ZOOM_MAX = 16; // 책이 많은 지도에서도 쪽 노드의 제목을 읽을 수 있을 만큼
 const HOVER_WAIT = 160; // 마우스가 노드에 이만큼(ms) 머물러야 그 노드를 고른다. 지나가다 스친 노드의 줄까지 그려져 남지 않게
-// 흐르는 화살표는 화면의 픽셀로 크기를 정한다. 책이 많아 지도가 커져도 같은 크기로 보인다
-const FLOW_SPEED = 75; // 화살표가 흐르는 빠르기(화면 px/초)
-const FLOW_GAP = 90; // 흐르는 화살표 사이의 거리(화면 px)
-const HEAD_SCALE = 1.25; // 화살촉(HEAD: 길이 14.3, 폭 12.6)을 몇 배로 그리는가. 화면에서 길이 18px 쯤
+// 흐르는 화살표의 크기. 화면 px 로 정하되, 확대할수록 굵어진다: 노드가 화면에서 커지는 정도(k / px)의 제곱근에 비례.
+// 그래서 지도 전체를 볼 때는 가늘고, 들어가 볼수록 굵어진다. 책이 많아 지도가 커도 같은 규칙이다
+const FLOW_WIDTH = 1.8; // 줄 굵기의 기준(화면 px). 실제 굵기 = FLOW_WIDTH × √(k / px), FLOW_WIDTH_MIN~MAX 사이
+const FLOW_WIDTH_MIN = 1;
+const FLOW_WIDTH_MAX = 4.5;
+const HEAD_LEN = 14.3; // HEAD 의 길이(폭은 12.6)
+const HEAD_PER_WIDTH = 4.6; // 화살촉의 길이 = 줄 굵기의 몇 배
+const HEAD_MIN = 6; // 화살촉 길이의 최소(화면 px)
+const FLOW_GAP_PER_HEAD = 5.5; // 흐르는 화살촉 사이의 거리 = 화살촉 길이의 몇 배
+const FLOW_GAP_MIN = 36; // 그 거리의 최소(화면 px)
+const FLOW_PACE = 0.9; // 1초에 화살촉 사이 거리의 몇 배만큼 흐르는가
+// 읽는 순서 줄(연한 빨강)과 가운데에서 책으로 가는 줄도 같은 규칙으로 굵기를 정한다(화면 px, 확대할수록 굵게)
+const ORDER_WIDTH = 1.7; // 굵기 = ORDER_WIDTH × √(k / px), ORDER_WIDTH_MIN~MAX 사이. 흐르는 줄(1.8)보다 조금 가늘다
+const ORDER_WIDTH_MIN = 1;
+const ORDER_WIDTH_MAX = 2.8;
+const ORDER_SUB = 0.7; // 하위 챕터 사이의 순서 줄은 이만큼 가늘게
+const ORDER_ARROW = 2.6; // 순서 줄 가운데 화살표의 반길이 = 그 줄 굵기의 몇 배(화면 px)
 const PORTAL_R = 13; // 지도 밖의 책으로 이어지는 화이트홀의 반지름
 // 노드의 모양: 책은 둥근 사각형, 챕터는 육각형, 하위 챕터(쪽)는 원. 위의 반지름은 원으로 그리던 때의 값이고,
 // 사각형과 육각형은 줄이 비켜 가는 거리(CLEAR) 안에 들어가는 크기로 그린다
@@ -135,12 +148,13 @@ const squareHalf = (h: number, c: number): HalfWidth =>
 /**
  * 배율 k 에서의 노드 반지름. 확대하면 노드 사이가 k배로 벌어지고, 노드도(그 속의 글자도) 함께 커진다.
  * 책, 가운데 표시, 하위 챕터는 그대로 k배가 된다. 챕터는 첫 하위 챕터까지의 거리(SUB_STEP * k)에서
- * 하위 챕터와 틈(4 + k. 배율 1에서 5)을 뺀 만큼이라 k배보다 조금 더 빨리 커지고, 그만큼 제목이 일찍 들어간다.
+ * 하위 챕터와 틈(4 + 3k. 배율 1에서 7)을 뺀 만큼이라 k배보다 조금 더 빨리 커지고, 그만큼 제목이 일찍 들어간다.
+ * 챕터의 반지름은 19k - 4 이다(배율 1에서 CHAPTER_R).
  * 어느 배율에서도 노드끼리 겹치지 않고, 줄이 비켜 가는 거리(CLEAR * k)보다 작다.
  */
 function radiiAt(k: number): { book: number; hub: number; chapter: number; sub: number } {
   const sub = SUB_R * k;
-  return { book: BOOK_R * k, hub: HUB_R * k, chapter: SUB_STEP * k - (4 + k) - sub, sub };
+  return { book: BOOK_R * k, hub: HUB_R * k, chapter: SUB_STEP * k - (4 + 3 * k) - sub, sub };
 }
 
 /**
@@ -226,16 +240,18 @@ const HEAD = 'M-7.5 -6.3 L6.8 0 L-7.5 6.3 L-3.6 0 Z'; // 흐르는 화살촉. �
 
 /**
  * 흐르는 화살표 한 줄. pts = 가리키는 쪽에서 가리킨 쪽으로 가는 길(화면 좌표), r = 도착하는 노드의 반지름,
- * px = 화면 1px 이 지도 그림(viewBox)의 몇 단위인가. 화살촉의 크기와 간격, 빠르기는 화면 px 로 정한다(줄의 굵기는 CSS).
+ * px = 화면 1px 이 지도 그림(viewBox)의 몇 단위인가, width = 줄의 굵기(화면 px). 화살촉의 크기와 간격, 빠르기는 굵기에 맞춘다.
  * 화살촉들이 길을 따라 흘러가고, 도착하는 노드 바로 앞에는 화살촉 하나가 서 있다.
  * still 이면(움직임을 줄이라는 설정) 흐르지 않고 서 있는 화살촉만 그린다.
  */
-function Flow({ pts, r, still, px }: { pts: Point[]; r: number; still: boolean; px: number }) {
+function Flow({ pts, r, still, px, width }: { pts: Point[]; r: number; still: boolean; px: number; width: number }) {
   const d = pathOf(pts);
   const len = lengthOf(pts);
-  const n = clamp(Math.round(len / (FLOW_GAP * px)), 1, 10);
-  const dur = Math.max(1.2, len / (FLOW_SPEED * px));
-  const size = HEAD_SCALE * px;
+  const head = Math.max(HEAD_MIN, width * HEAD_PER_WIDTH); // 화살촉의 길이(화면 px)
+  const size = (head / HEAD_LEN) * px; // HEAD 를 몇 배로 그리는가(지도 그림 단위)
+  const gap = Math.max(FLOW_GAP_MIN, head * FLOW_GAP_PER_HEAD) * px;
+  const n = clamp(Math.round(len / gap), 1, 10);
+  const dur = Math.max(1.2, len / (gap * FLOW_PACE));
   const end = pts[pts.length - 1]!;
   const before = pts[pts.length - 2] ?? end;
   const seg = Math.hypot(end.x - before.x, end.y - before.y) || 1;
@@ -244,7 +260,7 @@ function Flow({ pts, r, still, px }: { pts: Point[]; r: number; still: boolean; 
   const turn = (Math.atan2(uy, ux) * 180) / Math.PI;
   return (
     <g>
-      <path className="bf-flow-line" d={d} />
+      <path className="bf-flow-line" d={d} style={{ strokeWidth: width }} />
       {still
         ? null
         : Array.from({ length: n }, (_, i) => (
@@ -822,6 +838,10 @@ export function WebView({ books }: { books: Book[] }) {
     const node = T(focusSpot.at);
     portal = mode === 'in' ? { at: hole, r, pts: [hole, node], end: radiusOf(focusSpot) } : { at: hole, r, pts: [node, hole], end: r };
   }
+  /** 흐르는 줄의 굵기(화면 px). 노드가 화면에서 커지는 만큼(k / px)의 제곱근에 비례한다 */
+  const flowWidth = clamp(FLOW_WIDTH * Math.sqrt(k / px), FLOW_WIDTH_MIN, FLOW_WIDTH_MAX);
+  /** 읽는 순서 줄의 굵기(화면 px). 같은 규칙이다 */
+  const orderWidth = clamp(ORDER_WIDTH * Math.sqrt(k / px), ORDER_WIDTH_MIN, ORDER_WIDTH_MAX);
   const flip = (): void => setMode((m) => (m === 'in' ? 'out' : 'in'));
   /** 남겨 둔 줄을 모두 지우고, 고른 챕터도 푼다 */
   const wipe = (): void => {
@@ -846,7 +866,7 @@ export function WebView({ books }: { books: Book[] }) {
         role="img"
         aria-label="책과 챕터 지도"
         // 전체 보기에서는 한 손가락으로 쪽을 위아래로 넘길 수 있게 두고, 확대한 뒤에는 한 손가락이 지도를 끈다
-        style={{ maxHeight: fit ?? undefined, touchAction: k > 1 ? 'none' : 'pan-y' }}
+        style={{ maxHeight: fit ?? undefined, touchAction: k > 1 ? 'none' : 'pan-y', ['--bf-order-w' as string]: `${orderWidth.toFixed(2)}px`, ['--bf-order-sub-w' as string]: `${Math.max(ORDER_WIDTH_MIN * 0.8, orderWidth * ORDER_SUB).toFixed(2)}px` }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
@@ -876,7 +896,7 @@ export function WebView({ books }: { books: Book[] }) {
             p.order.map((o, i) => (
               <g key={`${p.book.id}-${i}`} className={o.sub ? 'is-sub' : undefined}>
                 <path d={path(o.line)} />
-                <path className="bf-web-arrow" d={arrow(o.line, o.sub ? 4.2 : 5.6)} />
+                <path className="bf-web-arrow" d={arrow(o.line, (o.sub ? orderWidth * ORDER_SUB : orderWidth) * ORDER_ARROW * px)} />
               </g>
             )),
           )}
@@ -889,9 +909,9 @@ export function WebView({ books }: { books: Book[] }) {
 
         <g className={`bf-web-flows is-${mode}`}>
           {flows.map((f) => (
-            <Flow key={f.key} pts={f.pts} r={f.r} still={still} px={px} />
+            <Flow key={f.key} pts={f.pts} r={f.r} still={still} px={px} width={flowWidth} />
           ))}
-          {portal ? <Flow pts={portal.pts} r={portal.end} still={still} px={px} /> : null}
+          {portal ? <Flow pts={portal.pts} r={portal.end} still={still} px={px} width={flowWidth} /> : null}
         </g>
 
         {hub && (

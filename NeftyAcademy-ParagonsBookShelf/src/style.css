@@ -166,9 +166,9 @@ a { color: inherit; }
 .bf-web-guide .is-order { stroke: #e39a9a; stroke-width: 2; }
 .bf-web-guide .is-order-head { fill: #d98383; }
 .bf-web-guide .is-link { stroke: var(--bf-accent, #c0842b); stroke-width: 1.7; opacity: 0.75; }
-.bf-web-guide .is-in { stroke: #d1791f; stroke-width: 3; }
+.bf-web-guide .is-in { stroke: #d1791f; stroke-width: 2.4; }
 .bf-web-guide .is-in-head { fill: #d1791f; }
-.bf-web-guide .is-out { stroke: #2f7fc2; stroke-width: 3; }
+.bf-web-guide .is-out { stroke: #2f7fc2; stroke-width: 2.4; }
 .bf-web-guide .is-out-head { fill: #2f7fc2; }
 .bf-web-guide kbd { font-family: var(--bf-mono); font-size: 11px; line-height: 1.5; padding: 0 5px; border: 1px solid var(--bf-line); border-bottom-width: 2px; border-radius: 4px; background: var(--bf-paper); color: var(--bf-ink); }
 .bf-web { background: var(--bf-paper); border: 1px solid var(--bf-line); border-radius: var(--bf-radius); padding: 8px; overflow-x: auto; }
@@ -182,10 +182,10 @@ a { color: inherit; }
 .bf-node-sub .bf-shape { fill: color-mix(in srgb, var(--node) 30%, var(--bf-paper)); stroke: var(--node); stroke-width: 1.5; }
 .bf-node-sub.is-draft .bf-shape { fill: var(--bf-paper); stroke-dasharray: 2 2; }
 .bf-node-sub:hover .bf-shape, .bf-node-sub:focus-visible .bf-shape { transform: scale(1.5); }
-.bf-web-lines path { fill: none; stroke: var(--bf-line); stroke-width: 2; stroke-linejoin: round; pointer-events: none; }
-/* 읽는 순서 줄: 책 → 1 → 2 → … 연한 빨강, 가운데의 화살표가 방향 */
-.bf-web-order path { fill: none; stroke: #e39a9a; stroke-width: 2.1; stroke-linejoin: round; pointer-events: none; }
-.bf-web-order .is-sub path { stroke-width: 1.4; stroke: #efc4c4; }
+.bf-web-lines path { fill: none; stroke: var(--bf-line); stroke-width: var(--bf-order-w, 1.4px); vector-effect: non-scaling-stroke; stroke-linejoin: round; pointer-events: none; }
+/* 읽는 순서 줄: 책 → 1 → 2 → … 연한 빨강, 가운데의 화살표가 방향. 굵기는 화면 px 로, WebView 가 배율에 맞춰 정한다(--bf-order-w) */
+.bf-web-order path { fill: none; stroke: #e39a9a; stroke-width: var(--bf-order-w, 1.4px); vector-effect: non-scaling-stroke; stroke-linejoin: round; pointer-events: none; }
+.bf-web-order .is-sub path { stroke-width: var(--bf-order-sub-w, 1px); stroke: #efc4c4; }
 .bf-web-order path.bf-web-arrow { fill: #d98383; stroke: none; }
 .bf-web-order .is-sub path.bf-web-arrow { fill: #ecb6b6; stroke: none; }
 /* 책 한 권의 영역: 그 책 색의 점선 테두리와 옅은 바탕 */
@@ -198,8 +198,8 @@ a { color: inherit; }
 /* 고른 챕터의 화살표. 들어오는 것(이 챕터를 참조하는 쪽에서)은 주황, 나가는 것(이 챕터가 참조하는 쪽으로)은 파랑 */
 .bf-web-flows { --bf-flow: #d1791f; pointer-events: none; }
 .bf-web-flows.is-out { --bf-flow: #2f7fc2; }
-/* 흐르는 줄의 굵기는 화면 px 이다(지도가 커도 같은 굵기). 화살촉의 크기는 WebView 가 화면 px 로 맞춘다 */
-.bf-flow-line { fill: none; stroke: var(--bf-flow); stroke-width: 3.5px; vector-effect: non-scaling-stroke; stroke-linejoin: round; stroke-linecap: round; opacity: 0.9; }
+/* 흐르는 줄의 굵기는 화면 px 이다. WebView 가 배율에 맞춰 굵기를 정하고(style), 화살촉의 크기도 그 굵기에 맞춘다 */
+.bf-flow-line { fill: none; stroke: var(--bf-flow); stroke-width: 2px; vector-effect: non-scaling-stroke; stroke-linejoin: round; stroke-linecap: round; opacity: 0.9; }
 .bf-flow-head { fill: var(--bf-flow); stroke: var(--bf-paper); stroke-width: 1; stroke-linejoin: round; }
 /* 지도 밖의 책으로 이어지는 자리: 화이트홀 */
 .bf-portal-ring { fill: none; stroke: #5b8fd6; stroke-width: 1.2; stroke-dasharray: 3 3; opacity: 0.85; transform-box: fill-box; transform-origin: center; animation: bf-spin 9s linear infinite; }
