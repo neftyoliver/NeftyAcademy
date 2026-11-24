@@ -1,0 +1,116 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'nodiscard, maybe_unused, deprecated, fallthrough, 그리고 noexcept';
+export const terms = [
+  'nodiscard', 'maybe_unused', 'fallthrough', 'noreturn', 'no_unique_address', '~deprecated',
+  '~likely', '~unlikely', '~assume',
+];
+
+`[[…]]`는 컴파일러에게 건네는 쪽지입니다. 프로그램의 뜻은 바꾸지 않고, 경고를 더하거나 없애거나 최적화의 실마리를 줍니다. `noexcept`는 속성이 아니라 함수 타입의 일부지만 쓰임새가 닮아서 여기서 함께 소개합니다.
+
+## 자주 쓰는 속성
+
+```cpp
+#include <print>
+
+[[nodiscard]] int read_register(int address) noexcept
+{
+    return address * 2;
+}
+
+[[deprecated("read_register를 쓰세요")]]
+int old_read(int address) { return read_register(address); }
+
+void handle(int code)
+{
+    switch (code) {
+    case 1:
+        std::println("하나");
+        [[fallthrough]];            // 일부러 흘러내린다
+    case 2:
+        std::println("둘");
+        break;
+    default:
+        break;
+    }
+}
+
+int main()
+{
+    [[maybe_unused]] int spare = 0;
+    int v = read_register(8);
+    // read_register(8);            // 경고: 반환값을 버렸다
+    handle(1);
+    std::println("{} {}", v, noexcept(read_register(1)));
+}
+```
+
+```text
+하나
+둘
+16 true
+```
+
+| 속성 | 뜻 | 표준 |
+| --- | --- | --- |
+| `[[nodiscard]]` | 반환값을 버리면 경고 | C++17 |
+| `[[maybe_unused]]` | 안 쓰여도 경고하지 않는다 | C++17 |
+| `[[deprecated("까닭")]]` | 쓰면 경고. 없앨 예정인 것에 | C++14 |
+| `[[fallthrough]]` | `case`에서 일부러 `break` 없이 내려간다 | C++17 |
+| `[[noreturn]]` | 이 함수는 돌아오지 않는다 (`std::exit`, 무한 루프) | C++11 |
+| `[[likely]]`, `[[unlikely]]` | 자주 가는 길과 드문 길 | C++20 |
+| `[[no_unique_address]]` | 빈 멤버가 자리를 차지하지 않게 | C++20 |
+| `[[assume(식)]]` | 식이 참이라고 믿고 최적화. 거짓이면 정의되지 않은 동작 | C++23 |
+
+C23도 같은 문법을 들였습니다([「C23」](#/read/c-basic/ver-c23)). 모르는 속성은 컴파일러가 무시하므로(경고는 낼 수 있습니다) 새 속성을 써도 옛 컴파일러에서 빌드가 깨지지 않습니다.
+
+## nodiscard는 넉넉히 붙인다
+
+가장 쓸모 있는 속성입니다. 반환값을 무시하면 틀린 코드가 되는 함수에 붙입니다.
+
+- 오류 코드나 성공 여부를 돌려주는 함수
+- 계산 결과만 돌려주고 다른 일은 하지 않는 함수 (`empty()`를 `clear()`로 착각하는 실수를 잡는다)
+- 자원을 쥔 객체를 돌려주는 함수
+
+타입에도 붙일 수 있습니다. `struct [[nodiscard]] error_code { … };`로 정의하면 그 타입을 돌려주는 모든 함수에 적용됩니다. 일부러 버릴 때는 `(void)f();`나 `std::ignore = f();`로 뜻을 밝힙니다.
+
+## noexcept
+
+`noexcept`는 "이 함수는 예외를 던지지 않는다"는 약속입니다. 함수 선언의 뒤쪽, `const` 다음에 적습니다.
+
+```cpp nocheck
+int read_register(int address) noexcept;
+void swap(buffer& other) noexcept;
+```
+
+약속을 어기고 예외가 빠져나가려 하면 프로그램은 그 자리에서 `std::terminate`로 끝납니다. 컴파일러가 본문을 검사해 주지는 않습니다.
+
+| 붙이는 까닭 | 설명 |
+| --- | --- |
+| 표준 컨테이너가 본다 | `std::vector`는 원소의 이동 생성자가 `noexcept`일 때만 이동하고, 아니면 복사한다 |
+| 읽는 사람에게 알린다 | 이 호출 뒤에는 오류 처리가 필요 없다 |
+| 코드가 작아질 수 있다 | 예외가 지나갈 길을 만들지 않는다 |
+
+`noexcept(식)`은 연산자로도 씁니다. 식이 예외를 던질 수 없는지를 컴파일 시점의 `bool`로 알려 줍니다. 위 예제의 마지막 줄이 그것입니다. 예외 전체와 `noexcept`를 어디에 붙일지는 [「noexcept」](#/read/cpp-syntax/exc-noexcept)에서 다시 봅니다.
+
+## 컴파일러 전용 속성
+
+표준에 없는 것은 컴파일러 이름을 앞에 붙여 씁니다.
+
+```cpp nocheck
+[[gnu::always_inline]] inline int fast(int x);
+[[gnu::packed]] struct header { … };
+[[msvc::noinline]] void slow();
+```
+
+`__attribute__((…))`, `__declspec(…)`로 쓰던 것들의 새 표기입니다. 다른 컴파일러는 모르는 속성으로 보고 건너뜁니다.
+
+<Note>
+속성은 "붙여도 떼도 올바른 프로그램의 동작은 같다"는 원칙으로 설계됐습니다. `[[assume]]`만 예외에 가깝습니다. 가정이 틀리면 정의되지 않은 동작이 되므로, 측정으로 이득을 확인한 곳에만 씁니다.
+</Note>
+
+## 정리
+
+- `[[…]]`는 경고와 최적화를 위한 쪽지. 프로그램의 뜻은 바꾸지 않는다
+- 반환값을 버리면 안 되는 함수에는 `[[nodiscard]]`
+- `noexcept`는 던지지 않는다는 약속. 어기면 프로그램이 끝난다

@@ -1,0 +1,236 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '결과와 예외를 받아 오는 future, async의 실행 방식과 함정, promise로 값 넣기, async가 맞지 않는 곳';
+export const terms = [
+  'std::future', '~future', 'std::async', 'std::launch', 'launch::async', 'launch::deferred',
+  'future_status', 'future_error', 'future_errc',
+];
+
+[스레드](#/read/cpp-stl/conc-thread)의 함수가 돌려주는 값은 버려집니다. "다른 스레드에서 계산하고 **결과를 받아 오는**" 일을 위한 것이 `<future>`입니다. `std::future<T>`는 "나중에 `T`가 들어올 자리"이고, `std::async`가 그 자리를 채울 일을 시작시킵니다.
+
+## async와 future
+
+```cpp
+#include <chrono>
+#include <functional>
+#include <future>
+#include <numeric>
+#include <print>
+#include <stdexcept>
+#include <thread>
+#include <vector>
+
+using namespace std::chrono_literals;
+
+long long slow_sum(const std::vector<int>& data)
+{
+    std::this_thread::sleep_for(100ms);     // 오래 걸리는 일을 흉내 낸다
+    return std::accumulate(data.begin(), data.end(), 0LL);
+}
+
+int read_sensor(int address)
+{
+    if (address > 0x7f)
+        throw std::out_of_range("주소가 범위를 벗어났다");
+    return address * 2;
+}
+
+int main()
+{
+    const std::vector<int> data(1000, 1);
+    const auto start = std::chrono::steady_clock::now();
+
+    // 두 일을 동시에 시작한다
+    std::future<long long> a = std::async(std::launch::async, slow_sum,
+                                          std::cref(data));
+    std::future<long long> b = std::async(std::launch::async, slow_sum,
+                                          std::cref(data));
+    const long long first = a.get();        // 끝날 때까지 기다렸다가 받는다
+    const long long second = b.get();
+    const auto took = std::chrono::steady_clock::now() - start;
+    std::println("{} / 190ms 안에 끝났다 {}", first + second, took < 190ms);
+    std::println("get 뒤에 valid {}", a.valid());
+
+    // 일하던 쪽에서 난 예외는 get 에서 다시 던져진다
+    std::future<int> failing = std::async(std::launch::async, read_sensor, 0x90);
+    try {
+        const int value = failing.get();
+        std::println("{}", value);
+    } catch (const std::out_of_range& e) {
+        std::println("get 이 던졌다: {}", e.what());
+    }
+}
+```
+
+```text
+2000 / 190ms 안에 끝났다 true
+get 뒤에 valid false
+get 이 던졌다: 주소가 범위를 벗어났다
+```
+
+100ms짜리 일 둘이 190ms 안에 끝났으니 함께 돈 것입니다. 알아 둘 규칙이 셋입니다.
+
+- **`get()`은 한 번만** 부를 수 있습니다. 값을 꺼내 가면 `future`는 빈 상태(`valid()`가 `false`)가 되고, 다시 부르면 `std::future_error`가 납니다. 여러 곳에서 받아야 하면 `std::shared_future`로 바꿉니다
+- **예외도 결과입니다.** 일하던 스레드에서 난 예외가 [붙잡혀 있다가](#/read/cpp-stl/err-exceptions) `get()`을 부른 스레드에서 다시 던져집니다. 스레드 밖으로 예외가 새어 프로그램이 죽는 일이 없습니다
+- 인자는 스레드처럼 **복사**됩니다. 참조로 넘기려면 `std::cref`, `std::ref`를 씁니다
+
+## 실행 방식과 두 가지 함정
+
+`std::async`의 첫 인자는 어떻게 돌릴지를 정합니다.
+
+| 방식 | 뜻 |
+| --- | --- |
+| `std::launch::async` | 새 스레드에서 곧바로 시작한다 |
+| `std::launch::deferred` | 시작하지 않는다. `get()`을 부르면 **그 스레드에서** 그때 돈다 |
+| 생략 | 둘 중 무엇이 될지 구현이 고른다 |
+
+```cpp
+#include <chrono>
+#include <future>
+#include <print>
+#include <thread>
+
+using namespace std::chrono_literals;
+
+void slow_job()
+{
+    std::this_thread::sleep_for(100ms);
+}
+
+int main()
+{
+    const auto caller = std::this_thread::get_id();
+    auto same_thread = [caller] { return std::this_thread::get_id() == caller; };
+
+    auto lazy = std::async(std::launch::deferred, same_thread);
+    const bool not_started = lazy.wait_for(0s) == std::future_status::deferred;
+    const bool lazy_same = lazy.get();
+    std::println("deferred: 아직 시작 안 함 {}, 부른 스레드에서 돈다 {}",
+                 not_started, lazy_same);
+
+    auto eager = std::async(std::launch::async, same_thread);
+    std::println("async:    부른 스레드에서 돈다 {}", eager.get());
+
+    // future 를 받아 두지 않으면
+    const auto start = std::chrono::steady_clock::now();
+    {
+        const auto first = std::async(std::launch::async, slow_job);
+    }   // first 의 소멸자가 일이 끝나기를 기다린다
+    {
+        const auto second = std::async(std::launch::async, slow_job);
+    }
+    const auto took = std::chrono::steady_clock::now() - start;
+    std::println("차례로 돌았다 {}", took >= 200ms);
+}
+```
+
+```text
+deferred: 아직 시작 안 함 true, 부른 스레드에서 돈다 true
+async:    부른 스레드에서 돈다 false
+차례로 돌았다 true
+```
+
+**함정 하나.** 방식을 생략하면 `deferred`가 될 수 있고, 그러면 `get()`을 부를 때까지 아무 일도 일어나지 않습니다. 끝났는지 `wait_for`로 떠보며 기다리는 루프는 영원히 돕니다. 동시에 돌리려는 것이면 **`std::launch::async`를 늘 적습니다.**
+
+**함정 둘.** `std::async`가 돌려준 `future`는 사라질 때 **일이 끝나기를 기다립니다.** 그래서 `std::async(std::launch::async, slow_job);`처럼 결과를 받지 않고 부르면, 임시 `future`가 그 줄 끝에서 사라지면서 기다립니다. "던져 놓고 잊는" 호출이 되지 않고 그냥 차례로 돕니다. GCC 14는 이렇게 쓰면 반환값을 버렸다고 경고합니다. 위 예제는 블록으로 같은 일을 보인 것입니다.
+
+## 기다리는 동안 다른 일 하기
+
+```cpp
+#include <chrono>
+#include <future>
+#include <print>
+#include <thread>
+
+using namespace std::chrono_literals;
+
+int main()
+{
+    std::future<int> answer = std::async(std::launch::async, [] {
+        std::this_thread::sleep_for(100ms);
+        return 42;
+    });
+
+    int polls = 0;
+    // 10ms 씩 기다려 보고, 아직이면 다른 일을 한다
+    while (answer.wait_for(10ms) != std::future_status::ready)
+        ++polls;                // 화면을 고치거나 버튼을 읽는 자리
+    std::println("기다리는 사이 세 번 넘게 돌았다 {}", polls >= 3);
+    std::println("{}", answer.get());
+}
+```
+
+```text
+기다리는 사이 세 번 넘게 돌았다 true
+42
+```
+
+`wait_for`는 `ready`, `timeout`, `deferred` 가운데 하나를 줍니다. 오래 걸리는 계산을 맡겨 두고 그동안 화면이 멈추지 않게 하는 데 씁니다.
+
+## promise
+
+`future`의 자리를 채우는 쪽 끝이 `std::promise`입니다. `std::async`는 이것을 안에서 써 주는 것이고, 직접 쓰면 값을 **언제 어디서 넣을지**를 내가 정합니다. 콜백으로 결과를 알려 주는 라이브러리를 `future`로 감쌀 때 씁니다.
+
+```cpp
+#include <chrono>
+#include <future>
+#include <print>
+#include <thread>
+#include <utility>
+
+using namespace std::chrono_literals;
+
+int main()
+{
+    std::promise<int> promise;
+    std::future<int> result = promise.get_future();
+
+    std::jthread worker([p = std::move(promise)]() mutable {
+        std::this_thread::sleep_for(10ms);
+        p.set_value(42);            // 예외를 넣으려면 set_exception
+    });
+    std::println("{}", result.get());
+
+    // 값을 넣지 않고 promise 가 사라지면
+    std::future<int> orphan;
+    {
+        std::promise<int> forgotten;
+        orphan = forgotten.get_future();
+    }
+    try {
+        const int value = orphan.get();
+        std::println("{}", value);
+    } catch (const std::future_error& e) {
+        const bool broken = e.code() == std::future_errc::broken_promise;
+        std::println("{} / 깨진 약속 {}", e.what(), broken);
+    }
+}
+```
+
+```text
+42
+std::future_error: Broken promise / 깨진 약속 true
+```
+
+약속한 쪽이 값을 넣지 않고 사라지면, 기다리던 쪽은 영원히 막히는 대신 `broken_promise` 오류를 받습니다. `std::future_error`가 품은 것은 [「system_error와 error_code」](#/read/cpp-stl/err-system)에서 본 `error_code`입니다. 함수 하나를 `future`와 묶어 두었다가 나중에 다른 스레드에서 부르는 `std::packaged_task`도 있고, [「std::async와 packaged_task」](#/read/cpp-advanced/asy-async)에서 다룹니다.
+
+## async가 맞지 않는 곳
+
+| 하려는 일 | `std::async`의 사정 | 쓰는 것 |
+| --- | --- | --- |
+| 작은 일 수천 개 | 부를 때마다 스레드를 만든다. 한 번에 39 µs가 들었다 | [스레드 풀](#/read/cpp-advanced/asy-pool), [병렬 알고리즘](#/read/cpp-stl/alg-parallel) |
+| 끝나면 이어서 다른 일 | "끝나면 이것을 하라"를 붙일 수 없다 | [작업 큐](#/read/cpp-stl/conc-mutex), [코루틴](#/read/cpp-advanced/co-generator) |
+| 도중에 그만두기 | 취소가 없다 | [`jthread`와 `stop_token`](#/read/cpp-stl/conc-thread) |
+| 계속 도는 일 | 결과가 하나뿐인 일을 위한 것이다 | `jthread` |
+
+39 µs는 x86-64 서버에서 빈 함수를 `std::async`로 돌리고 `get()`까지 한 시간입니다. libstdc++는 `launch::async`마다 스레드를 새로 만듭니다. 그래서 `std::async`가 맞는 곳은 "밀리초 넘게 걸리는 일 몇 개를 동시에 돌리고 결과를 모은다"입니다. 파일 여러 개를 함께 읽거나, 센서 몇 개를 한꺼번에 묻는 일이 그렇습니다.
+
+<Note>
+`future`와 `promise`는 값을 **한 번** 넘기는 통로입니다. 넘기는 값이 여럿이면 [작업 큐](#/read/cpp-stl/conc-mutex)가 맞습니다. C++26에 들어오는 `std::execution`(센더와 리시버)은 "끝나면 이어서"와 취소를 갖춘 새 틀이고, [「std::execution(센더와 리시버)」](#/read/cpp-advanced/asy-execution)에서 봅니다.
+</Note>
+
+## 정리
+
+- `std::async(std::launch::async, 함수, 인자...)`가 `future`를 주고, `get()`이 결과를 기다려 받는다. 일하던 쪽의 예외도 `get()`에서 다시 던져진다
+- 실행 방식은 늘 적는다. `async`가 준 `future`는 사라질 때 일을 기다리므로, 받아 두지 않으면 동시에 돌지 않는다
+- `promise`는 값을 넣는 쪽 끝이다. 작은 일을 많이 돌리거나 취소와 이어 붙이기가 필요하면 `async`가 아닌 다른 도구를 쓴다

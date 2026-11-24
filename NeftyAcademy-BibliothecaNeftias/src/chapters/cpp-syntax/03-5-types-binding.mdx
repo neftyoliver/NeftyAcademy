@@ -1,0 +1,99 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '구조체, pair, 배열을 여러 이름으로 풀어 받기';
+
+함수가 값을 둘 이상 돌려줄 때 C에서는 포인터 인자를 썼습니다. C++에서는 구조체나 `std::pair`로 돌려주고, 받는 쪽에서 **구조적 바인딩**으로 풀어 이름을 붙입니다(C++17).
+
+## 풀어서 받기
+
+```cpp
+#include <map>
+#include <print>
+#include <string>
+
+struct reading {
+    double celsius;
+    bool valid;
+};
+
+reading read_sensor() { return {23.5, true}; }
+
+int main()
+{
+    auto [temp, ok] = read_sensor();        // 멤버 순서대로 이름을 붙인다
+    std::println("{} {}", temp, ok);
+
+    std::map<std::string, int> pins = {{"led", 17}, {"button", 27}};
+    for (const auto& [name, pin] : pins)    // pair의 first와 second
+        std::println("{} -> GPIO {}", name, pin);
+
+    if (auto [it, inserted] = pins.insert({"led", 5}); !inserted)
+        std::println("{}은 이미 {}번", it->first, it->second);
+
+    int xy[2] = {3, 4};
+    auto& [x, y] = xy;                      // 참조로 받으면 원본을 고친다
+    x = 30;
+    std::println("{} {}", xy[0], xy[1]);
+}
+```
+
+```text
+23.5 true
+button -> GPIO 27
+led -> GPIO 17
+led은 이미 17번
+30 4
+```
+
+`auto [a, b] = 식;`은 식의 결과를 숨은 변수 하나에 받아 두고, `a`와 `b`를 그 안의 첫째·둘째 부분의 이름으로 만듭니다. `std::map`은 열쇠 순서로 돌기 때문에 `button`이 먼저 나옵니다.
+
+## 풀 수 있는 것
+
+| 대상 | 풀리는 순서 |
+| --- | --- |
+| 배열 | 칸 순서 |
+| 멤버가 모두 공개된 구조체 | 선언한 순서 |
+| `std::pair`, `std::tuple`, `std::array` | 0번, 1번, … |
+
+이름의 개수는 부분의 개수와 정확히 같아야 합니다. 이름은 자리로만 맞춰지므로, 구조체의 멤버 순서를 바꾸면 받는 쪽의 뜻도 조용히 바뀝니다. 멤버가 서너 개를 넘으면 풀지 말고 `r.celsius`처럼 이름으로 쓰는 편이 안전합니다.
+
+## auto, auto&, const auto&
+
+| 쓰는 법 | 뜻 |
+| --- | --- |
+| `auto [a, b] = x;` | `x`를 **복사**한 것의 부분들 |
+| `auto& [a, b] = x;` | `x` 자신의 부분들. 고치면 `x`가 바뀐다 |
+| `const auto& [a, b] = x;` | 복사 없이 읽기만 |
+
+`std::map`을 돌 때 `for (auto [k, v] : m)`이라고 쓰면 원소마다 열쇠와 값이 복사됩니다. 읽기만 한다면 `const auto&`가 맞습니다.
+
+## if와 switch의 초기화 문
+
+위 예제의 `if (선언; 조건)`도 C++17 문법입니다. 선언한 변수는 그 `if`와 `else` 안에서만 보입니다. 구조적 바인딩과 함께 쓰면 "결과를 받아서, 그중 하나로 판단하고, 나머지를 쓴다"가 한 줄에 들어갑니다.
+
+```cpp nocheck
+if (auto [value, ok] = parse(text); ok)
+    use(value);
+else
+    std::println("읽을 수 없습니다");
+```
+
+## 여러 값을 돌려주는 방법 고르기
+
+| 방법 | 장점 | 단점 |
+| --- | --- | --- |
+| 이름 있는 구조체 | 멤버 이름이 문서가 된다 | 타입을 하나 만들어야 한다 |
+| `std::pair`, `std::tuple` | 바로 쓸 수 있다 | `first`, `second`가 무엇인지 알 수 없다 |
+| 출력 인자 (`int& out`) | 옛 코드와 맞는다 | 무엇이 입력이고 출력인지 흐려진다 |
+
+밖으로 내놓는 함수라면 구조체를 권합니다. `std::pair`는 표준 라이브러리가 돌려줄 때(`insert`, `minmax`) 받아서 푸는 정도로 씁니다.
+
+<Note>
+쓰지 않을 부분에도 이름은 붙여야 합니다. C++26부터는 `auto [value, _] = f();`처럼 `_`를 "버리는 이름"으로 여러 번 쓸 수 있습니다.
+</Note>
+
+## 정리
+
+- `auto [a, b] = 식;`으로 구조체, 배열, `pair`를 풀어 받는다
+- 원본을 고치려면 `auto&`, 복사 없이 읽으려면 `const auto&`
+- `if (선언; 조건)`과 함께 쓰면 결과 확인이 짧아진다

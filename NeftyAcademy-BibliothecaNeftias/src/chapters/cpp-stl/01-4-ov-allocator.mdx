@@ -1,0 +1,184 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '컨테이너의 숨은 인자, 엿보는 할당자로 본 컨테이너별 메모리 요청, 바꾸는 세 가지 길';
+
+`std::vector<int>`라고 적으면 컴파일러는 `std::vector<int, std::allocator<int>>`로 읽습니다. 적지 않은 둘째 인자가 **할당자**입니다. 컨테이너는 메모리가 필요할 때 `new`를 직접 부르지 않고 할당자에게 달라고 합니다.
+
+## 컨테이너의 숨은 인자
+
+| 컨테이너 | 온전한 모양 |
+| --- | --- |
+| `vector<T>` | `vector<T, Alloc>` |
+| `string` | `basic_string<char, Traits, Alloc>` |
+| `map<K, V>` | `map<K, V, Compare, Alloc>` |
+| `unordered_map<K, V>` | `unordered_map<K, V, Hash, Equal, Alloc>` |
+
+기본값인 `std::allocator<T>`는 `operator new`와 `operator delete`를 부르고, 그것은 대개 `malloc`과 `free`로 갑니다. 대부분의 프로그램은 이 기본값으로 충분합니다. 그래도 이 자리를 알아 두면 두 가지를 얻습니다. 컨테이너가 메모리를 **언제, 얼마나** 달라고 하는지 볼 수 있고, 필요할 때 그 출처를 바꿀 수 있습니다.
+
+## 엿보는 할당자
+
+메모리를 얻고 돌려줄 때마다 한 줄씩 찍는 할당자를 만듭니다. 할당자가 갖춰야 하는 것은 생각보다 적습니다.
+
+```cpp
+#include <cstddef>
+#include <list>
+#include <memory>
+#include <print>
+#include <vector>
+
+template <typename T>
+struct LogAlloc {
+    using value_type = T;                   // 1. 무엇을 위한 할당자인가
+
+    LogAlloc() = default;
+    template <typename U>                   // 2. 다른 타입용에서 만들 수 있다
+    LogAlloc(const LogAlloc<U>&) noexcept {}
+
+    T* allocate(std::size_t n)              // 3. T가 n개 들어갈 자리를 달라
+    {
+        const std::size_t bytes = n * sizeof(T);
+        std::println("  얻음 {:3}바이트 ({}바이트짜리 {}개)", bytes, sizeof(T), n);
+        return std::allocator<T>{}.allocate(n);
+    }
+    void deallocate(T* p, std::size_t n) noexcept   // 4. 돌려준다
+    {
+        std::println("  반납 {:3}바이트", n * sizeof(T));
+        std::allocator<T>{}.deallocate(p, n);
+    }
+    template <typename U>                   // 5. 서로 바꿔 써도 되는가
+    bool operator==(const LogAlloc<U>&) const noexcept { return true; }
+};
+
+int main()
+{
+    std::println("vector<int>에 3개:");
+    {
+        std::vector<int, LogAlloc<int>> v;
+        for (int i = 0; i < 3; ++i)
+            v.push_back(i);
+    }
+    std::println("list<int>에 2개:");
+    {
+        std::list<int, LogAlloc<int>> l;
+        l.push_back(1);
+        l.push_back(2);
+    }
+}
+```
+
+```text
+vector<int>에 3개:
+  얻음   4바이트 (4바이트짜리 1개)
+  얻음   8바이트 (4바이트짜리 2개)
+  반납   4바이트
+  얻음  16바이트 (4바이트짜리 4개)
+  반납   8바이트
+  반납  16바이트
+list<int>에 2개:
+  얻음  24바이트 (24바이트짜리 1개)
+  얻음  24바이트 (24바이트짜리 1개)
+  반납  24바이트
+  반납  24바이트
+```
+
+`vector`는 1칸, 2칸, 4칸으로 **새로 잡고 옛것을 돌려주며** 자랍니다. [앞에서](#/read/cpp-stl/ov-complexity) 옮긴 횟수로 본 그 일입니다.
+
+`list`는 원소마다 한 번씩 얻습니다. 그리고 `int`용 할당자를 주었는데 24바이트짜리를 달라고 했습니다. `list`가 실제로 할당하는 것은 `int`가 아니라 **노드**(앞뒤 노드를 가리키는 포인터 둘과 `int` 하나, 64비트에서 24바이트)이기 때문입니다. 컨테이너는 받은 할당자를 자기 노드 타입용으로 바꿔서 씁니다. 위의 2번, 다른 타입용 할당자에서 만드는 생성자가 그 일을 위해 있습니다.
+
+## 컨테이너마다 다른 요청
+
+같은 방법으로 나머지도 엿봅니다. 할당자 정의는 위와 같고 반납은 찍지 않았습니다.
+
+```cpp nocheck
+using LogString = std::basic_string<char, std::char_traits<char>, LogAlloc<char>>;
+using Pair = std::pair<const int, int>;
+
+std::println("짧은 string:");
+LogString small = "pi";
+std::println("긴 string:");
+LogString big = "raspberry pi 5 model b";
+
+std::println("map<int, int>에 2개:");
+std::map<int, int, std::less<int>, LogAlloc<Pair>> m;
+m[1] = 10;
+m[2] = 20;
+
+std::println("unordered_map<int, int>에 2개:");
+std::unordered_map<int, int, std::hash<int>, std::equal_to<int>, LogAlloc<Pair>> u;
+u[1] = 10;
+u[2] = 20;
+```
+
+```text
+짧은 string:
+긴 string:
+  얻음  23바이트 (1바이트짜리 23개)
+map<int, int>에 2개:
+  얻음  40바이트 (40바이트짜리 1개)
+  얻음  40바이트 (40바이트짜리 1개)
+unordered_map<int, int>에 2개:
+  얻음  16바이트 (16바이트짜리 1개)
+  얻음 104바이트 (8바이트짜리 13개)
+  얻음  16바이트 (16바이트짜리 1개)
+```
+
+| 컨테이너 | 요청하는 방식 |
+| --- | --- |
+| `vector`, `string` | 한 덩어리. 모자라면 더 큰 덩어리로 옮긴다 |
+| `list`, `map`, `set` | 원소마다 노드 하나 |
+| `unordered_map` | 원소마다 노드 하나, 그리고 버킷 배열 한 덩어리 |
+| `deque` | 고정 크기 블록 여럿과 블록 목록 |
+
+짧은 문자열은 아무것도 얻지 않았습니다. `string` 객체 안에 들어갔기 때문이고 [「작은 문자열 최적화」](#/read/cpp-stl/impl-sso)에서 봅니다. `map`의 노드가 40바이트인 것은 열쇠와 값 8바이트에 포인터 셋과 색 표시가 붙어서입니다.
+
+<Note>
+위 숫자는 GCC 14(libstdc++), 64비트의 것입니다. 같은 코드를 Clang 20과 libc++로 돌리면 22글자짜리 "긴" 문자열도 할당 없이 들어가고, `unordered_map`의 노드는 24바이트, 처음 버킷은 2개입니다. 표준은 인터페이스와 복잡도만 정하고 속은 구현이 정합니다. [「libstdc++, libc++, MSVC STL」](#/read/cpp-stl/impl-three)에서 견줍니다.
+</Note>
+
+## 작은 기기에서 이것이 뜻하는 것
+
+노드를 쓰는 컨테이너는 원소 하나에 할당 한 번입니다. 할당에는 [`malloc`이 붙이는 머리표](#/read/c-basic/heap-structure)까지 듭니다.
+
+```cpp nosan
+#include <list>
+#include <malloc.h>
+#include <print>
+#include <vector>
+
+int main()
+{
+    // glibc 의 mallinfo2: 지금 쓰고 있는 힙 바이트
+    auto used = [] { return mallinfo2().uordblks; };
+
+    auto before = used();
+    std::vector<int> v(1'000'000, 1);
+    std::println("vector<int> 100만 개: {:.1f} MB", (used() - before) / 1e6);
+
+    before = used();
+    std::list<int> l(1'000'000, 1);
+    std::println("list<int>   100만 개: {:.1f} MB", (used() - before) / 1e6);
+}
+```
+
+```text
+vector<int> 100만 개: 4.0 MB
+list<int>   100만 개: 32.0 MB
+```
+
+4바이트짜리 값 하나에 `list`는 32바이트를 씁니다. 노드 24바이트에 `malloc`의 몫 8바이트입니다. 메모리가 512MB인 보드에서는 이 여덟 배가 곧 "되느냐 안 되느냐"가 됩니다. 메모리만이 아닙니다. 할당 100만 번은 시간이고, 오래 도는 프로그램에서는 힙이 조각나는 원인입니다.
+
+## 출처를 바꾸는 세 가지 길
+
+| 길 | 바뀌는 범위 | 값 |
+| --- | --- | --- |
+| 할당자를 템플릿 인자로 | 그 컨테이너 하나 | 타입이 달라진다. `vector<int, A>`는 `vector<int>`를 받는 함수에 못 넘긴다 |
+| `std::pmr` 컨테이너 | 그 컨테이너 하나, 실행 중에 고른다 | 타입은 하나(`std::pmr::vector<int>`). 할당마다 가상 함수 호출 |
+| 전역 `operator new`나 `malloc` 교체 | 프로그램 전체 | 컨테이너별로 고를 수 없다 |
+
+둘째가 요즘 권하는 길입니다. "이 요청을 처리하는 동안의 할당은 전부 스택 위의 4KB 버퍼에서"처럼, 힙을 건드리지 않는 구간을 만들 수 있습니다. 쓰는 법은 [「allocator와 pmr」](#/read/cpp-stl/mem-allocator)에서 봅니다.
+
+## 정리
+
+- 모든 컨테이너에는 할당자 인자가 있고, 기본값은 `new`와 `delete`로 가는 `std::allocator`다
+- `vector`와 `string`은 한 덩어리를, `list`와 `map`은 원소마다 노드를 요청한다. 노드에는 포인터와 `malloc`의 몫이 더 붙는다
+- 메모리의 출처는 템플릿 인자, `std::pmr`, 전역 교체로 바꿀 수 있고, 새 코드에서는 `pmr`을 먼저 본다

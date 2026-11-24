@@ -1,0 +1,172 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '이 책의 기준. println, expected, 명시적 this, 범위의 보강. GCC 14에서 되는 것과 안 되는 것';
+
+C++23은 이 책이 기준으로 삼는 판입니다. C++20처럼 큰 기둥은 없지만, C++20이 남긴 빈 곳을 메우고 **매일 쓰는 것**을 여럿 주었습니다. `std::println`이 여기서 왔습니다.
+
+## 언어
+
+| 기능 | 한 줄 설명 | 본 곳 |
+| --- | --- | --- |
+| 명시적 `this` | `void f(this auto& self)` | [재귀 람다와 명시적 this](#/read/cpp-syntax/lam-recursive) |
+| `if consteval` | 컴파일할 때인지로 갈라진다 | [consteval](#/read/cpp-syntax/ct-consteval) |
+| 인덱스 여럿의 `[]` | `grid[x, y]` | 아래 예제 |
+| `static operator()`, `static operator[]` | `this`가 필요 없는 호출 연산자 | [클로저 타입](#/read/cpp-syntax/lam-closure) |
+| `[[assume(식)]]` | 최적화를 위한 가정 | |
+| `uz`, `z` 접미어 | `0uz`는 `std::size_t` | 아래 예제 |
+| 범위 `for`의 임시 객체 | 콜론 오른쪽의 임시 객체가 루프 끝까지 산다 | [임시 객체](#/read/cpp-syntax/life-temporary) |
+| `auto(x)` | 값을 복사한 임시 객체를 만든다 | |
+| 넉넉해진 `constexpr` | 거의 모든 함수에 붙일 수 있다 | [constexpr](#/read/cpp-syntax/ct-constexpr) |
+| `#elifdef`, `#elifndef`, `#warning` | 전처리기 편의 | |
+| `<stdfloat>` | `std::float32_t`, `std::float64_t` 등 폭이 정해진 실수 | |
+
+## 라이브러리
+
+| 헤더·기능 | 하는 일 | 본 곳 |
+| --- | --- | --- |
+| `<print>` | `std::print`, `std::println` | [println](#/read/cpp-syntax/from-c-hello) |
+| `<expected>` | 값 아니면 오류 | [optional과 expected](#/read/cpp-syntax/exc-without) |
+| `optional`의 `transform`, `and_then`, `or_else` | 이어 붙이기 | [optional과 expected](#/read/cpp-syntax/exc-without) |
+| `std::move_only_function` | 복사할 수 없는 것도 담는 `function` | [std::function](#/read/cpp-syntax/lam-function) |
+| `import std;` | 표준 라이브러리를 모듈로 | [모듈](#/read/cpp-syntax/mod-modules) |
+| `std::ranges::to` | 파이프 끝에서 컨테이너로 | 아래 예제 |
+| `views::enumerate`, `zip`, `chunk`, `slide`, `adjacent`, `join_with`, `stride`, `cartesian_product` | 새 뷰들 | 아래 예제 |
+| `ranges::fold_left`, `contains`, `find_last` | 새 알고리즘 | 아래 예제 |
+| 범위의 서식 | `std::println("{}", vector)` | [formatter](#/read/cpp-syntax/op-stream) |
+| `<generator>` | `co_yield`로 값을 하나씩 내는 함수 | |
+| `<mdspan>` | 다차원 배열의 뷰 | |
+| `<flat_map>`, `<flat_set>` | 정렬된 벡터 위의 `map`, `set`. 캐시에 좋다 | |
+| `<stacktrace>` | 지금의 호출 스택을 얻는다 | |
+| `std::byteswap`, `std::to_underlying`, `std::unreachable` | | [bit_cast](#/read/cpp-syntax/cast-reinterpret), [static_cast](#/read/cpp-syntax/cast-static) |
+| `std::out_ptr`, `std::inout_ptr` | `T**`를 받는 C 함수에 스마트 포인터를 넘긴다 | |
+| `string::contains`, `resize_and_overwrite` | | |
+| `std::start_lifetime_as` | 바이트 버퍼를 객체로 **정식으로** 본다 | [별칭](#/read/cpp-syntax/ubc-aliasing) |
+
+## C++23의 모양
+
+```cpp
+#include <algorithm>
+#include <cstddef>
+#include <expected>
+#include <format>
+#include <functional>
+#include <print>
+#include <ranges>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+struct Grid {
+    std::size_t width;
+    std::vector<int> cells;
+
+    // 인덱스 여럿을 받는 [] 와 명시적 this
+    auto& operator[](this auto& self, std::size_t x, std::size_t y)
+    {
+        return self.cells[y * self.width + x];
+    }
+};
+
+enum class Mode { off, on };
+
+std::expected<Mode, std::string> parse(std::string_view text)   // 값 아니면 오류
+{
+    if (text == "on")
+        return Mode::on;
+    if (text == "off")
+        return Mode::off;
+    return std::unexpected(std::format("모르는 모드: {}", text));
+}
+
+int main()
+{
+    std::vector<std::string> names{"temp", "humid", "press"};
+    std::vector<double> values{23.5, 41.0, 1013.5};
+
+    for (auto [index, name] : std::views::enumerate(names))     // 번호 붙이기
+        std::println("{} {}", index, name);
+
+    for (auto [name, value] : std::views::zip(names, values))   // 나란히 돌기
+        std::println("{} = {}", name, value);
+
+    auto longer = names
+        | std::views::filter([](const auto& s) { return s.size() > 4; })
+        | std::ranges::to<std::vector>();           // 파이프 끝에서 컨테이너로
+    std::println("{}", longer.size());
+
+    std::println("{}", std::ranges::fold_left(values, 0.0, std::plus{}));
+
+    Grid grid{3, std::vector<int>(6)};
+    grid[2, 1] = 7;
+    std::println("{}", grid.cells[5]);
+
+    for (auto i = 0uz; i < names.size(); ++i)       // size_t 리터럴
+        if (names[i].contains("um"))                // string::contains
+            std::println("{}", i);
+
+    std::println("{}", std::to_underlying(parse("on").value()));
+    std::println("{}", parse("blink").error());
+}
+```
+
+```text
+0 temp
+1 humid
+2 press
+temp = 23.5
+humid = 41
+press = 1013.5
+2
+1078
+7
+1
+1
+모르는 모드: blink
+```
+
+`for (std::size_t i = 0; …)`을 `auto i = 0uz`로 쓰면 `int`와 `size_t`를 섞어 견주는 [경고](#/read/cpp-syntax/cast-implicit)가 사라집니다. `views::enumerate`는 인덱스가 필요한 범위 `for`를, `views::zip`은 두 배열을 같은 인덱스로 도는 루프를 대신합니다.
+
+## GCC 14에서
+
+이 책의 예제는 GCC 14(라즈베리 파이 OS, 우분투 24.04의 `g++-14`)에서 돌려 확인했습니다. C++23의 대부분이 되지만 빠진 것이 있습니다.
+
+| 기능 | 들어온 GCC |
+| --- | --- |
+| `<expected>`, `std::move_only_function`, `std::byteswap`, `if consteval` | 12 |
+| `views::zip`, `enumerate`, `chunk`, `ranges::fold_left`, `[[assume]]` | 13 |
+| `<print>`, `std::ranges::to`, `<generator>`, 명시적 `this` | 14 |
+| `<stacktrace>` | 14 (`-lstdc++exp`를 함께 링크) |
+| 범위의 서식 `std::println("{}", v)` | **15** |
+| `<flat_map>`, `<flat_set>` | **15** |
+| `import std;` | **15** |
+| 범위 `for`의 임시 객체 수명 | **15** |
+| `<mdspan>`, `std::start_lifetime_as` | **16** |
+
+굵게 적은 것이 GCC 14에 없는 것입니다. 그래서 이 책은 컨테이너를 찍을 때 반복문을 쓰고, 범위 `for`의 콜론 오른쪽에 임시 객체의 멤버 함수를 두지 않습니다.
+
+Clang은 표준 라이브러리(libc++)의 사정이 항목마다 다릅니다. 명시적 `this`는 Clang 18, 범위 `for`의 수명은 19, `<mdspan>`은 18, `<flat_map>`은 20, `std::move_only_function`은 22에서 실험 옵션으로 들어왔습니다. 쓰려는 기능은 cppreference의 "compiler support" 표에서 확인하는 것이 빠릅니다.
+
+컴파일러가 무엇을 지원하는지는 코드에서 물을 수 있습니다.
+
+```cpp nocheck
+#include <version>
+
+#ifdef __cpp_lib_flat_map
+#include <flat_map>
+template <typename K, typename V> using SmallMap = std::flat_map<K, V>;
+#else
+#include <map>
+template <typename K, typename V> using SmallMap = std::map<K, V>;
+#endif
+```
+
+<Note>
+ISO 문서로서의 C++23(ISO/IEC 14882:2024)은 2024년 10월에 나왔습니다. 위원회의 작업은 2023년 2월에 끝났고 나머지는 승인 절차였습니다. 그래서 이름은 C++23, 문서의 연도는 2024입니다.
+</Note>
+
+## 정리
+
+- 언어: 명시적 `this`, `if consteval`, 인덱스 여럿의 `[]`, `uz`
+- 라이브러리: `println`, `expected`, `ranges::to`, `enumerate`·`zip`, `move_only_function`, `import std`
+- GCC 14에는 범위의 서식, `flat_map`, `import std`가 없다. GCC 15 이상에서 된다

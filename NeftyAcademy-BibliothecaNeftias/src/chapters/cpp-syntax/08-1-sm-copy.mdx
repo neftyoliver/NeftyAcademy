@@ -1,0 +1,156 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '복사 생성자와 복사 대입 연산자, 얕은 복사의 사고, 직접 쓰지 않는 법';
+
+C에서 구조체를 대입하면 바이트가 그대로 복사됐습니다. C++의 객체는 **복사하는 방법을 타입이 스스로 정합니다.** `std::string`을 복사하면 글자까지 새로 복사되는 것이 그 때문입니다.
+
+## 복사가 일어나는 두 자리
+
+```cpp nocheck
+Buffer b = a;       // 복사 생성: 새 객체를 a로부터 만든다
+c = a;              // 복사 대입: 이미 있는 c에 a를 덮어쓴다
+```
+
+| | 선언 | 불리는 때 |
+| --- | --- | --- |
+| 복사 생성자 | `T(const T& other);` | `T b = a;`, `T b(a);`, 값으로 넘기고 돌려줄 때 |
+| 복사 대입 연산자 | `T& operator=(const T& other);` | `b = a;` |
+
+`=`가 보인다고 다 대입이 아닙니다. 선언과 함께 있는 `=`는 생성입니다.
+
+## 컴파일러가 만들어 주는 복사
+
+둘 다 적지 않으면 컴파일러가 **멤버를 하나씩 복사하는** 것을 만들어 줍니다. 멤버가 `int`면 값을, `std::string`이면 그 복사 생성자를 불러 글자까지 복사합니다. 멤버들이 제대로 복사되는 타입이라면 이것으로 충분합니다. **대부분의 클래스가 그렇습니다.**
+
+## 얕은 복사
+
+문제는 날 포인터로 자원을 쥔 클래스입니다.
+
+```cpp nocheck
+class Buffer {
+public:
+    explicit Buffer(std::size_t n) : size_(n), data_(new int[n]{}) {}
+    ~Buffer() { delete[] data_; }
+private:
+    std::size_t size_;
+    int* data_;
+};
+
+Buffer a(4);
+Buffer b = a;       // 포인터 값만 복사된다. a와 b가 같은 메모리를 가리킨다
+}                   // b가 delete[], 이어서 a가 같은 주소를 또 delete[]
+```
+
+컴파일러가 만든 복사는 `data_`의 **주소**를 복사합니다. 두 객체가 한 메모리를 가리키다가 둘 다 지우려 듭니다.
+
+## 깊은 복사를 직접 쓰면
+
+```cpp
+#include <algorithm>
+#include <cstddef>
+#include <print>
+
+class Buffer {
+public:
+    explicit Buffer(std::size_t n) : size_(n), data_(new int[n]{}) {}
+    ~Buffer() { delete[] data_; }
+
+    Buffer(const Buffer& other) : size_(other.size_), data_(new int[other.size_])
+    {
+        std::copy(other.data_, other.data_ + size_, data_);
+        std::println("복사 생성");
+    }
+    Buffer& operator=(const Buffer& other)
+    {
+        if (this != &other) {               // a = a; 인 경우를 거른다
+            int* fresh = new int[other.size_];
+            std::copy(other.data_, other.data_ + other.size_, fresh);
+            delete[] data_;                 // 새 것을 다 만든 뒤에 옛 것을 지운다
+            data_ = fresh;
+            size_ = other.size_;
+        }
+        std::println("복사 대입");
+        return *this;
+    }
+
+    int& operator[](std::size_t i) { return data_[i]; }
+
+private:
+    std::size_t size_;
+    int* data_;
+};
+
+int main()
+{
+    Buffer a(4);
+    a[0] = 7;
+    Buffer b = a;       // 복사 생성
+    Buffer c(2);
+    c = a;              // 복사 대입
+    b[0] = 9;
+    std::println("{} {} {}", a[0], b[0], c[0]);
+}
+```
+
+```text
+복사 생성
+복사 대입
+7 9 7
+```
+
+복사 대입은 복사 생성보다 까다롭습니다. 이미 쥐고 있던 것을 버려야 하고, 자기 자신을 대입하는 경우를 견뎌야 하고, 중간에 `new`가 실패해도 원래 상태가 남아야 합니다. `return *this;`는 `a = b = c;`처럼 이어 쓸 수 있게 하는 관례입니다.
+
+## 쓰지 않는 것이 답이다
+
+```cpp
+#include <print>
+#include <vector>
+
+class Buffer {
+public:
+    explicit Buffer(std::size_t n) : data_(n) {}
+    int& operator[](std::size_t i) { return data_[i]; }
+
+private:
+    std::vector<int> data_;     // 복사도 정리도 vector가 안다
+};
+
+int main()
+{
+    Buffer a(4);
+    a[0] = 7;
+    Buffer b = a;
+    b[0] = 9;
+    std::println("{} {}", a[0], b[0]);
+}
+```
+
+```text
+7 9
+```
+
+멤버를 `std::vector<int>`로 바꾸자 소멸자, 복사 생성자, 복사 대입 연산자가 모두 사라졌습니다. 컴파일러가 만든 멤버별 복사가 `vector`의 복사를 부르고, 그것은 깊은 복사입니다. 이것을 [0의 규칙](#/read/cpp-syntax/sm-rules)이라고 합니다.
+
+## 복사를 막기
+
+복사가 말이 안 되는 타입도 있습니다. 파일, 소켓, 뮤텍스, GPIO 줄을 쥔 객체는 "똑같은 것 하나 더"를 만들 수 없습니다.
+
+```cpp nocheck
+class Line {
+public:
+    Line(const Line&) = delete;
+    Line& operator=(const Line&) = delete;
+};
+```
+
+`= delete`로 지우면 복사하려는 코드가 컴파일 오류가 됩니다. `std::unique_ptr`, `std::mutex`, `std::thread`가 이렇게 돼 있습니다. 복사는 안 되지만 **옮길** 수는 있게 하는 것이 다음 두 챕터의 주제입니다.
+
+<Note kind="tip">
+값으로 받는 인자(`void f(Buffer b)`)는 부를 때마다 복사 생성자를 부릅니다. 큰 객체를 읽기만 한다면 `const Buffer&`로 받으세요. 복사가 몇 번 일어나는지 궁금하면 위처럼 복사 생성자에 출력을 넣어 보는 것이 가장 빠릅니다.
+</Note>
+
+## 정리
+
+- `T b = a;`는 복사 생성, `b = a;`는 복사 대입
+- 컴파일러가 만든 복사는 멤버별 복사. 날 포인터 멤버가 있으면 얕은 복사가 된다
+- 날 포인터 대신 스스로 복사되는 멤버를 쓰면 직접 쓸 일이 없다. 복사가 말이 안 되면 `= delete`

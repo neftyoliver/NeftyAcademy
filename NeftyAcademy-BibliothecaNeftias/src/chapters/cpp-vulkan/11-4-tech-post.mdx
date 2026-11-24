@@ -1,0 +1,208 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '후처리: 실수 포맷에 그린 장면, 밝은 곳을 번지게 하는 블룸, 톤 매핑, SRGB 포맷에 쓸 때 일어나는 일';
+export const terms = [];
+
+후처리는 다 그린 장면 이미지를 텍스처로 읽어, 화면을 덮는 삼각형 하나로 다시 그리며 고치는 일입니다. 조명 결과는 1을 넘는 값이 많아서([「물리 기반 조명」](#/read/cpp-vulkan/tech-pbr)) 실수 포맷의 이미지에 그려 두고, 마지막에 화면이 낼 수 있는 0~1 범위로 누릅니다. 아래 프로그램은 12×5 이미지로 그 흐름을 따라가며 가운데 줄의 값을 찍습니다.
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp,vkx_cmd.hpp,vkx_resource.hpp,vkx_bind.hpp,vkx_pipeline.hpp,vkx_draw.hpp,vkx_texture.hpp
+#include <algorithm>
+#include "vkx_bind.hpp"
+#include "vkx_cmd.hpp"
+#include "vkx_draw.hpp"
+#include "vkx_pipeline.hpp"
+#include "vkx_texture.hpp"
+
+// 1) 장면: 왼쪽은 어두운 데서 밝은 데로, 오른쪽에는 아주 밝은 점 하나(20)
+const char* SCENE_FS = R"(#version 450
+layout(location = 0) out float radiance;
+void main() {
+    ivec2 at = ivec2(gl_FragCoord.xy);
+    radiance = at == ivec2(9, 2) ? 20.0 : at.x < 6 ? 0.05 * exp2(at.x) : 0.5;
+})";
+// 2) 번짐: 문턱을 넘는 밝기만 남겨, 한 방향의 다섯 픽셀을 무게를 주어 섞는다
+const char* BLUR_FS = R"(#version 450
+layout(set = 0, binding = 0) uniform sampler2D source;
+layout(push_constant) uniform Push { ivec2 step; float threshold; };
+layout(location = 0) out float blurred;
+void main() {
+    const float WEIGHT[5] = float[](1.0, 4.0, 6.0, 4.0, 1.0);
+    ivec2 last = textureSize(source, 0) - 1;
+    blurred = 0.0;
+    for (int k = -2; k <= 2; ++k) {
+        ivec2 at = clamp(ivec2(gl_FragCoord.xy) + k * step, ivec2(0), last);
+        float bright = max(texelFetch(source, at, 0).r - threshold, 0.0);
+        blurred += bright * WEIGHT[k + 2] / 16.0;
+    }
+})";
+// 3) 합치기: 장면에 번진 빛을 더하고, 1을 넘는 값을 0~1 안으로 누른다
+const char* COMPOSE_FS = R"(#version 450
+layout(set = 0, binding = 0) uniform sampler2D scene;
+layout(set = 0, binding = 1) uniform sampler2D bloom;
+layout(location = 0) out vec4 color;
+void main() {
+    ivec2 at = ivec2(gl_FragCoord.xy);
+    float hdr = texelFetch(scene, at, 0).r + 0.5 * texelFetch(bloom, at, 0).r;
+    color = vec4(vec3(hdr / (1.0 + hdr)), 1.0);   // 라인하르트 톤 매핑
+})";
+
+struct Push { int32_t step[2]; float threshold; };
+
+int main() {
+    vkx::Instance inst = vkx::make_instance();
+    vkx::Device dev = vkx::make_device(inst.handle);
+    vkx::Commands cmds = vkx::make_commands(dev);
+    const VkExtent2D SIZE{12, 5};
+    const auto USAGE = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                       VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    // 중간 결과는 1을 넘는 값을 담는 실수 포맷, 마지막은 화면과 같은 8비트
+    const VkFormat formats[5] = {VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32_SFLOAT,
+                                 VK_FORMAT_R32_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM,
+                                 VK_FORMAT_R8G8B8A8_SRGB};
+    enum { SCENE, HALF, BLOOM, UNORM, SRGB };
+    vkx::Image images[5];
+    vkx::Buffer pixels[5];   // 어느 포맷이든 픽셀당 4바이트
+    for (int i = 0; i < 5; ++i) {
+        images[i] = vkx::make_image(dev, SIZE, formats[i], USAGE);
+        pixels[i] = vkx::make_buffer(dev, SIZE.width * SIZE.height * 4,
+                                     VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+    }
+
+    VkSampler sampler = vkx::make_sampler(dev, VK_FILTER_NEAREST,
+                                          VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+    const auto SAMPLED = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    // 패스마다 읽는 이미지가 다르므로 세트도 패스마다 둔다: {바인딩 0, 바인딩 1}
+    const int reads[3][2] = {{SCENE, SCENE}, {HALF, HALF}, {SCENE, BLOOM}};
+    vkx::Bindings sets[3];
+    for (int s = 0; s < 3; ++s) {
+        sets[s] = vkx::make_bindings(dev, {SAMPLED, SAMPLED});
+        for (uint32_t b = 0; b < 2; ++b)
+            vkx::bind_image(dev, sets[s], b, SAMPLED, images[reads[s][b]].view,
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, sampler);
+    }
+    VkPipelineLayout layout = vkx::make_layout(dev, {sets[0].layout}, sizeof(Push));
+
+    auto shader = [&](const char* glsl, shaderc_shader_kind kind) {
+        return vkx::make_shader(dev, vkx::compile(glsl, kind));
+    };
+    VkShaderModule modules[] = {shader(vkx::FULLSCREEN_VS, shaderc_vertex_shader),
+                                shader(SCENE_FS, shaderc_fragment_shader),
+                                shader(BLUR_FS, shaderc_fragment_shader),
+                                shader(COMPOSE_FS, shaderc_fragment_shader)};
+    auto pipeline = [&](int fragment, VkFormat format) {
+        return vkx::make_pipeline(dev, {.vertex = modules[0],
+                                        .fragment = modules[fragment],
+                                        .layout = layout, .color = format});
+    };
+    VkPipeline pipelines[] = {
+        pipeline(1, formats[SCENE]), pipeline(2, formats[HALF]),
+        pipeline(3, formats[UNORM]), pipeline(3, formats[SRGB])};
+
+    VkCommandBuffer cmd = vkx::begin(cmds);
+    // 화면을 덮는 삼각형 하나를 target에 그리고, 다음 패스가 읽을 수 있게 바꾼다
+    auto pass = [&](int target, VkPipeline p, const vkx::Bindings* inputs) {
+        vkx::begin_drawing(cmd, images[target]);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+        if (inputs)
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0,
+                                    1, &inputs->set, 0, nullptr);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+        vkx::end_drawing(cmd, images[target], pixels[target]);   // 찍어 보려고 복사
+        vkx::transition(cmd, images[target], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    };
+    auto push = [&](Push values) {
+        vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_ALL, 0, sizeof values,
+                           &values);
+    };
+    pass(SCENE, pipelines[0], nullptr);
+    push({{1, 0}, 1.0f});   // 가로로, 1을 넘는 만큼만
+    pass(HALF, pipelines[1], &sets[0]);
+    push({{0, 1}, 0.0f});   // 세로로, 걸러 낸 것을 그대로
+    pass(BLOOM, pipelines[1], &sets[1]);
+    pass(UNORM, pipelines[2], &sets[2]);
+    pass(SRGB, pipelines[3], &sets[2]);
+    vkx::submit_and_wait(dev, cmds);
+
+    // 가운데 줄(y = 2)만 찍는다
+    auto real = [&](int i, uint32_t x) {
+        return static_cast<const float*>(pixels[i].mapped)[2 * SIZE.width + x];
+    };
+    auto byte = [&](int i, uint32_t x) {
+        auto* p = static_cast<const unsigned char*>(pixels[i].mapped);
+        return int(p[(2 * SIZE.width + x) * 4]);   // R 성분
+    };
+    const char* names[] = {"장면", "가로로 번짐", "세로로도 번짐", "누른 뒤 UNORM",
+                           "누른 뒤 SRGB"};
+    for (int i = 0; i < 5; ++i) {
+        std::printf("%s\n ", names[i]);
+        for (uint32_t x = 0; x < SIZE.width; ++x)
+            i < UNORM ? std::printf("%6.2f", real(i, x))
+                      : std::printf("%6d", byte(i, x));
+        std::puts("");
+        if (i != SCENE) continue;
+        std::printf("자르기만 하면(8비트)\n ");   // 톤 매핑 없이 1에서 자른 것
+        for (uint32_t x = 0; x < SIZE.width; ++x)
+            std::printf("%6d", int(std::min(real(i, x), 1.0f) * 255 + 0.5f));
+        std::puts("");
+    }
+
+    for (VkPipeline p : pipelines) vkDestroyPipeline(dev.handle, p, nullptr);
+    vkDestroyPipelineLayout(dev.handle, layout, nullptr);
+    for (VkShaderModule m : modules) vkDestroyShaderModule(dev.handle, m, nullptr);
+    for (vkx::Bindings& s : sets) vkx::destroy(dev, s);
+    vkDestroySampler(dev.handle, sampler, nullptr);
+    for (int i = 0; i < 5; ++i) {
+        vkx::destroy(dev, pixels[i]);
+        vkx::destroy(dev, images[i]);
+    }
+    vkx::destroy(dev, cmds);
+    vkx::destroy(dev);
+    vkx::destroy(inst);
+}
+```
+
+```text
+장면
+   0.05  0.10  0.20  0.40  0.80  1.60  0.50  0.50  0.50 20.00  0.50  0.50
+자르기만 하면(8비트)
+     13    26    51   102   204   255   128   128   128   255   128   128
+가로로 번짐
+   0.00  0.00  0.00  0.04  0.15  0.23  0.15  1.23  4.75  7.12  4.75  1.19
+세로로도 번짐
+   0.00  0.00  0.00  0.04  0.15  0.22  0.15  0.48  1.78  2.67  1.78  0.45
+누른 뒤 UNORM
+     12    23    42    75   119   161    93   109   148   244   148   107
+누른 뒤 SRGB
+     62    85   113   148   182   208   163   174   201   250   201   173
+```
+
+- **자르기만 하면**: 1.6과 20이 똑같이 255가 되어 밝은 곳의 차이가 사라집니다. 톤 매핑을 거치면 161과 244로 남습니다. 여기서 쓴 `x / (1 + x)`는 가장 단순한 것이고, 색이 덜 바래도록 다듬은 곡선이 여럿 있습니다(ACES, Khronos PBR Neutral)
+- **블룸**: 문턱(1)을 넘는 밝기만 골라 흐린 뒤 장면에 더해, 밝은 점 둘레가 빛나 보이게 합니다. 20짜리 점 옆의 0.5였던 픽셀들이 올라갔습니다
+- **두 방향으로 나눠 흐리기**: 5×5 범위를 한 번에 읽으면 픽셀마다 25번이지만, 가로로 다섯 번 읽은 결과를 세로로 다섯 번 읽으면 10번입니다. 이런 무게(1, 4, 6, 4, 1)는 두 방향의 곱으로 나눌 수 있습니다
+- **패스 사이의 전환**: 한 패스가 그린 이미지를 다음 패스가 읽으므로, 패스마다 첨부물 레이아웃에서 읽기 레이아웃으로 바꿉니다. 두 이미지를 번갈아 쓰는 핑퐁도 같은 일입니다([「레이아웃 전환」](#/read/cpp-vulkan/tex-layout))
+- **SRGB 포맷에 쓰기**: 같은 셰이더, 같은 값인데 `_SRGB` 타깃에는 더 큰 바이트가 적혔습니다(12와 62). 셰이더가 낸 선형 값을 GPU가 sRGB 곡선으로 바꿔 적기 때문입니다. 알파는 바꾸지 않습니다
+
+## 순서와 포맷
+
+장면은 `R16G16B16A16_SFLOAT` 같은 실수 포맷에 선형 값으로 그립니다(이 예제는 값을 그대로 찍어 보려고 `R32_SFLOAT`를 썼습니다). 블룸, 노출, 톤 매핑 같은 빛의 셈은 선형 값인 채로 하고, 화면에 맞는 곡선으로 바꾸는 일은 맨 끝에 한 번만 합니다. 스왑체인이 `_SRGB` 포맷이면 그 일을 GPU가 해 주므로 셰이더에서 감마를 또 곱하면 안 됩니다([「표면과 스왑체인」](#/read/cpp-vulkan/setup-swapchain)). `_UNORM` 스왑체인이라면 셰이더가 직접 바꿔 적습니다.
+
+블룸은 보통 절반이나 4분의 1 크기의 이미지에서 합니다. 흐린 그림에는 작은 해상도로 충분하고, 같은 다섯 번의 읽기로 더 넓게 번지기 때문입니다. 작은 이미지를 읽을 때는 샘플러의 선형 필터가 사이를 메웁니다.
+
+<Note>
+후처리 패스는 깊이 시험도 블렌딩도 없이 화면 전체를 덮습니다. 그래서 이전 내용을 읽어 올 필요가 없고(`loadOp`은 `DONT_CARE`나 `CLEAR`), 패스 수와 이미지 크기가 곧 비용입니다. 같은 일을 컴퓨트 셰이더로 하기도 합니다([「컴퓨트 셰이더」](#/read/cpp-vulkan/glsl-compute)).
+</Note>
+
+## 정리
+
+- 장면은 실수 포맷에 선형 값으로 그리고, 후처리는 그 이미지를 읽어 화면을 덮는 삼각형으로 다시 그린다
+- 블룸은 밝은 곳만 골라 두 방향으로 나눠 흐려 더하고, 톤 매핑은 1을 넘는 값을 차이를 남긴 채 0~1로 누른다
+- sRGB 곡선은 맨 끝에 한 번만 적용하며, `_SRGB` 포맷에 쓰면 GPU가 해 준다
+
+## 참고 문서
+
+- [Vulkan 명세: The Framebuffer(블렌딩, sRGB로 쓰기)](https://docs.vulkan.org/spec/latest/chapters/framebuffer.html)
+- [model-viewer: Tone Mapping(Khronos PBR Neutral과 ACES의 차이)](https://modelviewer.dev/examples/tone-mapping)

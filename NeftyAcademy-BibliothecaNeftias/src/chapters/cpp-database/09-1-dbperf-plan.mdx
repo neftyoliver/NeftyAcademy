@@ -1,0 +1,129 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '실행 계획 읽기: EXPLAIN의 나무, Seq Scan과 인덱스 읽기 세 가지, ANALYZE의 실제 행 수, 확장 통계';
+
+SQL은 무엇을 원하는지만 말하고, 어떻게 가져올지는 데이터베이스의 **플래너**가 정합니다. 플래너는 테이블의 크기와 값의 분포를 담은 통계를 보고 여러 방법의 비용을 어림해 가장 싸 보이는 **실행 계획**을 고릅니다. 쿼리가 느릴 때 가장 먼저 할 일은 그 계획을 보는 것입니다. PostgreSQL에서는 쿼리 앞에 `EXPLAIN`을 붙입니다. SQLite의 `EXPLAIN QUERY PLAN`은 [「인덱스」](#/read/cpp-database/db-index)에서 보았습니다.
+
+## 계획을 받아 읽기
+
+C++에서 `EXPLAIN`은 평범한 쿼리라서, 결과의 행 하나가 계획의 한 줄입니다. 계획은 나무 모양이고, 가장 깊이 들여 쓴 노드부터 행을 만들어 위의 노드로 올려 보냅니다. 아래 예제는 비용 숫자를 떼고 추정 행 수(`rows=`)만 남겨서, 같은 데이터면 늘 같은 결과가 나오게 했습니다.
+
+```cpp pkg=libpq
+#include <libpq-fe.h>
+#include <cstdio>
+#include <string>
+
+// "(cost=0.00..428.00 rows=200 width=23)"에서 비용과 폭을 떼어 추정 행 수만 남긴다
+std::string tidy(std::string line) {
+    if (auto p = line.find("cost="); p != std::string::npos)
+        line.erase(p, line.find(' ', p) - p + 1);
+    if (auto p = line.find(" width="); p != std::string::npos)
+        line.erase(p, line.find(')', p) - p);
+    return line;
+}
+
+void explain(PGconn* c, const char* title, const char* sql) {
+    std::printf("%s\n", title);
+    PGresult* r = PQexec(c, sql);
+    for (int i = 0; i < PQntuples(r); ++i) {
+        std::string line = PQgetvalue(r, i, 0);      // 계획의 한 줄이 한 행
+        if (line.find("Memory Usage") != std::string::npos)
+            continue;                                // 기계마다 다를 수 있는 줄
+        std::printf("  %s\n", tidy(line).c_str());
+    }
+    PQclear(r);
+}
+
+int main() {
+    PGconn* c = PQconnectdb("host=localhost dbname=academy user=academy "
+                            "password=academy");
+    const char* setup[] = {     // VACUUM은 여러 문장짜리 문자열 안에서 못 돈다
+        "SET client_min_messages = warning",
+        "DROP TABLE IF EXISTS pf_orders, pf_customers",
+        "CREATE TABLE pf_customers (id int PRIMARY KEY, city text)",
+        "INSERT INTO pf_customers SELECT i, (ARRAY['서울', '대전', '부산', '광주'])"
+        "[1 + i % 4] FROM generate_series(1, 1000) i",
+        "CREATE TABLE pf_orders (id int PRIMARY KEY, customer_id int, status text, "
+        "kind text, total int)",
+        "INSERT INTO pf_orders SELECT i, 1 + (i * 7919) % 1000, "
+        "CASE WHEN i % 10 = 0 THEN 'open' ELSE 'done' END, "
+        "CASE WHEN i % 10 = 0 THEN 'rush' ELSE 'normal' END, "
+        "(i * 37) % 500 FROM generate_series(1, 20000) i",
+        "VACUUM ANALYZE pf_customers",
+        "VACUUM ANALYZE pf_orders"};
+    for (const char* sql : setup) PQclear(PQexec(c, sql));
+
+    const char* by_customer = "EXPLAIN (COSTS OFF) "
+                              "SELECT * FROM pf_orders WHERE customer_id = 42";
+    explain(c, "인덱스 없이", by_customer);
+    PQclear(PQexec(c, "CREATE INDEX pf_orders_customer "
+                      "ON pf_orders (customer_id)"));
+    PQclear(PQexec(c, "ANALYZE pf_orders"));
+    explain(c, "인덱스를 만든 뒤", by_customer);
+    explain(c, "인덱스만 읽기",
+            "EXPLAIN (COSTS OFF) "
+            "SELECT count(*) FROM pf_orders WHERE customer_id = 42");
+    explain(c, "실제로 돌려 보기 (ANALYZE)",
+            "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) "
+            "SELECT c.city, count(*) FROM pf_orders o JOIN pf_customers c "
+            "ON c.id = o.customer_id WHERE o.total > 490 GROUP BY c.city");
+
+    const char* rush = "EXPLAIN (ANALYZE, TIMING OFF, SUMMARY OFF) "
+                       "SELECT * FROM pf_orders "
+                       "WHERE status = 'open' AND kind = 'rush'";
+    explain(c, "추정과 실제 (서로 얽힌 두 열)", rush);
+    PQclear(PQexec(c, "CREATE STATISTICS pf_dep (dependencies) ON status, kind "
+                      "FROM pf_orders"));
+    PQclear(PQexec(c, "ANALYZE pf_orders"));
+    explain(c, "확장 통계를 만든 뒤", rush);
+    PQfinish(c);
+}
+```
+
+```text
+인덱스 없이
+  Seq Scan on pf_orders
+    Filter: (customer_id = 42)
+인덱스를 만든 뒤
+  Bitmap Heap Scan on pf_orders
+    Recheck Cond: (customer_id = 42)
+    ->  Bitmap Index Scan on pf_orders_customer
+          Index Cond: (customer_id = 42)
+인덱스만 읽기
+  Aggregate
+    ->  Index Only Scan using pf_orders_customer on pf_orders
+          Index Cond: (customer_id = 42)
+실제로 돌려 보기 (ANALYZE)
+  HashAggregate (actual rows=4 loops=1)
+    Group Key: c.city
+    ->  Hash Join (actual rows=360 loops=1)
+          Hash Cond: (o.customer_id = c.id)
+          ->  Seq Scan on pf_orders o (actual rows=360 loops=1)
+                Filter: (total > 490)
+                Rows Removed by Filter: 19640
+          ->  Hash (actual rows=1000 loops=1)
+                ->  Seq Scan on pf_customers c (actual rows=1000 loops=1)
+추정과 실제 (서로 얽힌 두 열)
+  Seq Scan on pf_orders  (rows=200) (actual rows=2000 loops=1)
+    Filter: ((status = 'open'::text) AND (kind = 'rush'::text))
+    Rows Removed by Filter: 18000
+확장 통계를 만든 뒤
+  Seq Scan on pf_orders  (rows=2000) (actual rows=2000 loops=1)
+    Filter: ((status = 'open'::text) AND (kind = 'rush'::text))
+    Rows Removed by Filter: 18000
+```
+
+- **Seq Scan과 Filter**: 인덱스가 없으면 테이블 전체를 읽으며 행마다 조건(Filter)을 따져 봅니다
+- **인덱스를 읽는 세 방식**: Index Scan은 인덱스를 따라가며 행마다 테이블을 읽습니다. Bitmap Heap Scan은 인덱스에서 맞는 행의 위치를 먼저 다 모은 뒤 테이블 페이지를 물리적인 순서로 한 번씩 읽어서, 여기저기 흩어진 행이 수십 개쯤일 때 고릅니다. 개수만 세는 쿼리는 인덱스에 필요한 값이 다 있어 테이블을 읽지 않는 Index Only Scan이 되었습니다. 이 방식은 VACUUM이 관리하는 가시성 맵에 기대므로, 갓 고친 테이블에서는 테이블을 들르게 됩니다
+- **ANALYZE는 실제로 돌린다**: `EXPLAIN ANALYZE`는 쿼리를 실행하고 노드마다 실제 행 수와 반복 횟수(loops)를 붙입니다. 2만 행을 읽어 19640행을 버린 Seq Scan은 인덱스를 생각해 볼 자리입니다([「인덱스 설계」](#/read/cpp-database/dbperf-index)). Hash Join은 작은 쪽인 손님 1000명으로 해시 표를 만들고 주문으로 찾아 들어갔습니다. 실행하는 것이므로 INSERT, UPDATE, DELETE에 쓸 때는 `BEGIN`과 `ROLLBACK` 사이에서 합니다. `TIMING OFF`는 노드마다 시간을 재는 비용과 흔들림을 없앱니다
+- **추정이 틀리면**: 플래너는 두 조건이 서로 상관없다고 보고 10%씩 곱해 200행으로 어림했지만, `open`인 주문은 모두 `rush`라서 실제로는 2000행이었습니다. 추정이 열 배 틀리면 조인 방법을 잘못 고르기 쉽습니다. `CREATE STATISTICS`로 두 열의 의존 관계를 알려 주자 추정이 2000행으로 맞았습니다. 데이터를 한꺼번에 넣은 뒤에는 자동 VACUUM을 기다리지 말고 `ANALYZE`로 통계를 새로 만듭니다
+
+<Note>
+어떤 쿼리의 계획을 볼지는 `pg_stat_statements`가 쿼리별 실행 횟수와 시간을 모아 알려 주고, `auto_explain` 모듈은 정한 시간보다 오래 걸린 쿼리의 계획을 로그에 남깁니다([「모니터링」](#/read/cpp-database/dbops-monitor)). 준비된 문장은 다섯 번째 실행 뒤부터 값과 상관없는 일반 계획으로 바뀔 수 있어서, 값의 분포가 치우친 열이면 느려지기도 합니다. `EXPLAIN EXECUTE 이름(값)`으로 그 계획을 보고, 필요하면 `plan_cache_mode`로 정합니다. MySQL은 `EXPLAIN ANALYZE`(8.0.18부터), MariaDB는 `ANALYZE` 문으로 실제 실행 정보를 봅니다.
+</Note>
+
+## 정리
+
+- EXPLAIN의 결과는 한 줄이 한 행인 나무이고, 가장 깊은 노드부터 행을 만들어 위로 올리며, 노드의 종류와 Filter, Index Cond를 읽는다
+- EXPLAIN ANALYZE는 쿼리를 실제로 돌려 노드마다 실제 행 수를 보여 주므로, 버려지는 행이 많은 곳과 추정이 크게 빗나간 곳을 찾는다
+- 추정이 틀리면 ANALYZE로 통계를 새로 하고, 서로 얽힌 열은 CREATE STATISTICS로 플래너에게 관계를 알려 준다

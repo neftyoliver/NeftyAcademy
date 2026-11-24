@@ -1,0 +1,137 @@
+import { Figure, Note } from 'paragoniahex';
+import { Plot } from '../../components/Plot';
+import { dioDefault, dioLed, dioSchottky, dioSilicon, dioV } from './data/dv-diode';
+
+export const summary = '모델은 소자가 어떻게 구는지를 적은 숫자들이다. 다이오드 넷의 곡선, 숫자마다의 뜻, 모델이 모르는 것';
+export const terms = [];
+
+저항은 값 하나로 끝나지만 다이오드는 곡선입니다. 그 곡선을 정하는 숫자들의 묶음이 모델이고, `.model` 줄에 적습니다. 회로가 같아도 어떤 모델을 붙이느냐에 따라 답이 달라집니다.
+
+## 다이오드 넷
+
+<Figure caption="같은 전압을 걸었을 때 네 다이오드에 흐르는 전류. 20mA까지만 그렸다">
+  <Plot x={dioV} xUnit="V" xName="다이오드의 전압" yUnit="A" yName="전류" yMin={0} yMax={0.02} series={[{ name: '쇼트키 1N5711', data: dioSchottky }, { name: '1N4148', data: dioSilicon }, { name: '기본 모델', data: dioDefault }, { name: '빨간 LED', data: dioLed }]} />
+</Figure>
+
+```spice
+다이오드 넷에 같은 전압 걸기
+V1 in 0 0
+Vs1 in a1 0
+D1 a1 0 DDEF
+Vs2 in a2 0
+D2 a2 0 D4148
+Vs3 in a3 0
+D3 a3 0 D5711
+Vs4 in a4 0
+D4 a4 0 RED
+.model DDEF D
+.model D4148 D(IS=4.352n N=1.906
++ RS=0.6458 BV=110 IBV=0.0001
++ CJO=0.7048p VJ=0.869 M=0.03
++ FC=0.5 TT=3.48n)
+.model D5711 D(IS=315n RS=2.8 N=2.03
++ TT=1.44n CJO=2p M=0.333
++ EG=0.69 XTI=2 BV=70 IBV=10u)
+.model RED D(IS=1e-18 N=1.9 RS=5)
+.dc V1 0 2.2 0.01
+.meas dc v_def WHEN i(Vs1)=10m
+.meas dc v_4148 WHEN i(Vs2)=10m
+.meas dc v_5711 WHEN i(Vs3)=10m
+.meas dc v_red WHEN i(Vs4)=10m
+.end
+```
+
+```text
+$ ngspice -b diodes.cir
+v_def  = 7.14196e-01
+v_4148 = 7.28456e-01
+v_5711 = 5.72183e-01
+v_red  = 1.86050e+00
+```
+
+- **`D1 애노드 캐소드 모델이름`**: 첫 마디에서 둘째 마디로 흐르는 쪽이 순방향입니다. 값 자리에는 모델의 이름을 적습니다
+- **`.model 이름 D(숫자들)`**: `D`는 다이오드라는 종류입니다. 괄호 안에 적지 않은 숫자는 기본값이 쓰입니다. `.model DDEF D`는 모두 기본값인 다이오드입니다
+- **10mA가 흐를 때의 전압**: 쇼트키가 0.57V, 기본 모델이 0.71V, 1N4148이 0.73V, LED가 1.86V입니다. 같은 자리에 무엇을 꽂느냐에 따라 1V 넘게 달라집니다
+- **숫자가 온 곳**: 1N4148은 Nexperia가 내놓은 모델 파일의 숫자이고, 1N5711은 All About Circuits의 표에 실린 숫자입니다. LED는 앞 장부터 써 온, 제가 맞춘 값입니다
+
+## 숫자마다의 뜻
+
+| 이름 | 뜻(기본값) | 곡선에서 하는 일 |
+| --- | --- | --- |
+| `IS` | 포화 전류(1e-14A) | 클수록 낮은 전압에서 켜진다 |
+| `N` | 방출 계수(1) | 클수록 느슨하게 오른다 |
+| `RS` | 직렬 저항(0Ω) | 전류가 클 때 전압이 더 걸린다 |
+| `BV`, `IBV` | 거꾸로 걸었을 때 무너지는 전압(없음), 그때의 전류(1mA) | 제너 다이오드를 만든다 |
+| `CJO`, `TT` | 접합의 커패시턴스(0), 전하가 빠지는 시간(0) | 빨리 켜고 끌 때의 모습 |
+| `EG`, `XTI` | 온도에 따른 변화(1.11, 3) | 온도를 바꿀 때만 쓰인다 |
+
+- **순방향의 곡선은 `IS`, `N`, `RS` 셋이 정한다**: 쇼트키는 `IS`가 커서 일찍 켜지고, LED는 `IS`가 아주 작아서 늦게 켜집니다
+- **기본 모델은 부품이 아니다**: 이상적인 실리콘 다이오드 하나를 적어 둔 것일 뿐입니다. 어느 부품과도 꼭 같지 않습니다
+- **적지 않은 숫자가 답을 틀리게 할 수 있다**: 제가 맞춘 LED 모델에는 `EG`가 없어서 실리콘의 값 1.11이 쓰입니다. 이 모델로 온도를 훑으면 온도가 오를수록 전압이 올라가는데, 실제 다이오드와 LED는 반대로 내려갑니다. 27°C의 곡선만 맞춘 모델은 27°C에서만 믿습니다. `EG`를 맞춘 모델과 나란히 돌린 결과는 [「이상적인 부품이 숨기는 것」](#/read/circuit-sim/ts-ideal)에 있습니다
+
+## 거꾸로 걸었을 때
+
+```spice
+5.1V 제너 다이오드로 전압 묶기
+V1 in 0 9
+R1 in out 470
+D1 0 out Z5V1
+.model Z5V1 D(BV=5.1 IBV=5m)
+.dc V1 6 12 3
+.print dc v(out)
+.end
+```
+
+```text
+$ ngspice -b zener.cir
+Index  v-sweep       v(out)
+0      6.000000e+00  5.075860e+00
+1      9.000000e+00  5.113502e+00
+2      1.200000e+01  5.128866e+00
+```
+
+- **`BV`**: 거꾸로 걸린 전압이 이 값에 닿으면 전류가 흐르기 시작합니다. 제너 다이오드는 이 성질을 쓰는 부품입니다. 캐소드를 위로 두므로 `D1 0 out`으로 적었습니다
+- **입력이 두 배가 되어도 출력은 5.1V 둘레다**: 6V에서 5.08V, 12V에서 5.13V입니다
+- **`BV`를 적지 않으면 무너지지 않는다**: 기본 모델에 거꾸로 100V를 걸어도 0.1nA만 흐릅니다. 실제 부품은 어느 전압에선가 무너지므로, 거꾸로 걸리는 전압이 큰 회로에서는 `BV`가 든 모델을 씁니다
+
+## 모델이 모르는 것
+
+```spice
+1N4148에 10V를 바로 걸면
+V1 a 0 10
+D1 a 0 D4148
+.model D4148 D(IS=4.352n N=1.906
++ RS=0.6458 BV=110 IBV=0.0001
++ CJO=0.7048p VJ=0.869 M=0.03
++ FC=0.5 TT=3.48n)
+.op
+.end
+```
+
+```text
+$ ngspice -b burn.cir
+a           1.000000e+01
+v1#branch   -1.38145e+01
+...
+id          13.8145
+```
+
+- **13.8A가 흐른다고 답한다**: 전력으로는 138W입니다. 이 부품이 견디는 전류는 200mA입니다. 오류도 경고도 없습니다
+- **모델에는 한계가 없다**: 곡선은 적혀 있지만, 얼마까지 견디는지는 적혀 있지 않습니다. 최대 전류, 최대 전력, 열은 데이터시트에서 찾아 직접 견줘야 합니다([「이상적인 부품이 숨기는 것」](#/read/circuit-sim/ts-ideal))
+- **버릇**: 소자의 표에서 전류와 전력을 읽고, 그 부품의 데이터시트에 적힌 최대값과 견줍니다
+
+<Note>
+넷리스트 셋과 그림은 ngspice 42로 돌린 결과이고, `BV`가 없는 다이오드에 100V를 거꾸로 건 것과 LED 모델의 온도 훑기(−20°C에서 1.706V, 80°C에서 1.892V)도 따로 돌려 확인했습니다. 1N4148의 숫자와 200mA라는 한계는 Nexperia의 모델 파일에서, 1N5711의 숫자와 기본값의 표는 All About Circuits에서 옮겼습니다. 제너 다이오드의 모델은 `BV`와 `IBV`만 적은, 제가 고른 값입니다.
+</Note>
+
+## 정리
+
+- 모델은 `.model 이름 종류(숫자들)`로 적고, 소자의 줄에서 그 이름을 부른다. 적지 않은 숫자는 기본값이다
+- 다이오드의 순방향 곡선은 `IS`, `N`, `RS`가, 거꾸로 무너지는 전압은 `BV`가 정한다. 모델이 다르면 같은 회로의 답이 달라진다
+- 모델에는 부품이 견디는 한계가 없다. 전류와 전력은 데이터시트의 최대값과 직접 견준다
+
+## 참고 문서
+
+- [Nexperia: 1N4148 SPICE model(모델의 숫자들, 머리말의 최대 전류와 전압)](https://assets.nexperia.com/documents/spice-model/1N4148.txt)
+- [All About Circuits: SPICE Models(다이오드 모델의 숫자마다의 뜻과 기본값, 1N5711을 비롯한 부품들의 표)](https://www.allaboutcircuits.com/textbook/semiconductors/chpt-3/spice-models)
+- [ngspice: User's Manual(다이오드의 소자 줄과 모델)](https://ngspice.sourceforge.io/docs/ngspice-html-manual/manual.xhtml)

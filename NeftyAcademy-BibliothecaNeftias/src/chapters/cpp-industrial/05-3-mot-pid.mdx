@@ -1,0 +1,101 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'PID 제어: 비례·적분·미분의 역할, 남는 오차와 넘침, 적분 누적 방지, 측정값 미분, 이산 구현의 주의점';
+
+목표값(온도 200도, 속도 1000rpm)에 실제값을 맞추는 가장 흔한 방법이 **PID 제어**입니다. 서보 드라이브 안의 루프도, 오븐의 온도 조절기도, 탱크의 수위 조절도 대부분 PID입니다. 출력은 세 항의 합입니다.
+
+- **비례(P)**: 지금의 오차에 비례해 출력합니다. 오차가 크면 세게, 작으면 약하게
+- **적분(I)**: 오차를 시간에 따라 쌓은 값에 비례합니다. 작은 오차라도 오래 남아 있으면 점점 세게 밀어 결국 없앱니다
+- **미분(D)**: 오차가 바뀌는 빠르기에 비례합니다. 빠르게 다가가고 있으면 미리 줄여 넘치지 않게 합니다
+
+## 오븐으로 비교하기
+
+히터 출력(0~100%)에 따라 데워지는 오븐(시간 상수 60초)을 흉내 내고, 20도에서 200도로 올리는 일을 세 가지 제어기로 해 보았습니다. 제어 주기는 0.1초입니다.
+
+```cpp
+// 오븐 온도를 PID로 맞춘다: P만, PI, PI + 적분 누적 방지를 비교한다
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+
+// 히터 출력 u(0~100%)에 따라 데워진다
+struct Oven {
+    double temp = 20;
+    void step(double u, double dt) {
+        const double target = 20 + 3.0 * u;      // 그 출력에서 결국 닿을 온도
+        temp += (target - temp) / 60.0 * dt;     // 시간 상수 60초
+    }
+};
+
+class Pid {
+public:
+    double kp, ki, kd;
+    bool antiWindup;
+    double integral = 0, lastMeas = 0;
+    bool first = true;
+    double update(double setpoint, double meas, double dt) {
+        const double err = setpoint - meas;
+        // 미분은 오차가 아니라 측정값으로: 설정값이 바뀔 때 출력이 튀지 않는다
+        const double deriv = first ? 0 : -(meas - lastMeas) / dt;
+        first = false;
+        lastMeas = meas;
+        const double unclamped = kp * err + integral + ki * err * dt + kd * deriv;
+        const double out = std::clamp(unclamped, 0.0, 100.0);   // 히터는 0~100%
+        const bool saturated = out != unclamped;
+        // 포화 중엔 쌓지 않음
+        if (!antiWindup || !saturated) integral += ki * err * dt;
+        return out;
+    }
+};
+
+void run(const char* name, Pid pid) {
+    Oven oven;
+    const double dt = 0.1, sp = 200;
+    double peak = 0, settled = -1;
+    for (int i = 0; i <= 12000; ++i) {           // 20분
+        const double t = i * dt;
+        const double u = pid.update(sp, oven.temp, dt);
+        oven.step(u, dt);
+        peak = std::max(peak, oven.temp);
+        // ±2도 밖으로 나감
+        if (std::fabs(oven.temp - sp) > 2) settled = -1;
+        else if (settled < 0) settled = t;
+    }
+    std::printf("%s: 최고 %.1f도, 20분 뒤 %.1f도, ", name, peak, oven.temp);
+    if (settled >= 0) std::printf("±2도 안에 든 시각 %.0f초\n", settled);
+    else std::printf("±2도에 못 듦\n");
+}
+
+int main() {
+    run("P", {2.0, 0.0, 0.0, false});
+    run("PI", {2.0, 0.05, 0.0, false});
+    run("PI+방지", {2.0, 0.05, 0.0, true});
+}
+```
+
+```text
+P: 최고 174.3도, 20분 뒤 174.3도, ±2도에 못 듦
+PI: 최고 245.5도, 20분 뒤 200.0도, ±2도 안에 든 시각 212초
+PI+방지: 최고 200.0도, 20분 뒤 200.0도, ±2도 안에 든 시각 126초
+```
+
+- **P만으로는 오차가 남는다**: 174.3도에서 멈췄습니다. 오븐을 그 온도에 유지하려면 히터가 51%쯤 켜져 있어야 하는데, P 제어기는 오차가 있어야만 출력을 내므로 오차 25.7도와 출력 51%가 맞아떨어지는 곳에서 멈춥니다
+- **적분은 오차를 없애지만 넘친다**: PI는 200도에 정확히 맞췄지만 도중에 245도까지 넘쳤습니다. 데우는 동안 히터는 이미 100%여서 더 세게 할 수 없는데, 적분은 그동안 오차를 계속 쌓았습니다. 200도에 닿은 뒤에도 쌓인 적분이 히터를 한참 더 켜 둔 것입니다. 이것을 **적분 누적**(windup)이라고 합니다
+- **적분 누적 방지**: 출력이 한계에 걸려 있는 동안에는 적분을 쌓지 않게 하자 넘침이 사라지고 오히려 더 빨리(126초) 자리를 잡았습니다. 출력에 한계가 있는 실제 장치에서는 거의 반드시 필요합니다
+
+## 이산 구현의 주의점
+
+- **미분은 측정값으로**: 오차를 미분하면 설정값을 바꾸는 순간 오차가 한 주기에 크게 뛰어 출력이 튑니다. 설정값은 상수로 보고 측정값의 변화만 미분하면 이 튐이 없습니다. 위 코드도 그렇게 했습니다
+- **미분은 잡음을 키운다**: 측정값의 작은 잡음도 주기로 나누면 커지므로, 미분항에는 저역 통과 필터를 거는 것이 보통입니다. 잡음이 심하면 D를 쓰지 않는 PI가 흔합니다
+- **주기는 일정하게**: `dt`가 일정하다고 가정한 식이므로, 제어기는 [「주기 작업」](#/read/cpp-industrial/rt-cyclic)의 실시간 루프에서 돌립니다. 주기가 흔들리면 미분과 적분이 함께 흔들립니다
+- **수동에서 자동으로**: 작업자가 수동으로 출력을 정하다가 자동으로 넘길 때, 적분값을 지금 출력에 맞춰 두어야 출력이 튀지 않습니다(범프리스 전환)
+
+<Note>
+이득(Kp, Ki, Kd)을 정하는 것을 튜닝이라고 합니다. 지글러-니콜스 같은 고전 방법, 계단 응답에서 모델을 뽑아 계산하는 방법, 많은 드라이브와 조절기에 들어 있는 자동 튜닝 기능이 있습니다. 시뮬레이션으로 먼저 감을 잡되, 실제 장비에서는 작은 이득에서 시작해 조금씩 올리며 넘침과 진동을 봅니다.
+</Note>
+
+## 정리
+
+- PID 출력은 오차에 비례하는 P, 오차를 쌓는 I, 오차의 변화에 비례하는 D의 합이며, P만으로는 오차가 남는다
+- 출력에 한계가 있으면 적분이 쌓여 크게 넘치므로, 출력이 한계에 걸린 동안 적분을 멈추는 적분 누적 방지를 넣는다
+- 미분은 측정값으로 하고 필터를 걸며, 제어기는 일정한 주기의 실시간 루프에서 돌리고 수동·자동 전환 때 출력이 튀지 않게 한다

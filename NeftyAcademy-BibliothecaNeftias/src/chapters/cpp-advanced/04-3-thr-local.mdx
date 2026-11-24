@@ -1,0 +1,137 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '스레드마다 하나씩 생기는 변수, 만들어지고 사라지는 때, 접근하는 값, 쓰는 자리와 함정';
+export const terms = ['~thread_local'];
+
+`thread_local` 변수는 [스레드마다 사본이 하나씩](#/read/cpp-syntax/life-storage) 있습니다. 잠그지 않고도 안전한 까닭은 나눠 쓰지 않기 때문입니다. 여기서는 그 사본이 언제 생기고 사라지는지, 읽고 쓰는 데 얼마가 드는지, 어디에 쓰면 이득이고 어디서 넘어지는지를 봅니다.
+
+## 스레드마다, 처음 쓸 때
+
+```cpp
+#include <print>
+#include <string>
+#include <thread>
+#include <utility>
+
+thread_local std::string thread_name = "main";
+
+struct Scratch {
+    std::string owner;
+    int uses = 0;
+    explicit Scratch(std::string name) : owner(std::move(name))
+    {
+        std::println("  + {} 의 Scratch", owner);
+    }
+    ~Scratch() { std::println("  - {} 의 Scratch (쓴 횟수 {})", owner, uses); }
+};
+
+void use_scratch()
+{
+    thread_local Scratch scratch(thread_name);  // 스레드마다, 처음 지나갈 때 한 번
+    ++scratch.uses;
+}
+
+int main()
+{
+    use_scratch();
+    use_scratch();
+    {
+        std::jthread worker([] {
+            thread_name = "worker";             // 이 스레드의 thread_name 만 바뀐다
+            use_scratch();
+        });
+    }
+    std::println("main 이 본 이름: {}", thread_name);
+
+    // 람다는 thread_local 을 잡지 않는다. 부른 스레드의 것을 쓴다
+    auto report = [] { return thread_name; };
+    std::string seen;
+    {
+        std::jthread other([&] {
+            thread_name = "other";
+            seen = report();
+        });
+    }
+    std::println("main 에서 만든 람다를 다른 스레드가 부르면: {}", seen);
+    std::println("main 끝");
+}
+```
+
+```text
+  + main 의 Scratch
+  + worker 의 Scratch
+  - worker 의 Scratch (쓴 횟수 1)
+main 이 본 이름: main
+main 에서 만든 람다를 다른 스레드가 부르면: other
+main 끝
+  - main 의 Scratch (쓴 횟수 2)
+```
+
+| 때 | 일어나는 일 |
+| --- | --- |
+| 스레드가 그 변수를 처음 쓸 때 | 그 스레드의 사본이 만들어진다. 쓰지 않는 스레드에는 만들어지지 않는다 |
+| 스레드가 끝날 때 | 그 스레드의 사본들이 만든 순서의 반대로 사라진다 |
+| `main`이 끝난 뒤 | `main` 스레드의 사본이 사라진다. 그다음이 [전역 객체](#/read/cpp-syntax/life-static-init)다 |
+
+`worker`가 `thread_name`을 바꿔도 `main`의 것은 그대로입니다. 아래쪽의 람다가 함정입니다. `thread_local`은 지역 변수가 아니어서 람다가 **잡지 않습니다.** `main`에서 만든 람다라도 다른 스레드가 부르면 그 스레드의 사본을 읽습니다. 값을 가지고 가게 하려면 `[name = thread_name]`처럼 복사해서 잡습니다.
+
+## 접근하는 값
+
+| `++counter` 한 번 (`noinline` 함수 호출 포함) | 실행 파일 안 | 공유 라이브러리 안 (`-fPIC`) |
+| --- | --- | --- |
+| 전역 `int` | 2.4 ns | 2.5 ns |
+| `thread_local int` | 1.7 ns | 4.0 ns |
+| `thread_local std::vector<int>` (크기 읽기) | 1.3 ns | 7.6 ns |
+
+x86-64 서버 VM, GCC 14 `-O2`에서 2억 번 불러 잰 값입니다. 실행 파일 안에서는 전역 변수와 차이가 없습니다. 스레드마다 다른 기준 주소가 레지스터에 있어서(x86-64는 `fs`, AArch64는 `tpidr_el0`), 거기에 고정된 거리만 더하면 되기 때문입니다.
+
+```text
+bump_exe_tls():
+        addl   $0x1, %fs:0xfffffffffffffff8     # 명령 하나
+bump_lib_tls():
+        lea    0x2e18(%rip), %rdi
+        call   __tls_get_addr@plt               # 주소를 물어봐야 한다
+        addl   $0x1, (%rax)
+```
+
+공유 라이브러리는 자기 변수가 그 기준에서 얼마나 떨어져 있을지 컴파일할 때 모릅니다. 그래서 접근할 때마다 함수를 불러 주소를 얻습니다. 생성자나 소멸자가 있는 타입은 여기에 "이 스레드에서 이미 만들었는가"를 확인하는 비교가 접근마다 붙습니다.
+
+<Note>
+헤더에 `extern thread_local int counter;`라고만 선언하면, 쓰는 쪽은 그 변수에 실행 중 초기화가 필요한지 알 수 없어서 접근마다 초기화 함수가 있는지 확인합니다. `extern constinit thread_local int counter;`라고 [컴파일 때 초기화됨을 밝히면](#/read/cpp-syntax/ct-consteval) 그 확인이 사라지고 `fs` 기준의 읽기 한 번이 됩니다. GCC 14가 만든 코드로 확인했습니다.
+</Note>
+
+## 쓰는 자리
+
+| 쓰임 | 까닭 |
+| --- | --- |
+| [난수 엔진](#/read/cpp-stl/num-random) | 엔진은 상태를 고치므로 나눠 쓰면 경합이다. 스레드마다 하나면 잠글 것이 없다 |
+| 되풀이해 쓰는 버퍼 | 함수가 부를 때마다 할당하지 않고, 스레드끼리 다투지도 않는다 |
+| 합치기 전의 집계 | 스레드마다 따로 세고 끝에 한 번 더한다 |
+| `errno` | C 라이브러리가 이미 이렇게 한다. 스레드마다 자기 오류 번호를 본다 |
+
+셋째 줄의 차이는 큽니다.
+
+| 두 스레드가 5천만 번씩 센다 | 걸린 시간 |
+| --- | --- |
+| `std::atomic<long>` 하나를 함께 올린다 | 1,400 ms |
+| 스레드마다 `thread_local long`에 세고, 끝에 잠그고 한 번 더한다 | 25 ms |
+
+같은 VM(코어 2개)에서 잰 값입니다. 원자적 연산 하나는 싸지만, 두 코어가 [같은 캐시 줄을 번갈아 가져가느라](#/read/cpp-advanced/atm-false-sharing) 한 번에 14 ns가 듭니다. 나눠 쓰지 않으면 그 값이 없습니다.
+
+## 함정
+
+| 함정 | 생기는 일 |
+| --- | --- |
+| 스레드 풀 | 스레드가 다음 일을 받아도 값이 **남아 있다.** 일마다 새로 시작해야 하는 상태는 일의 첫머리에서 지운다 |
+| 크기 × 스레드 수 | `std::mt19937`은 5,000바이트다. 스레드 200개면 1 MB이고, 큰 버퍼라면 더하다 |
+| 다른 스레드에 주소 넘기기 | 그 스레드가 끝나면 사본이 사라진다. 포인터를 받은 쪽은 사라진 것을 가리킨다 |
+| 소멸자에서 다른 `thread_local` 쓰기 | 나중에 만든 것이 먼저 사라지므로 이미 없을 수 있다 |
+| [코루틴](#/read/cpp-advanced/co-keywords) | 멈췄다가 다른 스레드에서 이어지면 다른 사본을 본다 |
+
+`thread_local`은 숨은 전역 상태이기도 합니다. 함수의 결과가 "어느 스레드에서 불렸는가"에 달라지면 시험하기 어려워집니다. 버퍼나 엔진처럼 **결과에 영향을 주지 않는 것**을 담는 데 쓰고, 뜻이 있는 상태는 인자로 넘깁니다.
+
+## 정리
+
+- `thread_local` 변수는 스레드가 처음 쓸 때 만들어지고 그 스레드가 끝날 때 사라진다. 람다는 그것을 잡지 않는다
+- 실행 파일 안에서는 전역 변수만큼 싸다. 공유 라이브러리 안에서는 접근마다 주소를 묻는 호출이 든다
+- 난수 엔진, 버퍼, 합치기 전의 집계처럼 나눠 쓰지 않아도 되는 것에 쓴다. 스레드 풀에서는 값이 남는다

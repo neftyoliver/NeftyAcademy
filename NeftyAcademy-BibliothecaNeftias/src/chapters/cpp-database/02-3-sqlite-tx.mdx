@@ -1,0 +1,182 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'SQLite 트랜잭션: 자동 커밋의 비용, 저널 방식과 동기화 수준, DEFERRED의 교착과 IMMEDIATE, 저장점';
+export const terms = ['sqlite3_busy_timeout'];
+
+SQLite에서 `BEGIN` 없이 실행한 문장은 하나하나가 따로 트랜잭션입니다(자동 커밋). 그리고 커밋은 비쌉니다. 커밋이 끝났다고 말하려면 전원이 꺼져도 남도록 저널과 데이터베이스 파일을 디스크에 확실히 써야(`fsync`) 하기 때문입니다.
+
+## 묶어서 커밋하기
+
+행 1000개를 넣는 시간을 저널 방식과 동기화 수준을 바꿔 가며 재 보았습니다. 기본인 **되돌림 저널**은 커밋마다 바꾸기 전의 내용을 저널 파일에 쓰고 디스크에 확실히 쓴 뒤 데이터베이스를 고치고 저널을 지웁니다. **WAL**(write-ahead log)은 바뀐 내용을 로그 파일 끝에 덧붙이고, 나중에 체크포인트에서 데이터베이스 파일로 옮깁니다. 시간 재기는 실행할 때마다 달라지므로 이 책을 만든 기계에서 잰 값을 적었습니다.
+
+```cpp flags=-lsqlite3 norun
+#include <sqlite3.h>
+#include <chrono>
+#include <cstdio>
+#include <filesystem>
+
+// 행 1000개를 넣는 시간 (파일 데이터베이스, ms)
+double insert_ms(const char* pragmas, bool one_tx) {
+    std::filesystem::remove_all("bench");
+    std::filesystem::create_directory("bench");
+    sqlite3* db;
+    sqlite3_open("bench/s.db", &db);
+    sqlite3_exec(db, pragmas, nullptr, nullptr, nullptr);
+    sqlite3_exec(db, "CREATE TABLE t (i INTEGER, s TEXT)", nullptr, nullptr,
+                 nullptr);
+    sqlite3_stmt* st;
+    sqlite3_prepare_v2(db, "INSERT INTO t VALUES (?, 'x')", -1, &st, nullptr);
+    auto t0 = std::chrono::steady_clock::now();
+    if (one_tx) sqlite3_exec(db, "BEGIN", nullptr, nullptr, nullptr);
+    for (int i = 0; i < 1000; ++i) {
+        sqlite3_bind_int(st, 1, i);
+        sqlite3_step(st);
+        sqlite3_reset(st);
+    }
+    if (one_tx) sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
+    auto t1 = std::chrono::steady_clock::now();
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    return std::chrono::duration<double, std::milli>(t1 - t0).count();
+}
+
+int main() {
+    const char* rollback = "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL";
+    const char* wal_full = "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL";
+    const char* wal_norm = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL";
+    struct { const char* label; const char* pragmas; bool one_tx; } cases[] = {
+        {"되돌림 저널, FULL, 행마다 커밋", rollback, false},
+        {"되돌림 저널, FULL, 한 번에 커밋", rollback, true},
+        {"WAL, FULL, 행마다 커밋", wal_full, false},
+        {"WAL, NORMAL, 행마다 커밋", wal_norm, false},
+        {"WAL, NORMAL, 한 번에 커밋", wal_norm, true},
+    };
+    for (auto& c : cases)
+        std::printf("%7.1f ms  %s\n", insert_ms(c.pragmas, c.one_tx), c.label);
+    std::filesystem::remove_all("bench");
+}
+```
+
+```text nocheck
+  756.0 ms  되돌림 저널, FULL, 행마다 커밋
+    1.0 ms  되돌림 저널, FULL, 한 번에 커밋
+  234.9 ms  WAL, FULL, 행마다 커밋
+   10.9 ms  WAL, NORMAL, 행마다 커밋
+    0.3 ms  WAL, NORMAL, 한 번에 커밋
+```
+
+행마다 커밋하면 1000번의 커밋이 1000번의 디스크 동기화가 되어, 한 트랜잭션으로 묶은 것보다 수백 배 느렸습니다. WAL은 커밋 하나에 동기화가 한 번으로 줄고, `synchronous=NORMAL`이면 커밋 때는 동기화하지 않고 체크포인트 때만 해서 훨씬 빠릅니다. 대신 정전이 나면 마지막 몇 트랜잭션이 사라질 수 있습니다. 데이터베이스가 깨지지는 않으므로, 잃어도 되는 기록에는 WAL과 NORMAL을, 잃으면 안 되는 거래에는 FULL을 씁니다. 많은 행을 넣는 더 빠른 방법은 [「배치 삽입」](#/read/cpp-database/dbperf-batch)에서 봅니다.
+
+## 잠금과 BEGIN의 종류
+
+SQLite는 데이터베이스 파일 하나를 통째로 잠급니다. 읽는 쪽은 여럿이어도 되지만 쓰는 쪽은 한 번에 하나뿐입니다. 그냥 `BEGIN`(DEFERRED)은 잠금을 미뤄서 처음 읽을 때 읽기 잠금을, 처음 쓸 때 쓰기 자리를 잡습니다. `BEGIN IMMEDIATE`는 시작하자마자 쓰기 자리를 잡습니다. 같은 파일을 연 두 연결로 차이를 보았습니다. `sqlite3_busy_timeout`은 잠겨 있으면 바로 실패하지 않고 정한 시간까지 다시 시도하게 하는 설정입니다.
+
+```cpp flags=-lsqlite3
+#include <sqlite3.h>
+#include <cstdio>
+#include <filesystem>
+#include <string>
+
+std::string run(sqlite3* db, const char* sql) {   // "OK" 또는 결과 코드와 설명
+    char* err = nullptr;
+    int rc = sqlite3_exec(db, sql, nullptr, nullptr, &err);
+    std::string r = rc == SQLITE_OK ? "OK" : std::to_string(rc) + " " + err;
+    sqlite3_free(err);
+    return r;
+}
+
+void step(const char* who, sqlite3* db, const char* sql) {
+    std::printf("  %s: %s -> %s\n", who, sql, run(db, sql).c_str());
+}
+
+int main() {
+    auto path = (std::filesystem::temp_directory_path() / "academy-tx.db").string();
+    std::filesystem::remove(path);
+    sqlite3 *a, *b;                                // 같은 파일을 연 두 연결
+    sqlite3_open(path.c_str(), &a);
+    sqlite3_open(path.c_str(), &b);
+    sqlite3_busy_timeout(a, 200);                  // 잠겨 있으면 200ms까지 기다린다
+    sqlite3_busy_timeout(b, 200);
+    run(a, "CREATE TABLE stock (item TEXT PRIMARY KEY, qty INT);"
+           "INSERT INTO stock VALUES ('볼트', 10)");
+
+    std::printf("[DEFERRED: 둘 다 읽은 뒤에 쓰기]\n");
+    step("A", a, "BEGIN");
+    step("A", a, "SELECT qty FROM stock");
+    step("B", b, "BEGIN");
+    step("B", b, "SELECT qty FROM stock");
+    step("A", a, "UPDATE stock SET qty = qty - 1");
+    step("B", b, "UPDATE stock SET qty = qty - 2");
+    step("A", a, "COMMIT");
+    step("B", b, "ROLLBACK");
+    step("A", a, "COMMIT");
+
+    std::printf("[IMMEDIATE: 시작할 때 쓰기 자리를 잡기]\n");
+    step("A", a, "BEGIN IMMEDIATE");
+    step("B", b, "BEGIN IMMEDIATE");
+    step("A", a, "UPDATE stock SET qty = qty - 1");
+    step("A", a, "COMMIT");
+    step("B", b, "BEGIN IMMEDIATE");
+    step("B", b, "UPDATE stock SET qty = qty - 2");
+    step("B", b, "COMMIT");
+
+    std::printf("[저장점: 일부만 되돌리기]\n");
+    step("A", a, "BEGIN");
+    step("A", a, "INSERT INTO stock VALUES ('너트', 5)");
+    step("A", a, "SAVEPOINT sp1");
+    step("A", a, "INSERT INTO stock VALUES ('와셔', 7)");
+    step("A", a, "ROLLBACK TO sp1");
+    step("A", a, "COMMIT");
+    sqlite3_exec(a, "SELECT group_concat(item || ' ' || qty, ', ') FROM stock",
+                 [](void*, int, char** v, char**) {
+                     std::printf("남은 재고: %s\n", v[0]);
+                     return 0;
+                 }, nullptr, nullptr);
+    sqlite3_close(a);
+    sqlite3_close(b);
+    std::filesystem::remove(path);
+}
+```
+
+```text
+[DEFERRED: 둘 다 읽은 뒤에 쓰기]
+  A: BEGIN -> OK
+  A: SELECT qty FROM stock -> OK
+  B: BEGIN -> OK
+  B: SELECT qty FROM stock -> OK
+  A: UPDATE stock SET qty = qty - 1 -> OK
+  B: UPDATE stock SET qty = qty - 2 -> 5 database is locked
+  A: COMMIT -> 5 database is locked
+  B: ROLLBACK -> OK
+  A: COMMIT -> OK
+[IMMEDIATE: 시작할 때 쓰기 자리를 잡기]
+  A: BEGIN IMMEDIATE -> OK
+  B: BEGIN IMMEDIATE -> 5 database is locked
+  A: UPDATE stock SET qty = qty - 1 -> OK
+  A: COMMIT -> OK
+  B: BEGIN IMMEDIATE -> OK
+  B: UPDATE stock SET qty = qty - 2 -> OK
+  B: COMMIT -> OK
+[저장점: 일부만 되돌리기]
+  A: BEGIN -> OK
+  A: INSERT INTO stock VALUES ('너트', 5) -> OK
+  A: SAVEPOINT sp1 -> OK
+  A: INSERT INTO stock VALUES ('와셔', 7) -> OK
+  A: ROLLBACK TO sp1 -> OK
+  A: COMMIT -> OK
+남은 재고: 볼트 6, 너트 5
+```
+
+- **DEFERRED의 교착**: 둘 다 읽기 잠금을 쥔 채 A가 먼저 쓰기 자리를 잡자, B의 쓰기는 기다려도 풀릴 수 없으므로 SQLite가 기다리지 않고 바로 BUSY(5)를 돌려주었습니다. A의 커밋은 B의 읽기 잠금이 풀리기를 200ms 기다리다 BUSY였고, B가 되돌린 뒤에야 커밋되었습니다
+- **IMMEDIATE**: B는 시작하는 순간 BUSY를 받아 아무 일도 하기 전에 물러났고, A가 끝난 뒤 다시 시작해 성공했습니다. 다시 할 지점이 트랜잭션의 맨 앞이라 처리가 간단합니다. 쓸 트랜잭션은 `BEGIN IMMEDIATE`로 시작하는 것이 규칙입니다
+- **저장점**: `SAVEPOINT`로 트랜잭션 안에 되돌릴 지점을 만들고 `ROLLBACK TO`로 그 뒤만 되돌렸습니다. 와셔는 사라지고 너트는 남았습니다. [「RAII 트랜잭션」](#/read/cpp-database/tx-raii)은 저장점으로 트랜잭션의 중첩을 흉내 냅니다
+
+<Note>
+쓰는 쪽이 하나뿐이므로 쓰기 트랜잭션은 짧게 유지합니다. 트랜잭션을 연 채로 사용자의 입력을 기다리거나 네트워크 응답을 기다리면 그동안 다른 모든 쓰기가 멈춥니다. 필요한 값을 먼저 모은 뒤에 트랜잭션을 열고, 계산만 하고 바로 커밋합니다.
+</Note>
+
+## 정리
+
+- SQLite는 BEGIN 없는 문장마다 커밋하고 커밋마다 디스크 동기화를 하므로, 많은 쓰기는 한 트랜잭션으로 묶는다
+- WAL은 커밋을 로그에 덧붙여 빠르고, synchronous=NORMAL은 더 빠르지만 정전 때 마지막 트랜잭션을 잃을 수 있어 데이터의 중요도에 맞춰 고른다
+- DEFERRED 트랜잭션 둘이 읽은 뒤 쓰면 교착으로 BUSY가 나므로 쓸 트랜잭션은 BEGIN IMMEDIATE로 시작하고, busy_timeout을 걸고, 저장점으로 일부만 되돌린다

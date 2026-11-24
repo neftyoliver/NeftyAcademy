@@ -1,0 +1,195 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '다중 샘플링: 픽셀마다 샘플 여러 개, 리졸브 첨부물, 도형의 가장자리만 고쳐지는 까닭, 샘플마다 셰이딩';
+export const terms = [
+  'VkSampleCountFlagBits', 'VkPhysicalDeviceLimits', 'gl_SampleID', 'gl_SamplePosition',
+];
+
+픽셀의 한가운데가 삼각형 안에 있는지만 따지면 비스듬한 변이 계단처럼 보입니다. **다중 샘플링**(MSAA)은 픽셀 안의 여러 자리(샘플)에서 덮였는지를 따로 판정하고, 색과 깊이도 샘플마다 둡니다. 그리기가 끝나면 샘플들을 평균해 픽셀 하나의 값으로 만드는데, 이것이 **리졸브**입니다. 아래 프로그램은 같은 사각형을 세 가지로 그려 견줍니다. 사각형의 왼쪽 변은 도형의 가장자리이고, 오른쪽 경계는 프래그먼트 셰이더가 계산으로 만든 것입니다.
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp,vkx_cmd.hpp,vkx_resource.hpp,vkx_bind.hpp,vkx_pipeline.hpp,vkx_draw.hpp
+#include "vkx_bind.hpp"
+#include "vkx_cmd.hpp"
+#include "vkx_draw.hpp"
+#include "vkx_pipeline.hpp"
+
+const uint32_t W = 20, H = 8;
+const VkFormat FORMAT = VK_FORMAT_R32_SFLOAT;
+
+// 왼쪽 변이 비스듬한 사각형. 이 변은 도형의 가장자리다
+const char* VS = R"(#version 450
+const vec2 pos[6] = vec2[](vec2(-0.7, -1), vec2(1, -1), vec2(1, 1),
+                           vec2(-0.7, -1), vec2(1, 1), vec2(-0.22, 1));
+void main() { gl_Position = vec4(pos[gl_VertexIndex], 0.0, 1.0); })";
+
+// 오른쪽 경계는 프래그먼트 셰이더가 만든다. 사선의 왼쪽만 칠한다
+const char* FS = R"(#version 450
+layout(location = 0) out float value;
+void main() {
+    vec2 at = gl_FragCoord.xy;   // 픽셀의 한가운데
+    value = at.x + 0.9 * at.y < 17.0 ? 1.0 : 0.0;
+})";
+
+// 같은 셰이더인데 샘플의 자리에서 판정한다. gl_SamplePosition을 읽는 셰이더는
+// 픽셀마다가 아니라 샘플마다 실행된다
+const char* FS_PER_SAMPLE = R"(#version 450
+layout(location = 0) out float value;
+void main() {
+    vec2 at = floor(gl_FragCoord.xy) + gl_SamplePosition;
+    value = at.x + 0.9 * at.y < 17.0 ? 1.0 : 0.0;
+})";
+
+struct Result { std::vector<float> pixels; uint64_t shaded = 0; };
+
+// 픽셀마다 샘플 samples개로 그리고, 픽셀마다 값 하나로 리졸브한 결과를 돌려준다
+Result render(const vkx::Device& dev, vkx::Commands& cmds,
+              VkSampleCountFlagBits samples, const char* fs_source) {
+    const bool multi = samples != VK_SAMPLE_COUNT_1_BIT;
+    const auto ATTACH = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    // 결과가 놓일 이미지는 언제나 픽셀마다 샘플 하나다
+    vkx::Image shown = vkx::make_image(
+        dev, {W, H}, FORMAT, ATTACH | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    // 그리는 곳은 다중 샘플 이미지. 리졸브하고 나면 필요 없는 임시 첨부물이다
+    vkx::Image wide{};
+    if (multi)
+        wide = vkx::make_image(
+            dev, {W, H}, FORMAT,
+            ATTACH | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT, 1, samples);
+    vkx::Buffer pixels =
+        vkx::make_buffer(dev, W * H * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+    VkPipelineLayout layout = vkx::make_layout(dev);
+    auto vs = vkx::make_shader(dev, vkx::compile(VS, shaderc_vertex_shader));
+    auto fs =
+        vkx::make_shader(dev, vkx::compile(fs_source, shaderc_fragment_shader));
+    // 파이프라인의 샘플 수는 첨부물의 샘플 수와 같아야 한다
+    VkPipeline pipeline = vkx::make_pipeline(
+        dev, {.vertex = vs, .fragment = fs, .layout = layout, .color = FORMAT,
+              .samples = samples});
+    VkQueryPoolCreateInfo qci{
+        .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+        .queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS, .queryCount = 1,
+        .pipelineStatistics =
+            VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT};
+    VkQueryPool stats;
+    vkx::check(vkCreateQueryPool(dev.handle, &qci, nullptr, &stats), "쿼리 풀");
+
+    VkCommandBuffer cmd = vkx::begin(cmds);
+    vkCmdResetQueryPool(cmd, stats, 0, 1);
+    for (const vkx::Image* im : {&shown, &wide})
+        if (im->handle)
+            vkx::transition(cmd, *im, VK_IMAGE_LAYOUT_UNDEFINED,
+                            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                            VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+    VkRenderingAttachmentInfo color{
+        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView = multi ? wide.view : shown.view,
+        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+    if (multi) {   // 그리기가 끝날 때 샘플들의 평균을 shown에 적고 샘플은 버린다
+        color.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
+        color.resolveImageView = shown.view;
+        color.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        color.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    }
+    VkRenderingInfo info{.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+                         .renderArea = {{0, 0}, {W, H}}, .layerCount = 1,
+                         .colorAttachmentCount = 1, .pColorAttachments = &color};
+    vkCmdBeginRendering(cmd, &info);
+    VkViewport viewport{0.0f, 0.0f, float(W), float(H), 0.0f, 1.0f};
+    VkRect2D scissor{{0, 0}, {W, H}};
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vkCmdBeginQuery(cmd, stats, 0, 0);
+    vkCmdDraw(cmd, 6, 1, 0, 0);
+    vkCmdEndQuery(cmd, stats, 0);
+    vkx::end_drawing(cmd, shown, pixels);
+    vkx::submit_and_wait(dev, cmds);
+
+    Result r;
+    auto* v = static_cast<const float*>(pixels.mapped);
+    r.pixels.assign(v, v + W * H);
+    vkGetQueryPoolResults(dev.handle, stats, 0, 1, sizeof r.shaded, &r.shaded,
+                          sizeof r.shaded, VK_QUERY_RESULT_64_BIT);
+    vkDestroyQueryPool(dev.handle, stats, nullptr);
+    vkDestroyPipeline(dev.handle, pipeline, nullptr);
+    vkDestroyPipelineLayout(dev.handle, layout, nullptr);
+    vkDestroyShaderModule(dev.handle, vs, nullptr);
+    vkDestroyShaderModule(dev.handle, fs, nullptr);
+    vkx::destroy(dev, pixels);
+    vkx::destroy(dev, wide);
+    vkx::destroy(dev, shown);
+    return r;
+}
+
+int main() {
+    vkx::Instance inst = vkx::make_instance();
+    vkx::Device dev = vkx::make_device(inst.handle);
+    vkx::Commands cmds = vkx::make_commands(dev);
+
+    const VkPhysicalDeviceLimits& limits = dev.props.limits;
+    std::printf("색 첨부물에 쓸 수 있는 샘플 수:");
+    for (uint32_t n = 1; n <= 64; n *= 2)
+        if (limits.framebufferColorSampleCounts & n) std::printf(" %u", n);
+    std::printf("\n샘플의 자리가 표준인가: %s\n",
+                limits.standardSampleLocations ? "예" : "아니오");
+
+    const auto X4 = VK_SAMPLE_COUNT_4_BIT;
+    Result a = render(dev, cmds, VK_SAMPLE_COUNT_1_BIT, FS);
+    Result b = render(dev, cmds, X4, FS);
+    Result c = render(dev, cmds, X4, FS_PER_SAMPLE);
+
+    // 숫자는 픽셀의 샘플 넷 가운데 칠해진 개수다(.은 0개, #은 4개)
+    std::puts("샘플 1개              샘플 4개              "
+              "샘플 4개, 샘플마다 셰이딩");
+    for (uint32_t y = 0; y < H; ++y) {
+        for (const Result* r : {&a, &b, &c}) {
+            for (uint32_t x = 0; x < W; ++x)
+                std::putchar(".123#"[int(r->pixels[y * W + x] * 4.0f + 0.5f)]);
+            std::fputs(r == &c ? "\n" : "  ", stdout);
+        }
+    }
+    std::printf("프래그먼트 셰이더가 실행된 횟수: %llu, %llu, %llu\n",
+                (unsigned long long)a.shaded, (unsigned long long)b.shaded,
+                (unsigned long long)c.shaded);
+
+    vkx::destroy(dev, cmds);
+    vkx::destroy(dev);
+    vkx::destroy(inst);
+}
+```
+
+```text
+색 첨부물에 쓸 수 있는 샘플 수: 1 4
+샘플의 자리가 표준인가: 예
+샘플 1개              샘플 4개              샘플 4개, 샘플마다 셰이딩
+...##############...  ...3#############...  ...3############2...
+....############....  ...1############....  ...1###########2....
+.....##########.....  ....2##########.....  ....2#########2.....
+.....#########......  .....3########......  .....3#######3......
+......#######.......  .....1#######.......  .....1######3.......
+......######........  ......3#####........  ......3#####1.......
+.......####.........  ......1####.........  ......1####1........
+........##..........  .......2##..........  .......2##2.........
+프래그먼트 셰이더가 실행된 횟수: 116, 131, 468
+```
+
+- **이미지 둘**: 다중 샘플 이미지에 그리고, 샘플이 하나인 이미지로 리졸브합니다. `VkRenderingAttachmentInfo`의 `resolveMode`와 `resolveImageView`에 적어 두면 그리기가 끝날 때 함께 처리됩니다. 다중 샘플 이미지는 그 뒤에 쓸 일이 없어 `storeOp`를 `DONT_CARE`로 둡니다. 타일 기반 GPU는 이때 샘플들을 메모리로 내보내지 않고 타일 안에서 리졸브까지 끝냅니다
+- **샘플 수 맞추기**: 파이프라인의 `rasterizationSamples`(도우미의 `samples`)와 색·깊이 첨부물의 샘플 수가 같아야 합니다. 1과 4는 어느 장치나 지원하고, 그 밖은 `framebufferColorSampleCounts` 같은 한도 항목의 비트로 확인합니다
+- **가운데 그림**: 왼쪽 변에 1, 2, 3이 나타나 계단이 부드러워졌는데 오른쪽 경계는 그대로입니다. 셰이더는 여전히 픽셀마다 한 번만 실행되고 그 값이 덮인 샘플에 똑같이 적히므로, 셰이더 안에서 생긴 경계는 다중 샘플링이 고치지 못합니다
+- **오른쪽 그림**: 셰이더를 샘플마다 실행하면 오른쪽 경계도 부드러워집니다. 셰이더가 `gl_SamplePosition`이나 `gl_SampleID`를 읽으면 그렇게 되고, 파이프라인의 `sampleShadingEnable`과 `minSampleShading`으로 켤 수도 있습니다(`sampleRateShading` 기능)
+- **실행 횟수**: 샘플이 하나일 때 116번이고 넷일 때 131번입니다. 늘어난 15번은 가장자리에서 새로 걸친 픽셀 5개와, 두 삼각형이 만나는 대각선에서 양쪽이 한 번씩 칠한 픽셀 10개입니다. 샘플마다 실행하면 468번으로 네 배가 됩니다. 이런 통계 쿼리는 [「GPU 프로파일링」](#/read/cpp-vulkan/vdbg-profile)에서 다루고, 세는 방식은 장치마다 조금씩 다릅니다
+- **샘플의 자리**: 표준 위치에서 샘플 넷은 (0.375, 0.125), (0.875, 0.375), (0.125, 0.625), (0.625, 0.875)에 놓입니다. 가로로도 세로로도 겹치지 않아서 변이 어느 쪽으로 기울어도 단계가 고르게 나옵니다
+
+<Note>
+다중 샘플링의 값은 메모리입니다. 4배면 색과 깊이 첨부물이 네 배가 됩니다. 타일 기반 GPU에서는 다중 샘플 이미지의 쓰임새에 `TRANSIENT_ATTACHMENT`를 넣고 메모리를 `LAZILY_ALLOCATED` 타입에서 받아, 실제 메모리를 잡지 않게 할 수 있습니다(이 예제는 쓰임새만 적었습니다). 풀잎처럼 알파로 오려 내는 텍스처의 가장자리도 셰이더가 만든 경계인데, `alphaToCoverageEnable`을 켜면 알파 값이 덮인 샘플의 수로 바뀌어 샘플마다 셰이딩하지 않고도 부드러워집니다.
+</Note>
+
+## 정리
+
+- 다중 샘플링은 덮임과 깊이를 샘플마다 판정하고 셰이더는 픽셀마다 한 번 실행해, 도형의 가장자리를 적은 값으로 부드럽게 한다
+- 다중 샘플 이미지에 그리고 리졸브 첨부물로 평균을 받으며, 파이프라인과 첨부물의 샘플 수를 맞춘다
+- 셰이더가 만든 경계는 샘플마다 셰이딩하거나 알파 투 커버리지로 다룬다

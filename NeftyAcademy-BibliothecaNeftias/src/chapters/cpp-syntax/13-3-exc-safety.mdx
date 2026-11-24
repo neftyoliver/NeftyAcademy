@@ -1,0 +1,113 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '기본 보장, 강한 보장, 던지지 않음 보장. 사본에서 일하고 바꿔치기';
+
+함수가 도중에 예외로 떠나면 객체는 어떤 상태로 남을까요. "예외 안전하다"는 말은 뭉뚱그려 쓰이지만, 실제로는 세 단계의 약속으로 나뉩니다.
+
+## 세 단계
+
+| 보장 | 예외가 나면 | 예 |
+| --- | --- | --- |
+| 던지지 않음 | 예외가 나지 않는다 | 소멸자, `swap`, 이동 연산, `vector::size()` |
+| 강한 보장 | 부르기 전의 상태 **그대로**다. 되거나, 아무 일도 없거나 | `vector::push_back`, `std::make_unique` |
+| 기본 보장 | 새는 것이 없고 객체는 **쓸 수 있는** 상태다. 다만 값은 바뀌었을 수 있다 | `vector::insert`(중간에 넣기), 대부분의 표준 라이브러리 함수 |
+| 보장 없음 | 자원이 새거나 객체가 깨진다 | 버그 |
+
+기본 보장이 **최소한**입니다. 표준 라이브러리의 모든 함수는 적어도 기본 보장을 합니다. 내 코드도 그래야 합니다.
+
+"쓸 수 있는 상태"란 그 클래스가 늘 지키기로 한 약속(불변식)이 깨지지 않았다는 뜻입니다.
+
+## 깨지는 예와 고친 예
+
+```cpp
+#include <print>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
+
+struct Config {                 // 약속: names와 pins의 길이는 늘 같다
+    std::vector<std::string> names;
+    std::vector<int> pins;
+
+    void add_unsafe(const std::string& name, int pin)
+    {
+        names.push_back(name);
+        if (pin < 0)
+            throw std::invalid_argument("핀 번호가 음수");
+        pins.push_back(pin);
+    }
+
+    void add_strong(const std::string& name, int pin)
+    {
+        Config next = *this;            // 1. 사본을 만든다       (던질 수 있다)
+        next.add_unsafe(name, pin);     // 2. 사본을 고친다       (던질 수 있다)
+        std::swap(*this, next);         // 3. 바꿔치기한다        (던지지 않는다)
+    }
+};
+
+int main()
+{
+    Config a;
+    try {
+        a.add_unsafe("led", -1);
+    } catch (const std::exception&) {
+    }
+    std::println("unsafe: names {} pins {}", a.names.size(), a.pins.size());
+
+    Config b;
+    try {
+        b.add_strong("led", -1);
+    } catch (const std::exception&) {
+    }
+    std::println("strong: names {} pins {}", b.names.size(), b.pins.size());
+}
+```
+
+```text
+unsafe: names 1 pins 0
+strong: names 0 pins 0
+```
+
+`add_unsafe`는 이름만 넣고 떠났습니다. 메모리는 새지 않았지만 "두 길이가 같다"는 약속이 깨져서, 이 `Config`를 쓰는 다른 코드가 범위 밖을 읽게 됩니다. 검사를 `push_back`보다 먼저 하면 이 예는 고쳐지지만, 둘째 `push_back`이 메모리 부족으로 던지는 경우는 여전히 남습니다.
+
+## 사본에서 일하고 바꿔치기
+
+`add_strong`의 세 줄이 강한 보장을 만드는 일반적인 방법입니다.
+
+1. 던질 수 있는 일을 모두 **옆에서**(사본이나 지역 변수에서) 한다. 실패해도 원본은 그대로다
+2. 다 성공한 뒤에 **던지지 않는 연산**(`swap`, 이동, 포인터 대입)으로 결과를 원본에 넣는다
+
+1에서 예외가 나면 `next`는 스택이 풀리며 사라지고 `*this`는 손대지 않은 채입니다. [복사 대입 연산자](#/read/cpp-syntax/sm-copy)를 "복사본을 만들고 `swap`"으로 쓰는 관례(copy-and-swap)도 같은 생각입니다.
+
+값은 **복사 한 번**입니다. 큰 컨테이너에서 원소 하나 넣자고 전체를 복사하는 것은 지나치므로, 강한 보장은 필요한 곳에만 줍니다.
+
+## 표준 컨테이너가 하는 일
+
+`std::vector::push_back`은 강한 보장을 합니다. 자리가 모자라면 새 메모리를 얻고 원소를 옮긴 **뒤에야** 옛 메모리를 버립니다. 그런데 원소를 "이동"하다가 예외가 나면 되돌릴 수 없으므로, 이동 생성자가 `noexcept`가 아니면 **복사**로 옮깁니다. [`noexcept`를 붙이는 까닭](#/read/cpp-syntax/exc-noexcept)이 여기서 나옵니다.
+
+| 연산 | 보장 |
+| --- | --- |
+| `push_back`, `emplace_back` | 강한 보장 |
+| 중간에 `insert`, `erase` | 원소의 복사·이동이 던지지 않으면 강한 보장, 아니면 기본 보장 |
+| `clear`, `pop_back`, `swap` | 던지지 않음 |
+| `map`, `set`, `list`의 원소 하나 `insert` | 강한 보장 |
+
+## 실용 지침
+
+| 지침 | 까닭 |
+| --- | --- |
+| 자원은 객체가 쥔다 ([RAII](#/read/cpp-syntax/exc-unwind)) | 이것만으로 "새지 않는다"가 해결된다 |
+| 상태를 바꾸는 일은 함수의 **끝**에 몰아서 | 앞부분에서 실패하면 바뀐 것이 없다 |
+| 소멸자, `swap`, 이동 연산은 던지지 않게 | 다른 보장들을 쌓는 바닥이다 |
+| 여러 객체를 함께 바꿀 때는 순서를 생각한다 | 중간에 실패하면 일부만 바뀐 채 남는다 |
+
+<Note>
+바깥 세계를 바꾸는 일은 되돌릴 수 없습니다. GPIO를 이미 올렸거나 패킷을 이미 보냈다면 강한 보장은 불가능합니다. 그런 함수는 "어디까지 진행되었는지"를 알 수 있게 하고, 안전한 상태로 돌리는 일(출력 끄기)은 소멸자가 맡게 합니다.
+</Note>
+
+## 정리
+
+- 기본 보장: 새지 않고 약속이 유지된다. 강한 보장: 실패하면 아무 일도 없었던 것과 같다
+- 강한 보장은 "옆에서 일하고, 던지지 않는 연산으로 확정"해서 만든다
+- 소멸자, `swap`, 이동이 던지지 않아야 그 위에 나머지를 쌓을 수 있다

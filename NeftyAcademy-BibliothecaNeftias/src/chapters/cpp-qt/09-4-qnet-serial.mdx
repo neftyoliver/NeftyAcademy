@@ -1,0 +1,113 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '직렬 포트: QSerialPort로 장치와 대화하기, 속도와 8N1 설정, 줄 단위로 모아 읽기, 포트 목록';
+export const terms = ['QSerialPort', 'QSerialPortInfo', 'QSocketNotifier'];
+
+아두이노, 측정 장비, 산업용 컨트롤러, GPS 수신기 같은 많은 장치가 아직도 **직렬 포트**(UART, RS-232, USB 가상 COM 포트)로 이야기합니다. Qt Serial Port 모듈의 `QSerialPort`는 이것을 [「TCP와 UDP 소켓」](#/read/cpp-qt/qnet-sockets)의 소켓과 같은 방식으로 다루게 해 줍니다. 열고, 쓰고, `readyRead` 시그널이 오면 읽습니다. Windows의 `COM3`이든 Linux의 `/dev/ttyUSB0`이든 코드는 같습니다.
+
+## 온도계와 대화하기
+
+진짜 장치가 없어서, 리눅스의 의사 터미널(pty) 한쪽 끝을 "장치"로 삼아 명령에 답하게 했습니다. 다른 끝은 보통의 직렬 포트처럼 `QSerialPort`로 엽니다.
+
+```cpp qt=SerialPort
+#include <QCoreApplication>
+#include <QSerialPort>
+#include <QSerialPortInfo>
+#include <QSocketNotifier>
+#include <cstdio>
+#include <cstdlib>
+#include <fcntl.h>
+#include <unistd.h>
+
+// 진짜 장치 대신 의사 터미널(pty)의 한쪽 끝을 '장치'로 흉내 낸다
+int main(int argc, char** argv) {
+    QCoreApplication app(argc, argv);
+    for (const QSerialPortInfo& info : QSerialPortInfo::availablePorts())
+        // 실제 앱은 이 목록을 사용자에게 보여 준다
+        (void)info.portName();
+
+    int master = posix_openpt(O_RDWR | O_NOCTTY);
+    grantpt(master);
+    unlockpt(master);
+    QString slaveName = ptsname(master);
+
+    // 장치 쪽: 받은 줄에 답한다("TEMP?" -> 온도, 그 밖에는 ERR)
+    QSocketNotifier device(master, QSocketNotifier::Read);
+    QByteArray devBuf;
+    QObject::connect(&device, &QSocketNotifier::activated, [&] {
+        char tmp[256];
+        ssize_t n = read(master, tmp, sizeof tmp);
+        if (n <= 0) return;
+        devBuf.append(tmp, n);
+        int nl;
+        while ((nl = devBuf.indexOf('\n')) >= 0) {
+            QByteArray cmd = devBuf.left(nl).trimmed();
+            devBuf.remove(0, nl + 1);
+            QByteArray reply = cmd == "TEMP?" ? "23.5\r\n" : "ERR\r\n";
+            // 장치는 답을 조금씩 흘려보낸다
+            (void)!write(master, reply.constData(), 2);
+            (void)!write(master, reply.constData() + 2, reply.size() - 2);
+        }
+    });
+
+    // 앱 쪽: QSerialPort로 연다
+    QSerialPort port;
+    port.setPortName(slaveName);
+    port.setBaudRate(QSerialPort::Baud115200);
+    port.setDataBits(QSerialPort::Data8);
+    port.setParity(QSerialPort::NoParity);
+    port.setStopBits(QSerialPort::OneStop);
+    if (!port.open(QIODevice::ReadWrite)) {
+        std::printf("열기 실패: %s\n", qPrintable(port.errorString()));
+        return 1;
+    }
+    std::printf("열림: 115200 8N1\n");
+
+    QList<QByteArray> commands{"TEMP?", "HELLO", "TEMP?"};
+    int sent = 0;
+    auto sendNext = [&] { port.write(commands[sent++] + "\n"); };
+    QObject::connect(&port, &QSerialPort::readyRead, [&] {
+        while (port.canReadLine()) {             // 줄 하나가 다 모였을 때만
+            QByteArray line = port.readLine().trimmed();
+            std::printf("  %s -> %s\n",
+                        commands[sent - 1].constData(), line.constData());
+            if (sent < commands.size()) sendNext();
+            else app.quit();
+        }
+    });
+    sendNext();
+    int rc = app.exec();
+    port.close();
+    close(master);
+    return rc;
+}
+```
+
+```text
+열림: 115200 8N1
+  TEMP? -> 23.5
+  HELLO -> ERR
+  TEMP? -> 23.5
+```
+
+## 설정
+
+- **포트 이름**: `QSerialPortInfo::availablePorts()`가 이 기계의 포트 목록과 함께 USB 장치의 제조사, 제품 번호(VID/PID), 일련번호를 알려 줍니다. 사용자에게 고르게 하거나, VID/PID로 우리 장치를 자동으로 찾습니다
+- **통신 설정**: 속도(보드레이트) 115200, 데이터 8비트, 패리티 없음, 정지 비트 1. 줄여서 **8N1**이라고 부르는 가장 흔한 설정입니다. 장치의 설명서와 정확히 같아야 하며, 하나라도 다르면 깨진 글자가 옵니다. 흐름 제어(`setFlowControl`)가 필요한 장치도 있습니다
+- `open()`은 실패할 수 있습니다. 다른 프로그램이 이미 열었거나, 리눅스에서 사용자가 `dialout` 그룹에 없어 권한이 없는 경우가 흔합니다. `errorString()`을 꼭 보여 주세요
+
+## 줄 단위로 모아 읽기
+
+장치는 답 "23.5\r\n"을 일부러 두 번에 나눠 보냈습니다. 직렬 포트도 TCP처럼 데이터가 **도착한 만큼** 오므로, `readyRead` 한 번에 답 전체가 있다는 보장이 없습니다. 이 장치는 줄 끝(`\n`)으로 메시지를 끝내므로, `canReadLine()`이 참일 때만 `readLine()`으로 한 줄씩 꺼냈습니다. 이진 프로토콜이라면 앞의 머리글에서 길이를 읽어 그만큼 모일 때까지 기다립니다.
+
+명령을 보내고 답을 받은 뒤에 다음 명령을 보낸 것도 중요합니다. 많은 장치가 한 번에 한 명령만 처리하고, 답 없이 명령을 몰아 보내면 버퍼가 넘치거나 답이 뒤섞입니다. 실제 앱에서는 답이 일정 시간 안에 오지 않으면 `QTimer`로 시간 초과를 처리하고 다시 시도합니다.
+
+<Note>
+`waitForReadyRead()` 같은 막는 함수도 있지만, GUI 스레드에서 쓰면 그동안 창이 얼어붙습니다. 위 예제처럼 시그널 방식으로 쓰거나, 장치와의 대화를 [「QThread와 워커 객체」](#/read/cpp-qt/qthr-worker)의 워커로 옮기세요. 장치 쪽 이야기(UART 신호, termios 설정, 의사 터미널)는 C 중급 책의 [「UART」](#/read/c-mid/bus-uart)에서 다룹니다.
+</Note>
+
+## 정리
+
+- QSerialPort는 직렬 장치를 소켓처럼 열고 쓰고 readyRead로 읽으며, 포트 목록과 USB 정보는 QSerialPortInfo로 얻는다
+- 속도와 8N1 같은 설정은 장치와 정확히 같아야 하고, 열기 실패와 권한 문제를 사용자에게 알린다
+- 데이터는 도착한 만큼 오므로 줄 끝이나 길이로 메시지를 모아 읽고, 한 명령의 답을 받은 뒤 다음 명령을 보낸다

@@ -1,0 +1,94 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '컨테이너와 암시적 공유: 복사는 공유하고 쓸 때 떼어 내기, 비const 반복의 함정, QMap과 QHash';
+export const terms = ['QList', 'QVector', 'QMap', 'QHash', 'QSet', 'QByteArray'];
+
+Qt에는 `QList`, `QMap`, `QHash`, `QSet` 같은 자체 컨테이너가 있습니다. STL과 하는 일은 비슷하지만 큰 차이가 하나 있습니다. **암시적 공유**(implicit sharing)입니다. 컨테이너를 복사하면 내용을 복사하지 않고 같은 데이터 블록을 함께 가리키다가, 누군가 **쓰려는 순간** 그쪽만 떼어 내 복사합니다(copy-on-write). `QString`, `QByteArray`, `QImage`, `QPixmap`도 같은 방식입니다.
+
+## 공유와 떼어 내기
+
+```cpp qt
+#include <QCoreApplication>
+#include <QHash>
+#include <QList>
+#include <QMap>
+#include <QString>
+#include <cstdio>
+#include <utility>
+
+const char* same(const void* x, const void* y) { return x == y ? "예" : "아니오"; }
+
+int main(int argc, char** argv) {
+    QCoreApplication app(argc, argv);
+
+    // 1) 복사는 공유: 데이터 블록 하나를 가리키는 포인터만 복사된다
+    QList<int> a(1'000'000, 7);
+    QList<int> b = a;                           // 백만 개를 복사하지 않는다
+    std::printf("복사 직후 같은 데이터? %s\n", same(a.constData(), b.constData()));
+    // 쓰는 순간 b만 따로 떼어 복사(detach)
+    b[0] = 99;
+    std::printf("b[0] 쓰기 뒤 같은 데이터? %s, a[0]=%d b[0]=%d\n",
+                same(a.constData(), b.constData()), a[0], b[0]);
+
+    // 2) 함정: 공유 중인 컨테이너를 const 아닌 채로 훑으면 쓰지 않아도 떼어진다
+    QList<int> c = a;
+    for (int& x : c) { (void)x; }               // 비const begin() -> detach
+    std::printf("비const로 훑은 뒤 공유? %s\n", same(a.constData(), c.constData()));
+    QList<int> d = a;
+    for (int x : std::as_const(d)) { (void)x; } // const로 훑으면 그대로
+    std::printf("as_const로 훑은 뒤 공유? %s\n",
+                same(a.constData(), d.constData()));
+
+    // 3) QString도 같은 방식: 함수에 값으로 넘겨도 싸다
+    QString s1 = QString(10000, QChar('x'));
+    QString s2 = s1;
+    std::printf("QString 복사 공유? %s\n", same(s1.constData(), s2.constData()));
+
+    // 4) QMap은 키 순서, QHash는 순서 없음(대신 빠름)
+    QMap<QString, int> m{{"다", 3}, {"가", 1}, {"나", 2}};
+    QHash<QString, int> h{{"다", 3}, {"가", 1}, {"나", 2}};
+    std::printf("QMap 순서:");
+    for (auto it = m.cbegin(); it != m.cend(); ++it)
+        std::printf(" %s=%d", qPrintable(it.key()), it.value());
+    std::printf("\nQHash에서 '나' 찾기: %d, 없는 키 '라': %d(기본값)\n",
+                h.value("나"), h.value("라"));
+}
+```
+
+```text
+복사 직후 같은 데이터? 예
+b[0] 쓰기 뒤 같은 데이터? 아니오, a[0]=7 b[0]=99
+비const로 훑은 뒤 공유? 아니오
+as_const로 훑은 뒤 공유? 예
+QString 복사 공유? 예
+QMap 순서: 가=1 나=2 다=3
+QHash에서 '나' 찾기: 2, 없는 키 '라': 0(기본값)
+```
+
+## 왜 이렇게 만들었나
+
+- 백만 개짜리 `QList`를 `b = a`로 복사했지만 두 리스트는 같은 데이터를 가리켰습니다. 복사는 참조 횟수를 하나 올리는 것뿐이라 거의 공짜입니다
+- `b[0] = 99`로 쓰는 순간 `b`가 자기 몫을 떼어 냈고(**detach**), `a`는 7 그대로였습니다. 값 의미(복사하면 독립)는 지키면서 복사 비용은 실제로 쓸 때만 냅니다
+- 덕분에 Qt API는 `QString`, `QList`, `QImage`를 **값으로** 주고받아도 부담이 없습니다. 시그널 인자로 큰 리스트를 보내거나, 함수가 리스트를 돌려주는 코드가 자연스럽습니다
+
+## 함정: 비const 반복
+
+`for (int& x : c)`는 `x`에 아무것도 쓰지 않았는데도 `c`를 떼어 냈습니다. 비const 컨테이너의 `begin()`은 "쓸지도 모른다"고 보고 미리 떼어 내기 때문입니다. 공유 중인 컨테이너를 훑기만 할 때는 `std::as_const(d)`로 const로 만들어 훑으세요. 위의 출력처럼 공유가 유지됩니다. 같은 이유로 `operator[]`도 비const 컨테이너에서는 떼어 내므로, 읽기만 할 때는 `at()`이나 `value()`를 씁니다.
+
+또 떼어 내기가 일어나면 데이터 블록이 바뀌므로, 그 전에 얻어 둔 반복자나 포인터는 무효가 됩니다. 공유 중인 컨테이너의 반복자를 오래 들고 있지 않는 것이 안전합니다.
+
+## 어떤 컨테이너를 쓰나
+
+- **QList**: Qt 6에서 `QVector`와 같은 것이 되었습니다. 연속 메모리 배열이라 `std::vector`와 비슷합니다
+- **QMap**은 키 순서로 정렬된 사전이고(한글 키도 가나다순으로 나왔습니다), **QHash**는 순서가 없는 대신 찾기가 빠릅니다. `value(key)`는 없는 키에 기본값(0, 빈 문자열)을 돌려주고 항목을 만들지 않습니다. 반면 `h[key]`는 없으면 새 항목을 만듭니다
+- Qt 컨테이너는 STL 반복자 인터페이스를 따르므로 `<algorithm>`의 함수를 그대로 쓸 수 있습니다
+
+<Note>
+Qt 컨테이너와 STL 중 무엇을 쓸지는 경계에 따라 정하면 됩니다. Qt API에 넘기고 받는 데이터, 시그널 인자, QML에 내놓을 값은 Qt 컨테이너가 편하고, Qt와 상관없는 계산 코드는 STL로 써도 좋습니다. 암시적 공유는 참조 횟수를 원자적으로 세기 때문에 여러 스레드가 같은 리스트의 복사본을 각자 갖는 것은 안전하지만, 같은 객체 하나를 여러 스레드가 동시에 쓰는 것은 STL처럼 안전하지 않습니다.
+</Note>
+
+## 정리
+
+- Qt 컨테이너와 QString은 복사할 때 데이터를 공유하고 쓰는 순간 떼어 내는 암시적 공유를 쓴다
+- 공유 중인 컨테이너를 비const로 훑거나 operator[]를 쓰면 쓰지 않아도 떼어지므로 std::as_const, at, value를 쓴다
+- QList는 연속 배열, QMap은 키 순서, QHash는 빠른 찾기이고, STL 알고리즘과 함께 쓸 수 있다

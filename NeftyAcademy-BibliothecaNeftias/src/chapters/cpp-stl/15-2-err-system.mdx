@@ -1,0 +1,244 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '번호와 범주로 된 error_code, errc와 견주는 원리, 예외에 싣는 system_error, 내 오류 번호 넣기';
+export const terms = [
+  'std::error_code', '~error_code', 'std::system_error', '~system_error', 'std::errc',
+  'error_category', 'error_condition', 'generic_category', 'system_category', 'make_error_code',
+  'is_error_code_enum', 'io_errc',
+];
+
+[「error_code로 오류 받기」](#/read/cpp-stl/fs-errors)에서 `std::error_code`를 받아 `ec == std::errc::...`로 견줬습니다. 그 타입이 어떻게 생겼는지, 내 라이브러리의 오류를 같은 틀에 어떻게 넣는지를 봅니다. 헤더는 `<system_error>`입니다.
+
+## 번호와 범주
+
+오류 번호 2는 리눅스의 `errno`에서는 "파일이 없다"이고, 다른 라이브러리에서는 전혀 다른 뜻입니다. 그래서 `std::error_code`는 **번호**와 함께 그 번호가 **어느 체계의 것인지**(범주, category)를 들고 다닙니다.
+
+```cpp
+#include <cerrno>
+#include <future>
+#include <ios>
+#include <print>
+#include <system_error>
+
+void show(const char* label, const std::error_code& ec)
+{
+    std::println("{:8} {:5} {}:{} [{}]", label, static_cast<bool>(ec),
+                 ec.category().name(), ec.value(), ec.message());
+}
+
+int main()
+{
+    show("기본", std::error_code{});      // 0 은 "오류 없음"
+    show("errno", std::error_code(ENOENT, std::generic_category()));
+    show("errc", std::make_error_code(std::errc::permission_denied));
+    show("iostream", std::make_error_code(std::io_errc::stream));
+    show("future", std::make_error_code(std::future_errc::broken_promise));
+    std::println("{}바이트", sizeof(std::error_code));
+}
+```
+
+```text
+기본     false system:0 [Success]
+errno    true  generic:2 [No such file or directory]
+errc     true  generic:13 [Permission denied]
+iostream true  iostream:1 [iostream error]
+future   true  future:4 [Broken promise]
+16바이트
+```
+
+`int` 하나와 범주 객체의 주소 하나, 16바이트입니다. 힙을 쓰지 않고 복사가 싸며 `noexcept` 함수에서 돌려줄 수 있습니다. `if (ec)`는 번호가 0이 아닌지를 봅니다. `message()`만은 `std::string`을 만들어 돌려주므로 오류를 찍을 때만 부릅니다.
+
+| 범주 | 번호의 뜻 |
+| --- | --- |
+| `std::generic_category()` | POSIX의 `errno` 값. `std::errc`의 이름들이 이 번호다 |
+| `std::system_category()` | 운영체제 고유의 번호. 리눅스에서는 `errno`와 같고 윈도우에서는 `GetLastError()`의 값 |
+| `std::iostream_category()`, `std::future_category()` | [스트림](#/read/cpp-stl/io-streams)과 [`future`](#/read/cpp-stl/conc-future)의 오류 |
+
+## 견주는 원리
+
+번호가 같아도 범주가 다르면 다른 오류입니다. 그런데 `ec == std::errc::no_such_file_or_directory`는 범주가 달라도 참이 될 수 있습니다.
+
+```cpp
+#include <cerrno>
+#include <print>
+#include <system_error>
+
+int main()
+{
+    const std::error_code from_posix(ENOENT, std::generic_category());
+    const std::error_code from_os(ENOENT, std::system_category());
+
+    // 코드끼리: 번호와 범주가 모두 같아야 같다
+    std::println("{}", from_posix == from_os);
+    // 조건과: "뜻이 같은가" 를 범주에게 묻는다
+    std::println("{} {}", from_posix == std::errc::no_such_file_or_directory,
+                 from_os == std::errc::no_such_file_or_directory);
+}
+```
+
+```text
+false
+true true
+```
+
+`std::errc::...`는 `error_code`가 아니라 <strong>`std::error_condition`</strong>으로 바뀝니다. 둘은 생김새가 같고 역할이 다릅니다.
+
+| 타입 | 뜻 | 쓰는 곳 |
+| --- | --- | --- |
+| `std::error_code` | 어느 체계의 몇 번. **무슨 일이 있었는가** | 함수가 돌려주고, 로그에 남긴다 |
+| `std::error_condition` | 플랫폼과 상관없는 뜻. **어떤 종류의 일인가** | `==`의 오른쪽에 두고 견준다 |
+
+`코드 == 조건`을 견줄 때 라이브러리는 코드의 범주에게 "네 몇 번은 이 조건에 해당하느냐"를 묻습니다. 범주마다 그 답을 가상 함수로 가지고 있습니다. 그래서 운영체제마다 번호가 달라도, 번호 여럿이 같은 뜻이어도 한 줄로 견줘집니다. 윈도우의 "파일이 없다"와 "경로가 없다"는 번호가 다르지만 MSVC의 구현은 둘 다 `no_such_file_or_directory`와 같다고 답합니다(윈도우 쪽은 이 책에서 돌려 보지 못했습니다).
+
+여기서 나오는 규칙입니다. **`ec.value() == ENOENT`처럼 번호만 꺼내 견주지 않습니다.** 범주를 확인하지 않은 번호는 뜻이 없습니다.
+
+## system_error: 예외에 싣기
+
+`std::system_error`는 `error_code` 하나를 품은 예외입니다. POSIX 함수를 감쌀 때 `errno`를 그대로 실어 올립니다.
+
+```cpp
+#include <cerrno>
+#include <fcntl.h>
+#include <print>
+#include <system_error>
+#include <unistd.h>
+
+int open_or_throw(const char* path)
+{
+    const int fd = ::open(path, O_RDONLY);
+    if (fd < 0)
+        throw std::system_error(errno, std::generic_category(), path);
+    return fd;
+}
+
+int main()
+{
+    try {
+        const int fd = open_or_throw("/no/such/file");
+        ::close(fd);
+    } catch (const std::system_error& e) {
+        std::println("{}", e.what());
+        const bool missing = e.code() == std::errc::no_such_file_or_directory;
+        std::println("{}:{} 없는 파일인가 {}", e.code().category().name(),
+                     e.code().value(), missing);
+    }
+}
+```
+
+```text
+/no/such/file: No such file or directory
+generic:2 없는 파일인가 true
+```
+
+`what()`은 셋째 인자로 준 글 뒤에 `message()`를 붙여 줍니다. `errno`는 **실패한 호출 바로 다음에** 읽습니다. 사이에 다른 함수(`printf`조차도)를 부르면 값이 바뀔 수 있습니다. 표준 라이브러리에서 [`fs::filesystem_error`](#/read/cpp-stl/fs-errors), `std::ios_base::failure`, 스레드 함수가 던지는 예외가 모두 `system_error`이거나 그 자식입니다.
+
+## 내 오류 번호를 같은 틀에
+
+내 라이브러리의 오류도 `error_code`에 담을 수 있습니다. 필요한 것은 넷입니다. 번호의 `enum`, 범주 클래스, `make_error_code` 함수, 그리고 "이 `enum`은 오류 번호다"라는 표시입니다.
+
+```cpp
+#include <expected>
+#include <print>
+#include <string>
+#include <system_error>
+#include <type_traits>
+
+enum class SensorErrc {
+    timeout = 1,        // 0 은 "오류 없음" 이라 쓰지 않는다
+    bad_checksum,
+    not_calibrated,
+};
+
+class SensorCategory : public std::error_category {
+public:
+    const char* name() const noexcept override { return "sensor"; }
+    std::string message(int value) const override
+    {
+        switch (static_cast<SensorErrc>(value)) {
+        case SensorErrc::timeout: return "응답이 없다";
+        case SensorErrc::bad_checksum: return "체크섬이 맞지 않는다";
+        case SensorErrc::not_calibrated: return "보정되지 않았다";
+        }
+        return "알 수 없는 센서 오류";
+    }
+    // 내 번호가 뜻하는 일반 조건을 알려 준다
+    std::error_condition default_error_condition(int value) const
+        noexcept override
+    {
+        if (static_cast<SensorErrc>(value) == SensorErrc::timeout)
+            return std::errc::timed_out;
+        return std::error_condition(value, *this);
+    }
+};
+
+const std::error_category& sensor_category()
+{
+    static const SensorCategory instance;   // 프로그램에 하나만 있어야 한다
+    return instance;
+}
+
+std::error_code make_error_code(SensorErrc e)
+{
+    return {static_cast<int>(e), sensor_category()};
+}
+
+template <>
+struct std::is_error_code_enum<SensorErrc> : std::true_type {};
+
+// 운영체제의 오류와 내 오류가 한 타입으로 올라온다
+std::expected<double, std::error_code> read_temperature(int address)
+{
+    if (address == 0x76)
+        return std::unexpected(SensorErrc::timeout);
+    if (address == 0x10)
+        return std::unexpected(SensorErrc::bad_checksum);
+    if (address == 0)
+        return std::unexpected(std::make_error_code(std::errc::invalid_argument));
+    return 21.5;
+}
+
+int main()
+{
+    for (const int address : {0x40, 0x76, 0x10, 0}) {
+        const auto result = read_temperature(address);
+        if (result) {
+            std::println("0x{:02x} {}", address, *result);
+            continue;
+        }
+        const std::error_code ec = result.error();
+        std::println("0x{:02x} {}:{} [{}] 시간 초과인가 {}", address,
+                     ec.category().name(), ec.value(), ec.message(),
+                     ec == std::errc::timed_out);
+    }
+}
+```
+
+```text
+0x40 21.5
+0x76 sensor:1 [응답이 없다] 시간 초과인가 true
+0x10 sensor:2 [체크섬이 맞지 않는다] 시간 초과인가 false
+0x00 generic:22 [Invalid argument] 시간 초과인가 false
+```
+
+`is_error_code_enum`을 특수화해 두면 `SensorErrc::timeout`이 `std::error_code`로 저절로 바뀝니다. `make_error_code`는 `enum`과 [같은 네임스페이스](#/read/cpp-syntax/ns-adl)에 둡니다. `default_error_condition`이 "내 `timeout`은 일반적인 시간 초과에 해당한다"고 답하므로, 부르는 쪽은 센서 라이브러리를 모르고도 `ec == std::errc::timed_out`으로 다시 시도할지 정할 수 있습니다.
+
+<Note kind="warn">
+범주 객체는 **주소로 견줍니다.** 그래서 프로그램에 하나만 있어야 하고, 위처럼 함수 안의 `static`으로 둡니다. 같은 범주를 공유 라이브러리 여러 개가 저마다 품게 되면 객체가 둘이 되어, 번호가 같아도 `==`가 거짓이 될 수 있습니다. 범주를 돌려주는 함수는 헤더에 인라인으로 두지 않고 한 라이브러리의 `.cpp`에 둡니다.
+</Note>
+
+## 언제 쓰나
+
+| 오류의 성격 | 맞는 것 |
+| --- | --- |
+| 운영체제의 오류를 그대로 올린다 (파일, 소켓, 장치) | `std::error_code` |
+| 여러 라이브러리의 오류를 한 타입으로 흘려보낸다 | `std::error_code`와 내 범주 |
+| 한 모듈 안의 오류 몇 가지 | 그냥 [`enum class`](#/read/cpp-stl/voc-expected). 범주를 만들 것까지 없다 |
+| 오류와 함께 자세한 정보(줄 번호, 받은 값)가 필요하다 | 작은 구조체나 [예외](#/read/cpp-stl/err-exceptions) |
+
+`error_code`가 담는 것은 번호 하나뿐입니다. "몇 번째 줄에서"나 "어떤 값이었는지"는 실을 수 없습니다. 틀이 무거운 만큼, 정말로 서로 다른 출처의 오류가 한 길로 흘러야 할 때만 씁니다.
+
+## 정리
+
+- `error_code`는 번호와 범주의 짝이다. 번호만 꺼내 견주지 않고 `ec == std::errc::...`로 뜻을 견준다. 그 판단은 범주가 한다
+- `system_error`는 `error_code`를 품은 예외다. `errno`는 실패한 호출 바로 다음에 읽어 싣는다
+- 내 오류는 `enum`, 범주 클래스, `make_error_code`, `is_error_code_enum` 넷으로 같은 틀에 넣는다. 범주 객체는 프로그램에 하나만 둔다

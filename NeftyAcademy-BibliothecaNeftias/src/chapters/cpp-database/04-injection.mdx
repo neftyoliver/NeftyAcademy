@@ -1,0 +1,140 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'SQL 주입과 매개변수 바인딩: 로그인 우회, UNION으로 빼내기, 문장 끼워 넣기, 허용 목록, LIKE';
+export const terms = [
+  'sqlite3_column_int', 'sqlite3_mprintf', 'PQescapeLiteral', 'mysql_real_escape_string',
+];
+
+**SQL 주입**(SQL injection)은 입력을 SQL 문자열에 이어 붙일 때, 입력이 데이터가 아니라 SQL의 일부로 해석되어 문장의 모양 자체가 바뀌는 보안 구멍입니다. 웹과 서버 프로그램에서 가장 오래되고 가장 흔한 구멍 가운데 하나이며, 로그인 우회, 데이터 유출, 데이터 삭제로 이어집니다. 원인은 하나이고 처방도 하나입니다. 값을 문자열로 이어 붙이지 말고 **묶는**(바인딩) 것입니다.
+
+## 이어 붙이면 생기는 일
+
+같은 입력을 이어 붙인 SQL과 묶은 SQL에 넣어 보았습니다.
+
+```cpp flags=-lsqlite3
+#include <sqlite3.h>
+#include <cstdio>
+#include <string>
+
+sqlite3* db;
+
+void print_rows(const std::string& sql) {      // sqlite3_exec: 여러 문장도 실행한다
+    char* err = nullptr;
+    sqlite3_exec(db, sql.c_str(), [](void*, int n, char** v, char**) {
+        std::printf("   ");
+        for (int i = 0; i < n; ++i) std::printf(" %s", v[i] ? v[i] : "NULL");
+        std::printf("\n");
+        return 0;
+    }, nullptr, &err);
+    if (err) { std::printf("    오류: %s\n", err); sqlite3_free(err); }
+}
+
+// 첫 칸의 정수. 값이 있으면 ?에 차례로 묶는다
+template <class... S> int scalar(const std::string& sql, const S&... values) {
+    sqlite3_stmt* st;
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) != SQLITE_OK)
+        return -1;
+    int i = 1;
+    (sqlite3_bind_text(st, i++, std::string(values).c_str(), -1,
+                       SQLITE_TRANSIENT), ...);
+    int v = sqlite3_step(st) == SQLITE_ROW ? sqlite3_column_int(st, 0) : 0;
+    sqlite3_finalize(st);
+    return v;
+}
+
+const char* order_column(const std::string& user) {   // 이름은 묶을 수 없다
+    for (const char* ok : {"name", "price"})
+        if (user == ok) return ok;
+    return nullptr;
+}
+
+int main() {
+    sqlite3_open(":memory:", &db);
+    print_rows("CREATE TABLE users (name TEXT, pw_hash TEXT);"
+               "INSERT INTO users VALUES ('admin', 'h$9f2c'), ('kim', 'h$41ab');"
+               "CREATE TABLE products (name TEXT, price INT);"
+               "INSERT INTO products VALUES ('볼트', 120), ('너트', 80),"
+               "                            ('100% 면장갑', 3000);"
+               "CREATE TABLE orders (id INT)");
+    const std::string name = "admin' --", pw = "아무거나";
+
+    std::string login = "SELECT count(*) FROM users WHERE name = '" + name +
+                        "' AND pw_hash = '" + pw + "'";
+    std::printf("[로그인: 이어 붙이기]\n    %s\n    맞는 사용자 %d명\n",
+                login.c_str(), scalar(login));
+    std::printf("[로그인: 묶기]\n    맞는 사용자 %d명\n",
+                scalar("SELECT count(*) FROM users WHERE name = ? AND pw_hash = ?",
+                       name, pw));
+
+    const std::string q = "' UNION SELECT name, pw_hash FROM users --";
+    std::printf("[검색: 이어 붙이기]\n");
+    print_rows("SELECT name, price FROM products WHERE name LIKE '%" + q + "%'");
+    const char* search =
+        "SELECT count(*) FROM products WHERE name LIKE '%' || ? || '%'";
+    std::printf("[검색: 묶기]\n    찾은 상품 %d개\n", scalar(search, q));
+
+    std::printf("[문장 끼워 넣기]\n");
+    const std::string x = "x'; DROP TABLE orders; --";   // 이름 칸에 넣은 값
+    print_rows("SELECT name FROM products WHERE name = '" + x + "'");
+    std::printf("    orders 테이블 %s\n",
+                scalar("SELECT count(*) FROM sqlite_schema WHERE name = 'orders'")
+                    ? "있음" : "사라짐");
+
+    std::printf("[정렬 열: 허용 목록]\n");
+    for (std::string col : {"price", "price; DROP TABLE users"}) {
+        const char* c = order_column(col);
+        std::printf("    \"%s\" -> %s\n", col.c_str(),
+                    c ? ("ORDER BY " + std::string(c)).c_str() : "거부");
+    }
+
+    std::printf("[LIKE의 %%와 _]\n"
+                "    '%%'로 찾기: 그냥 묶기 %d개, ESCAPE까지 %d개\n",
+                scalar(search, "%"),
+                scalar("SELECT count(*) FROM products "
+                       "WHERE name LIKE '%' || ? || '%' ESCAPE '\\'", "\\%"));
+    sqlite3_close(db);
+}
+```
+
+```text
+[로그인: 이어 붙이기]
+    SELECT count(*) FROM users WHERE name = 'admin' --' AND pw_hash = '아무거나'
+    맞는 사용자 1명
+[로그인: 묶기]
+    맞는 사용자 0명
+[검색: 이어 붙이기]
+    100% 면장갑 3000
+    admin h$9f2c
+    kim h$41ab
+    너트 80
+    볼트 120
+[검색: 묶기]
+    찾은 상품 0개
+[문장 끼워 넣기]
+    orders 테이블 사라짐
+[정렬 열: 허용 목록]
+    "price" -> ORDER BY price
+    "price; DROP TABLE users" -> 거부
+[LIKE의 %와 _]
+    '%'로 찾기: 그냥 묶기 3개, ESCAPE까지 1개
+```
+
+- **로그인 우회**: 이름 칸의 `admin' --`이 작은따옴표로 문자열을 닫고, `--`로 암호를 검사하는 나머지 부분을 주석으로 만들었습니다. 암호 없이 admin과 맞은 것입니다. 묶으면 이름이 정말 `admin' --`인 사용자를 찾을 뿐이라 0명이었습니다
+- **데이터 빼내기**: 검색어 속의 `UNION SELECT`가 상품 목록 뒤에 사용자 테이블을 이어 붙여, 암호 해시가 검색 결과로 나왔습니다
+- **문장 끼워 넣기**: `sqlite3_exec`는 세미콜론 뒤의 문장까지 실행하므로 이름 칸에 넣은 `DROP TABLE`이 orders 테이블을 지웠습니다. 준비된 문장은 첫 문장만 컴파일해 이것만은 막지만, 앞의 두 공격은 준비된 문장이어도 문자열을 이어 붙였다면 그대로 통합니다. 막는 것은 준비가 아니라 묶기입니다
+- **묶을 수 없는 것**: 테이블 이름, 열 이름, `ASC`나 `DESC` 같은 SQL의 문법은 자리 표시자로 묶을 수 없습니다. 사용자가 고르는 정렬 열은 프로그램이 가진 허용 목록에서 골라 넣고, 목록에 없으면 거부합니다
+- **LIKE의 %와 _**: 묶은 값도 `LIKE` 안에서는 `%`와 `_`가 여전히 와일드카드라서, '%'로 찾자 모든 상품이 나왔습니다. 글자 그대로 찾으려면 앞에 이스케이프 문자를 붙이고 `ESCAPE` 절로 알려 줍니다
+
+## 지킬 규칙
+
+값은 모두 묶습니다. 사용자의 입력만이 아니라 파일, 다른 서비스, 그리고 데이터베이스에서 읽은 값도 마찬가지입니다. 안전하게 저장된 이름이라도 나중에 다른 질의에 이어 붙이는 순간 터지는데, 이것을 **2차 주입**이라고 합니다. 묶을 수 없는 이름과 문법은 허용 목록에서만 고릅니다. `sqlite3_mprintf`의 `%q`, PostgreSQL의 `PQescapeLiteral`, MySQL의 `mysql_real_escape_string` 같은 이스케이프 함수도 있지만, 문자 집합이나 따옴표 설정과 얽혀 실수하기 쉬우므로 묶을 수 없는 드문 경우에만 씁니다.
+
+<Note>
+프로그램이 쓰는 데이터베이스 계정에는 필요한 권한만 줍니다. 앱 계정에 테이블을 지울 권한이 없다면, 어딘가에 주입 구멍이 남아 있어도 `DROP TABLE`은 실패합니다. ORM과 쿼리 빌더도 "날 SQL"을 쓰는 길을 열어 두므로([「ORM과 쿼리 빌더」](#/read/cpp-database/map-orm)) 그런 곳을 따로 찾아 검토하고, 값을 채운 SQL을 로그에 남길 때는 암호 같은 값이 섞이지 않게 합니다.
+</Note>
+
+## 정리
+
+- SQL 주입은 입력을 SQL 문자열에 이어 붙여 입력이 SQL로 해석되는 구멍이며, 로그인 우회, UNION을 이용한 유출, 문장 끼워 넣기로 이어진다
+- 막는 것은 준비가 아니라 묶기이며, 파일이나 데이터베이스에서 읽은 값까지 모든 값을 자리 표시자로 묶어 2차 주입도 막는다
+- 묶을 수 없는 이름과 문법은 허용 목록에서 고르고, LIKE의 와일드카드는 ESCAPE로 처리하며, 데이터베이스 계정은 최소 권한으로 둔다

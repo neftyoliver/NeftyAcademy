@@ -1,0 +1,303 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'C++ 라이브러리를 C 함수로 내놓는다. 핸들과 오류 번호, 예외가 경계를 넘을 때 생기는 일, C++ 껍데기';
+
+[「구현마다 다른 ABI」](#/read/cpp-stl/impl-abi)에서 C++의 타입은 컴파일러나 표준 라이브러리가 다르면 섞을 수 없고, 그래서 경계를 C로 긋는다고 했습니다. C의 ABI는 플랫폼마다 하나이고 오래도록 그대로입니다. C로 내놓은 라이브러리는 C, 파이썬, Rust, 다른 컴파일러의 C++이 모두 부를 수 있습니다. [`extern "C"`의 문법](#/read/cpp-syntax/from-c-mangling)은 봤으니, 여기서는 클래스 하나를 C 인터페이스로 내놓는 일을 처음부터 끝까지 합니다.
+
+## 헤더: C가 아는 것만
+
+```c nocheck
+/* thermo.h: C와 C++ 양쪽이 읽는다 */
+#ifndef THERMO_H
+#define THERMO_H
+
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct thermo thermo;       /* 속을 보여 주지 않는 핸들 */
+
+typedef enum {
+    THERMO_OK = 0,
+    THERMO_BAD_ARGUMENT = 1,
+    THERMO_NO_MEMORY = 2,
+    THERMO_FAILED = 3
+} thermo_status;
+
+thermo_status thermo_create(const char* name, thermo** out);
+void thermo_destroy(thermo* t);
+thermo_status thermo_add(thermo* t, double celsius);
+thermo_status thermo_average(const thermo* t, double* out);
+size_t thermo_name(const thermo* t, char* buffer, size_t size);
+const char* thermo_last_error(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
+```
+
+| 넘기려는 것 | 경계에서의 꼴 |
+| --- | --- |
+| 객체 | 속을 가린 구조체의 포인터. `_create`와 `_destroy`가 짝을 이룬다 |
+| 들어오는 문자열 | `const char*`, 또는 포인터와 길이 |
+| 나가는 문자열과 배열 | 부르는 쪽이 준 버퍼와 크기. 필요한 길이를 돌려준다 |
+| 실패 | 정수로 된 오류 번호. 자세한 글은 따로 묻는다 |
+| 콜백 | 함수 포인터와 `void* user` |
+| `std::string`, 참조, 템플릿, 오버로드, 예외 | 넘길 수 없다 |
+
+## 구현: 경계에서 모두 잡는다
+
+```cpp nocheck
+// thermo.cpp: 속은 C++이다
+#include "thermo.h"
+
+#include <algorithm>
+#include <cstring>
+#include <new>
+#include <numeric>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+struct thermo {                     // 헤더가 이름만 알려 준 그 타입
+    std::string name;
+    std::vector<double> samples;
+};
+
+namespace {
+
+thread_local std::string last_error;
+
+// 예외는 여기서 모두 잡아 오류 번호로 바꾼다
+template <typename F>
+thermo_status guarded(F body) noexcept
+{
+    try {
+        body();
+        return THERMO_OK;
+    } catch (const std::invalid_argument& e) {
+        last_error = e.what();
+        return THERMO_BAD_ARGUMENT;
+    } catch (const std::bad_alloc&) {
+        last_error = "out of memory";
+        return THERMO_NO_MEMORY;
+    } catch (...) {
+        last_error = "unknown error";
+        return THERMO_FAILED;
+    }
+}
+
+void require(bool ok, const char* what)
+{
+    if (!ok) throw std::invalid_argument(what);
+}
+
+}   // namespace
+
+extern "C" {
+
+thermo_status thermo_create(const char* name, thermo** out)
+{
+    return guarded([&] {
+        require(name != nullptr && out != nullptr, "thermo_create: null argument");
+        *out = new thermo{name, {}};
+    });
+}
+
+void thermo_destroy(thermo* t) { delete t; }
+
+thermo_status thermo_average(const thermo* t, double* out)
+{
+    return guarded([&] {
+        require(t != nullptr && out != nullptr, "thermo_average: null argument");
+        require(!t->samples.empty(), "thermo_average: no samples");
+        *out = std::accumulate(t->samples.begin(), t->samples.end(), 0.0)
+               / static_cast<double>(t->samples.size());
+    });
+}
+
+// snprintf처럼 필요한 길이를 돌려준다. 버퍼가 작으면 잘라서 넣는다
+size_t thermo_name(const thermo* t, char* buffer, size_t size)
+{
+    if (t == nullptr) return 0;
+    if (buffer != nullptr && size > 0) {
+        const size_t n = std::min(size - 1, t->name.size());
+        std::memcpy(buffer, t->name.data(), n);
+        buffer[n] = '\0';
+    }
+    return t->name.size();
+}
+
+// thermo_add와 thermo_last_error도 같은 꼴이다
+
+}   // extern "C"
+```
+
+C가 이름만 아는 `struct thermo`의 속은 `std::string`과 `std::vector`입니다. 밖으로 나가는 함수는 모두 `guarded`를 거칩니다. 안에서는 평소대로 예외를 던지고, 경계에서 오류 번호로 바꿉니다. 글은 스레드마다 하나씩 있는 `last_error`에 남깁니다.
+
+지킬 것이 하나 더 있습니다. **만든 쪽이 없앱니다.** `thermo_create`가 준 것은 `thermo_destroy`로만 돌려보냅니다. C 쪽에서 `free(room)`을 하면 소멸자가 불리지 않고, `new`와 `free`의 짝도 맞지 않습니다.
+
+## C에서 쓰기
+
+```c nocheck
+/* main.c: C 컴파일러로 컴파일한다 */
+#include "thermo.h"
+
+#include <stdio.h>
+
+int main(void)
+{
+    thermo* room = NULL;
+    if (thermo_create("거실", &room) != THERMO_OK) {
+        printf("만들지 못함: %s\n", thermo_last_error());
+        return 1;
+    }
+    thermo_add(room, 21.5);
+    thermo_add(room, 31.0);
+
+    double average = 0;
+    thermo_average(room, &average);
+    char name[32];
+    thermo_name(room, name, sizeof name);
+    printf("%s: 평균 %.2f도\n", name, average);
+
+    thermo* empty = NULL;
+    thermo_create("창고", &empty);
+    if (thermo_average(empty, &average) != THERMO_OK)
+        printf("오류: %s\n", thermo_last_error());
+
+    thermo_destroy(empty);
+    thermo_destroy(room);
+    return 0;
+}
+```
+
+```text nocheck
+$ g++ -std=c++23 -c thermo.cpp
+$ gcc -std=c11 -c main.c
+$ g++ thermo.o main.o -o app && ./app
+거실: 평균 26.25도
+오류: thermo_average: no samples
+```
+
+링크만은 `g++`로 합니다. C++ 표준 라이브러리를 함께 이어야 하기 때문입니다.
+
+## 예외가 경계를 넘으면
+
+`guarded`를 빼먹으면 어떻게 되는지 봅니다. C 라이브러리가 콜백을 부르는데, C++로 쓴 콜백이 예외를 던집니다.
+
+```c nocheck
+/* walk.c: C 라이브러리. 콜백을 부르기 전에 자원을 잡고, 부른 뒤에 놓는다 */
+#include <stdio.h>
+#include <stdlib.h>
+
+void walk(void (*visit)(int value, void* user), void* user)
+{
+    char* scratch = malloc(64);
+    puts("C: 자원을 잡았다");
+    for (int i = 1; i <= 3; ++i)
+        visit(i, user);
+    free(scratch);
+    puts("C: 자원을 놓았다");
+}
+```
+
+```cpp nocheck
+// main.cpp
+#include <print>
+#include <stdexcept>
+
+extern "C" void walk(void (*visit)(int value, void* user), void* user);
+
+extern "C" void on_value(int value, void*)
+{
+    std::println("C++: {}", value);
+    // C 함수를 거슬러 나간다
+    if (value == 2) throw std::runtime_error("2는 싫다");
+}
+
+int main()
+{
+    try {
+        walk(on_value, nullptr);
+    } catch (const std::exception& e) {
+        std::println("잡았다: {}", e.what());
+    }
+}
+```
+
+```text nocheck
+$ gcc -c walk.c && g++ -std=c++23 -c main.cpp && g++ main.o walk.o -o app && ./app
+C: 자원을 잡았다
+C++: 1
+C++: 2
+잡았다: 2는 싫다
+```
+
+예외는 `walk`를 그냥 지나갔습니다. "자원을 놓았다"가 찍히지 않았고, AddressSanitizer를 켜면 `64 byte(s) leaked in 1 allocation(s)`라고 알립니다. C에는 소멸자가 없으므로 지나가는 길에 치울 방법이 없습니다. 잠근 뮤텍스였다면 잠긴 채 남습니다.
+
+C 쪽을 스택 푸는 표 없이 컴파일하면 결과가 달라집니다.
+
+```text nocheck
+$ gcc -fno-asynchronous-unwind-tables -c walk.c && g++ main.o walk.o -o app && ./app
+terminate called after throwing an instance of 'std::runtime_error'
+  what():  2는 싫다
+Aborted
+```
+
+새거나 죽거나입니다. 어느 쪽이 될지는 C 코드를 누가 어떤 옵션으로 컴파일했느냐에 달렸고, [정해져 있지 않습니다](#/read/cpp-advanced/res-exception). 그래서 C로 내놓는 함수와 C에 넘기는 콜백은 **안에서 모두 잡습니다.**
+
+## 그 위의 C++ 껍데기
+
+C 인터페이스는 C++에서 쓰기에 번거롭습니다. 그 위에 얇은 클래스를 얹습니다.
+
+```cpp nocheck
+// thermo.hpp: C 인터페이스 위에 얹는 C++ 껍데기. 헤더뿐이라 쓰는 쪽에서 컴파일된다
+#include "thermo.h"
+
+#include <memory>
+#include <stdexcept>
+
+class Thermo {
+public:
+    explicit Thermo(const char* name)
+    {
+        thermo* raw = nullptr;
+        check(thermo_create(name, &raw));
+        handle_.reset(raw);
+    }
+    void add(double celsius) { check(thermo_add(handle_.get(), celsius)); }
+    double average() const
+    {
+        double value = 0;
+        check(thermo_average(handle_.get(), &value));
+        return value;
+    }
+
+private:
+    static void check(thermo_status status)
+    {
+        if (status != THERMO_OK) throw std::runtime_error(thermo_last_error());
+    }
+    struct Destroy {
+        void operator()(thermo* t) const { thermo_destroy(t); }
+    };
+    std::unique_ptr<thermo, Destroy> handle_;
+};
+```
+
+넓은 C++ 구현, 좁은 C 경계, 다시 넓은 C++ 껍데기라서 모래시계 꼴이라고 부릅니다. 껍데기는 헤더뿐이어서 **쓰는 쪽의 컴파일러로** 컴파일됩니다. 경계를 넘는 것은 포인터와 `double`뿐입니다. 라이브러리를 Clang과 libc++로 공유 라이브러리로 빌드하고, 쓰는 프로그램을 GCC와 libstdc++로 빌드해 봤습니다. 프로세스 하나에 표준 라이브러리 둘이 올라온 채로 잘 돌았습니다. 경계에 `std::string`이 하나라도 있었다면 [링크되지 않았을](#/read/cpp-stl/impl-abi) 조합입니다.
+
+<Note>
+핸들이 가리키는 구조체의 속은 헤더에 없으므로 멤버를 더해도 쓰는 쪽을 다시 컴파일할 필요가 없습니다. [pimpl](#/read/cpp-advanced/te-pimpl)과 같은 원리입니다. 공유 라이브러리에서 무엇을 내보일지는 [다음 페이지](#/read/cpp-advanced/iop-shared), 내놓은 뒤에 바꿔도 되는 것과 안 되는 것은 [「ABI 안정성」](#/read/cpp-advanced/iop-abi-stable)에서 봅니다.
+</Note>
+
+## 정리
+
+- 경계에는 C가 아는 것만 둔다. 객체는 속을 가린 핸들로, 실패는 오류 번호로, 나가는 문자열은 부르는 쪽의 버퍼로
+- 예외가 C 함수를 지나가면 치우는 코드를 건너뛰거나 프로그램이 끝난다. 내놓는 함수와 콜백 안에서 모두 잡는다
+- C 경계 위에 헤더뿐인 C++ 껍데기를 얹으면, 컴파일러와 표준 라이브러리가 달라도 함께 돈다

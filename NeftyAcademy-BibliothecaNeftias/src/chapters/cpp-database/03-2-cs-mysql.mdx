@@ -1,0 +1,122 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'MySQL과 MariaDB: 두 데이터베이스의 관계, Connector/C와 MYSQL_BIND, utf8mb4, 엄격 모드, 재연결 함정';
+export const terms = [
+  'MYSQL', 'MYSQL_BIND', 'MYSQL_OPT_RECONNECT', 'MYSQL_RES', 'MYSQL_ROW',
+  'MYSQL_SET_CHARSET_NAME', 'MYSQL_STMT', 'MYSQL_TYPE_STRING', 'mysql_character_set_name',
+  'mysql_close', 'mysql_errno', 'mysql_error', 'mysql_fetch_row', 'mysql_free_result',
+  'mysql_get_server_info', 'mysql_init', 'mysql_options', 'mysql_query', 'mysql_real_connect',
+  'mysql_stmt_bind_param', 'mysql_stmt_close', 'mysql_stmt_errno', 'mysql_stmt_error',
+  'mysql_stmt_execute', 'mysql_stmt_init', 'mysql_stmt_insert_id', 'mysql_stmt_prepare',
+  'mysql_store_result', 'mysql_warning_count',
+];
+
+**MySQL**은 웹 서비스에서 가장 널리 쓰여 온 오픈 소스 데이터베이스 가운데 하나이고, 지금은 오라클이 개발합니다. **MariaDB**는 MySQL을 처음 만든 개발자들이 2009년에 갈라져 나와 만든 데이터베이스입니다. 프로토콜과 SQL이 대부분 같아서 같은 클라이언트 라이브러리로 둘 다 붙을 수 있지만, 판이 올라갈수록 기능과 기본값이 조금씩 달라지고 있습니다. 둘 다 보통 InnoDB 저장 엔진(트랜잭션, 행 잠금, 다중 판 동시성 제어)을 쓰고, 기본 격리 수준은 REPEATABLE READ입니다([「트랜잭션과 격리 수준」](#/read/cpp-database/db-transactions)).
+
+## C와 C++ 클라이언트
+
+C 라이브러리로는 MySQL Connector/C(libmysqlclient)와 MariaDB Connector/C(libmariadb)가 있고, 둘 다 `mysql.h`의 같은 API를 냅니다. C++에서는 MySQL Connector/C++, MariaDB Connector/C++, 그리고 Boost 1.82부터 들어간 비동기 라이브러리 Boost.MySQL을 많이 씁니다. 아래는 기초가 되는 C API로 붙어, 준비된 문장으로 넣고 MySQL 계열의 함정 두 가지를 일부러 밟아 본 것입니다.
+
+```cpp pkg=libmariadb
+#include <mysql.h>
+#include <cstdio>
+#include <cstring>
+#include <string>
+
+MYSQL* db;
+
+void q(const char* sql) {                  // 결과를 기대하지 않는 문장
+    if (mysql_query(db, sql))
+        std::printf("  오류 %u\n   %s\n", mysql_errno(db), mysql_error(db));
+}
+
+// 준비된 문장으로 (sku, name)을 넣는다. MYSQL_BIND 배열로 값을 묶는다
+void insert(const char* sku, const char* name) {
+    MYSQL_STMT* st = mysql_stmt_init(db);
+    const char* sql = "INSERT INTO my_parts (sku, name) VALUES (?, ?)";
+    mysql_stmt_prepare(st, sql, std::strlen(sql));
+    MYSQL_BIND b[2] = {};
+    unsigned long len[2] = {std::strlen(sku), std::strlen(name)};
+    const char* val[2] = {sku, name};
+    for (int i = 0; i < 2; ++i) {
+        b[i].buffer_type = MYSQL_TYPE_STRING;
+        b[i].buffer = const_cast<char*>(val[i]);
+        b[i].length = &len[i];
+    }
+    mysql_stmt_bind_param(st, b);
+    if (mysql_stmt_execute(st))
+        std::printf("  %s: 오류 %u\n   %s\n", sku, mysql_stmt_errno(st),
+                    mysql_stmt_error(st));
+    else
+        std::printf("  %s: id %llu, 경고 %u\n", sku, mysql_stmt_insert_id(st),
+                    mysql_warning_count(db));
+    mysql_stmt_close(st);
+}
+
+int main() {
+    db = mysql_init(nullptr);
+    mysql_options(db, MYSQL_SET_CHARSET_NAME, "utf8mb4");  // 이모지까지 담는다
+    if (!mysql_real_connect(db, "127.0.0.1", "academy", "academy", "academy",
+                            3306, nullptr, 0)) {
+        std::printf("연결 실패: %s\n", mysql_error(db));
+        return 1;
+    }
+    std::printf("서버 %s, 연결 문자 집합 %s\n", mysql_get_server_info(db),
+                mysql_character_set_name(db));
+    q("DROP TABLE IF EXISTS my_parts, m3");
+    q("CREATE TABLE my_parts (id INT AUTO_INCREMENT PRIMARY KEY, "
+      "sku VARCHAR(5) NOT NULL UNIQUE, name VARCHAR(20) NOT NULL) ENGINE = InnoDB");
+    q("CREATE TABLE m3 (v VARCHAR(5) CHARACTER SET utf8mb3)");   // 옛 utf8
+
+    std::printf("[엄격 모드에서 넣기]\n");
+    insert("P-100", "볼트");
+    insert("P-200", "너트 🔩");
+    insert("P-3000", "와셔");                      // 다섯 글자를 넘는 sku
+    std::printf("[엄격 모드를 끄고 넣기]\n");
+    q("SET SESSION sql_mode = ''");
+    insert("P-3000", "와셔");
+    q("SET SESSION sql_mode = DEFAULT");
+    std::printf("[utf8mb3 열에 이모지]\n");
+    q("INSERT INTO m3 VALUES ('🔩')");
+
+    mysql_query(db, "SELECT id, sku, name FROM my_parts ORDER BY id");
+    MYSQL_RES* res = mysql_store_result(db);
+    std::printf("[남은 행]\n");
+    while (MYSQL_ROW row = mysql_fetch_row(res))
+        std::printf("  %s %s %s\n", row[0], row[1], row[2]);
+    mysql_free_result(res);
+    mysql_close(db);
+}
+```
+
+```text
+서버 10.11.14-MariaDB-0ubuntu0.24.04.1, 연결 문자 집합 utf8mb4
+[엄격 모드에서 넣기]
+  P-100: id 1, 경고 0
+  P-200: id 2, 경고 0
+  P-3000: 오류 1406
+   Data too long for column 'sku' at row 1
+[엄격 모드를 끄고 넣기]
+  P-3000: id 3, 경고 1
+[utf8mb3 열에 이모지]
+  오류 1366
+   Incorrect string value: '\xF0\x9F\x94\xA9' for column `academy`.`m3`.`v` at row 1
+[남은 행]
+  1 P-100 볼트
+  2 P-200 너트 🔩
+  3 P-300 와셔
+```
+
+- **MYSQL_BIND**: 자리 표시자는 `?`이고, 값마다 형식, 버퍼, 길이를 적은 `MYSQL_BIND`를 배열로 묶어 넘깁니다. 손이 많이 가서 C++ 라이브러리들이 이것을 감쌉니다. `AUTO_INCREMENT`로 만들어진 번호는 `mysql_stmt_insert_id`로 얻습니다
+- **utf8mb4**: MySQL의 옛 `utf8`은 한 글자를 3바이트까지만 담는 `utf8mb3`라서, 4바이트인 이모지나 일부 한자를 넣으면 오류(1366)가 납니다. 연결과 열 모두 `utf8mb4`를 씁니다. 같은 이모지가 `utf8mb4`인 name 열에는 잘 들어갔습니다
+- **엄격 모드**: 엄격한 `sql_mode`에서는 다섯 글자를 넘는 sku가 오류(1406)로 거절되었습니다. 엄격 모드를 끄자 같은 문장이 경고 하나만 남기고 성공해 `P-300`으로 잘려 들어갔습니다. 다른 부품의 sku와 겹칠 수도 있는 조용한 데이터 손상입니다. 엄격 모드를 유지하고, 경고 수(`mysql_warning_count`)도 확인합니다
+
+<Note>
+Connector/C에는 끊기면 저절로 다시 연결하는 옵션(`MYSQL_OPT_RECONNECT`)이 있지만, 다시 연결된 세션은 진행 중이던 트랜잭션, 임시 테이블, 세션 변수, 준비된 문장을 모두 잃습니다. 트랜잭션 도중에 끊겼다가 조용히 다시 붙으면 반쪽만 반영된 일이 남을 수 있습니다. MySQL은 8.0.34부터 이 기능을 더 쓰지 않도록 했습니다(deprecated). 재연결은 프로그램이 직접, 트랜잭션 단위로 다시 하도록 짭니다([「재연결과 타임아웃」](#/read/cpp-database/pool-reconnect)).
+</Note>
+
+## 정리
+
+- MySQL과 MariaDB는 같은 뿌리의 데이터베이스로 같은 C API(mysql.h)로 붙을 수 있으며, 기본 격리 수준은 REPEATABLE READ다
+- C API의 준비된 문장은 값마다 MYSQL_BIND를 채워 묶고, 문자는 연결과 열 모두 utf8mb4로 맞춰 4바이트 글자를 담는다
+- 엄격 모드가 아니면 잘못된 값이 경고만 남기고 잘려 들어가므로 엄격 모드를 유지하고, 자동 재연결 대신 트랜잭션 단위로 직접 다시 한다

@@ -1,0 +1,135 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'SQLite C API: 파일 하나인 데이터베이스, sqlite3_open_v2와 RAII, 결과 코드, sqlite3_exec의 쓰임새';
+export const terms = [
+  'SQLITE_OK', 'sqlite3', 'sqlite3_exec', 'sqlite3_free', 'sqlite3_stmt', 'SQLITE_CANTOPEN',
+  'SQLITE_CONSTRAINT', 'SQLITE_CONSTRAINT_PRIMARYKEY', 'SQLITE_CONSTRAINT_UNIQUE',
+  'SQLITE_OPEN_CREATE', 'SQLITE_OPEN_EXRESCODE', 'SQLITE_OPEN_READONLY', 'SQLITE_OPEN_READWRITE',
+  'SQLITE_READONLY', 'SQLITE_VERSION', 'sqlite3_changes64', 'sqlite3_close_v2', 'sqlite3_errmsg',
+  'sqlite3_errstr', 'sqlite3_extended_errcode', 'sqlite3_libversion', 'sqlite3_libversion_number',
+  'sqlite3_open_v2',
+];
+
+**SQLite**는 서버가 없는 데이터베이스입니다. 프로그램에 라이브러리로 들어가 데이터베이스 파일 하나를 직접 읽고 씁니다. 따로 띄울 프로세스도, 설정할 계정도 없어서 휴대폰 앱, 웹 브라우저, 데스크톱 프로그램, 장비의 설정과 기록 저장에 아주 널리 쓰이고, 소스는 퍼블릭 도메인입니다. C로 쓰였고 C API를 내놓으므로 C++에서는 이것을 그대로 부르거나 얇게 감싸 씁니다.
+
+## 연결과 결과 코드
+
+API의 중심에는 두 객체가 있습니다. 데이터베이스 연결인 `sqlite3`와, 컴파일한 SQL 문장인 `sqlite3_stmt`입니다(문장은 [「준비된 문장」](#/read/cpp-database/sqlite-prepared)에서 봅니다). 연결은 `sqlite3_open_v2`로 열고, 읽기만 할지(`SQLITE_OPEN_READONLY`), 없으면 만들지(`SQLITE_OPEN_CREATE`)를 플래그로 정합니다. 함수는 대부분 정수 **결과 코드**를 돌려주며, `SQLITE_OK`가 아니면 `sqlite3_errmsg`로 사람이 읽을 설명을 얻습니다. 결과 코드의 아래 8비트는 기본 코드(`SQLITE_CONSTRAINT` 등)이고, 확장 코드를 켜면 그 위에 자세한 이유(`SQLITE_CONSTRAINT_UNIQUE` 등)가 붙습니다.
+
+연결을 RAII로 감싸고, 실패를 예외로 바꾸어 여러 가지 실패를 일부러 일으켜 보았습니다.
+
+```cpp flags=-lsqlite3
+#include <sqlite3.h>
+#include <cstdio>
+#include <filesystem>
+#include <memory>
+#include <stdexcept>
+#include <string>
+
+struct DbError : std::runtime_error {
+    int code;                            // 확장 결과 코드
+    DbError(int c, const std::string& m) : std::runtime_error(m), code(c) {}
+};
+
+class Db {                               // 연결 하나를 RAII로 감싼다
+public:
+    explicit Db(const std::string& path,
+                int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE) {
+        sqlite3* raw = nullptr;
+        int rc = sqlite3_open_v2(path.c_str(), &raw, flags | SQLITE_OPEN_EXRESCODE,
+                                 nullptr);
+        db_.reset(raw);                  // 열기에 실패해도 핸들은 닫아야 한다
+        if (rc != SQLITE_OK)
+            throw DbError(rc, raw ? sqlite3_errmsg(raw) : "메모리 부족");
+    }
+    void exec(const std::string& sql) {
+        char* err = nullptr;
+        int rc = sqlite3_exec(db_.get(), sql.c_str(), nullptr, nullptr, &err);
+        if (rc != SQLITE_OK) {
+            std::string msg = err;
+            sqlite3_free(err);
+            throw DbError(sqlite3_extended_errcode(db_.get()), msg);
+        }
+    }
+    long long changes() const { return sqlite3_changes64(db_.get()); }
+
+private:
+    using Closer = decltype(&sqlite3_close_v2);
+    std::unique_ptr<sqlite3, Closer> db_{nullptr, sqlite3_close_v2};
+};
+
+template <class F> void attempt(const char* what, F f) {
+    try {
+        f();
+        std::printf("%s: 성공\n", what);
+    } catch (const DbError& e) {
+        int primary = e.code & 0xff;     // 아래 8비트가 기본 결과 코드
+        std::printf("%s: 코드 %d (기본 %d, %s)\n    %s\n", what, e.code, primary,
+                    sqlite3_errstr(primary), e.what());
+    }
+}
+
+int main() {
+    std::printf("머리 파일 %s, 라이브러리 %s\n", SQLITE_VERSION,
+                sqlite3_libversion());
+    auto tmp = std::filesystem::temp_directory_path();
+    auto path = (tmp / "academy-api.db").string();
+    std::filesystem::remove(path);
+
+    attempt("만들고 넣기", [&] {
+        Db db(path);
+        db.exec("CREATE TABLE users (email TEXT PRIMARY KEY, name TEXT);"
+                "INSERT INTO users VALUES ('kim@example.com', '김하늘')");
+    });
+    attempt("같은 이메일 넣기", [&] {
+        Db(path).exec("INSERT INTO users VALUES ('kim@example.com', '김바다')");
+    });
+    attempt("문법이 틀린 SQL", [&] { Db(path).exec("SELEC * FROM users"); });
+    attempt("없는 파일을 만들지 않고 열기", [&] {
+        Db("/tmp/없는-폴더/x.db", SQLITE_OPEN_READWRITE);
+    });
+    attempt("읽기 전용으로 열고 쓰기", [&] {
+        Db(path, SQLITE_OPEN_READONLY).exec("DELETE FROM users");
+    });
+    attempt("이름 바꾸기", [&] {
+        Db db(path);
+        db.exec("UPDATE users SET name = '김구름' WHERE email = 'kim@example.com'");
+        std::printf("  바뀐 행 %lld개\n", db.changes());
+    });
+    std::filesystem::remove(path);
+}
+```
+
+```text
+머리 파일 3.45.1, 라이브러리 3.45.1
+만들고 넣기: 성공
+같은 이메일 넣기: 코드 1555 (기본 19, constraint failed)
+    UNIQUE constraint failed: users.email
+문법이 틀린 SQL: 코드 1 (기본 1, SQL logic error)
+    near "SELEC": syntax error
+없는 파일을 만들지 않고 열기: 코드 14 (기본 14, unable to open database file)
+    unable to open database file
+읽기 전용으로 열고 쓰기: 코드 8 (기본 8, attempt to write a readonly database)
+    attempt to write a readonly database
+  바뀐 행 1개
+이름 바꾸기: 성공
+```
+
+- **실패해도 닫는다**: `sqlite3_open_v2`는 실패해도 핸들을 돌려줄 수 있어서, 생성자는 결과를 확인하기 전에 핸들을 `unique_ptr`에 넣습니다. 그래서 예외를 던져도 연결이 닫힙니다. `sqlite3_close_v2`는 아직 정리하지 않은 문장이 있으면 그것이 끝날 때까지 닫기를 미룹니다
+- **확장 코드**: 같은 이메일은 1555(`SQLITE_CONSTRAINT_PRIMARYKEY`)였습니다. 이메일이 기본 키라서이고, `UNIQUE` 열이었다면 2067이 나옵니다. 아래 8비트인 19가 `SQLITE_CONSTRAINT`이므로, 보통은 기본 코드로 갈래를 나누고 필요할 때만 확장 코드를 봅니다
+- **연결은 파일 하나**: 만들기 플래그 없이 없는 파일을 열면 `SQLITE_CANTOPEN`이, 읽기 전용으로 연 연결로 쓰면 `SQLITE_READONLY`가 나왔습니다. 파일과 폴더의 권한도 같은 코드로 드러납니다
+- **바뀐 행 수**: `sqlite3_changes64`는 마지막 `INSERT`, `UPDATE`, `DELETE`가 바꾼 행 수입니다
+
+## sqlite3_exec의 쓰임새
+
+`sqlite3_exec`는 세미콜론으로 이은 여러 문장을 한 번에 실행하고, 결과가 있으면 행마다 콜백에 문자열로 넘깁니다. 스키마를 만드는 스크립트나 `PRAGMA` 같은 고정된 SQL에는 편하지만, 부를 때마다 SQL을 다시 해석하고, 값이 모두 문자열로 오고, 무엇보다 사용자 입력을 넣으면 안 됩니다([「SQL 주입과 매개변수 바인딩」](#/read/cpp-database/injection)). 값이 들어가는 문장은 준비된 문장과 바인딩으로 실행합니다.
+
+<Note>
+머리 파일의 `SQLITE_VERSION`과 실제로 불러온 라이브러리의 `sqlite3_libversion()`은 다를 수 있습니다. 시스템의 SQLite를 동적으로 링크하면 프로그램은 설치된 기계의 판을 쓰게 되므로, `RETURNING`(3.35)이나 `STRICT` 테이블(3.37)처럼 새 기능에 기대는 프로그램은 실행할 때 `sqlite3_libversion_number()`로 확인합니다. 판을 고정하고 싶으면 소스 파일 하나로 된 SQLite(amalgamation)를 프로그램에 함께 빌드하는 방법이 흔합니다.
+</Note>
+
+## 정리
+
+- SQLite는 프로그램에 들어가 파일 하나를 직접 읽고 쓰는 데이터베이스이며, C API의 중심은 연결(sqlite3)과 문장(sqlite3_stmt)이다
+- 연결은 sqlite3_open_v2로 열고 실패해도 닫아야 하므로 RAII로 감싸며, 결과 코드는 아래 8비트의 기본 코드와 자세한 확장 코드로 나뉜다
+- sqlite3_exec는 고정된 스크립트에만 쓰고, 값이 들어가는 문장은 준비된 문장과 바인딩으로 실행한다

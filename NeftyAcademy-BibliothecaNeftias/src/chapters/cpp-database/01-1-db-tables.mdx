@@ -1,0 +1,133 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '테이블과 키: 행과 열, 기본 키와 외래 키, 제약으로 데이터를 지키기, SQLite의 외래 키 함정, 정규화';
+
+프로그램의 데이터를 파일에 직접 쓰다 보면 곧 같은 문제를 만납니다. 두 프로그램이 동시에 고치면 어떻게 하나, 반쯤 쓰다 꺼지면 어떻게 하나, 잘못된 값이 들어오는 것은 누가 막나. **관계형 데이터베이스**는 데이터를 표로 담고, 표 사이의 관계와 규칙, 동시에 고치기와 고장 회복을 데이터베이스가 맡게 합니다. 이 책은 C++ 프로그램이 SQLite부터 PostgreSQL, MySQL과 MariaDB 같은 서버형 데이터베이스까지 안전하게 붙는 법을 다룹니다. 첫 장은 그 바탕이 되는 생각입니다.
+
+## 테이블, 행, 열
+
+**테이블**은 같은 모양의 **행**을 모은 것이고, 모든 행은 같은 **열**을 가집니다. 손님 테이블이라면 행 하나가 손님 한 명이고, 열은 번호, 이메일, 이름입니다. 열마다 타입과 규칙(제약)이 있고, 테이블들의 모양을 적은 것을 **스키마**라고 합니다. 데이터는 스키마가 허락하는 모양으로만 들어갑니다.
+
+## 키
+
+- **기본 키**(primary key): 행을 하나로 가리키는 열입니다. 같은 값이 두 번 나올 수 없고 비어 있을 수 없습니다. 보통 의미 없는 정수 번호(대리 키)를 씁니다
+- **외래 키**(foreign key): 다른 테이블의 기본 키를 가리키는 열입니다. 주문의 손님 번호는 실제로 있는 손님이어야 합니다
+- **그 밖의 제약**: `UNIQUE`(겹치지 않음), `NOT NULL`(비어 있지 않음), `CHECK`(조건을 만족함)
+
+아래는 작은 쇼핑몰의 스키마에 일부러 잘못된 데이터를 넣어 본 것입니다. SQL을 실행하는 함수는 SQLite의 C API로 짰는데, 자세한 내용은 [「C API」](#/read/cpp-database/sqlite-api)에서 봅니다.
+
+```cpp flags=-lsqlite3
+#include <sqlite3.h>
+#include <cstdio>
+
+// SQL을 실행하고 결과를 표처럼 찍는다 (C API는 2장에서 자세히 본다)
+void run(sqlite3* db, const char* sql) {
+    bool header = true;
+    auto row = [](void* h, int n, char** val, char** col) {
+        bool& first = *static_cast<bool*>(h);
+        for (int pass = first ? 0 : 1; pass < 2; ++pass) {
+            for (int i = 0; i < n; ++i)
+                std::printf("%s%s", i ? " | " : "  ",
+                            pass == 0 ? col[i] : val[i] ? val[i] : "NULL");
+            std::printf("\n");
+        }
+        first = false;
+        return 0;
+    };
+    char* err = nullptr;
+    if (sqlite3_exec(db, sql, row, &header, &err) != SQLITE_OK) {
+        std::printf("  거부: %s\n", err);
+        sqlite3_free(err);
+    }
+}
+
+int main() {
+    sqlite3* db;
+    sqlite3_open(":memory:", &db);
+    run(db, "PRAGMA foreign_keys = ON");          // SQLite는 기본이 꺼짐
+    run(db, R"(
+        CREATE TABLE customers (
+            id    INTEGER PRIMARY KEY,
+            email TEXT NOT NULL UNIQUE,
+            name  TEXT NOT NULL
+        );
+        CREATE TABLE products (
+            id          INTEGER PRIMARY KEY,
+            sku         TEXT NOT NULL UNIQUE,
+            name        TEXT NOT NULL,
+            price_cents INTEGER NOT NULL CHECK (price_cents >= 0)
+        );
+        CREATE TABLE orders (
+            id          INTEGER PRIMARY KEY,
+            customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE RESTRICT
+        );
+        CREATE TABLE order_items (
+            order_id   INTEGER REFERENCES orders(id) ON DELETE CASCADE,
+            product_id INTEGER REFERENCES products(id),
+            qty        INTEGER NOT NULL CHECK (qty > 0),
+            PRIMARY KEY (order_id, product_id)
+        );
+        INSERT INTO customers VALUES (1, 'kim@example.com', '김하늘');
+        INSERT INTO products VALUES (1, 'P-100', '볼트', 120),
+                                    (2, 'P-200', '너트', 80);
+        INSERT INTO orders VALUES (10, 1);
+        INSERT INTO order_items VALUES (10, 1, 50), (10, 2, 50);
+    )");
+
+    std::printf("[같은 이메일]\n");
+    run(db, "INSERT INTO customers VALUES (2, 'kim@example.com', '김바다')");
+    std::printf("[음수 가격]\n");
+    run(db, "INSERT INTO products VALUES (3, 'P-300', '와셔', -5)");
+    std::printf("[없는 손님의 주문]\n");
+    run(db, "INSERT INTO orders VALUES (11, 99)");
+    std::printf("[같은 상품을 한 주문에 두 줄로]\n");
+    run(db, "INSERT INTO order_items VALUES (10, 1, 5)");
+    std::printf("[주문이 있는 손님 지우기]\n");
+    run(db, "DELETE FROM customers WHERE id = 1");
+    std::printf("[주문 지우기: 주문 줄도 함께 지워짐]\n");
+    run(db, "DELETE FROM orders WHERE id = 10");
+    run(db, "SELECT count(*) AS 남은_주문_줄 FROM order_items");
+    std::printf("[검사를 끄면 고아 주문이 들어간다]\n");
+    run(db, "PRAGMA foreign_keys = OFF; INSERT INTO orders VALUES (12, 99)");
+    run(db, "PRAGMA foreign_key_check");
+    sqlite3_close(db);
+}
+```
+
+```text
+[같은 이메일]
+  거부: UNIQUE constraint failed: customers.email
+[음수 가격]
+  거부: CHECK constraint failed: price_cents >= 0
+[없는 손님의 주문]
+  거부: FOREIGN KEY constraint failed
+[같은 상품을 한 주문에 두 줄로]
+  거부: UNIQUE constraint failed: order_items.order_id, order_items.product_id
+[주문이 있는 손님 지우기]
+  거부: FOREIGN KEY constraint failed
+[주문 지우기: 주문 줄도 함께 지워짐]
+  남은_주문_줄
+  0
+[검사를 끄면 고아 주문이 들어간다]
+  table | rowid | parent | fkid
+  orders | 12 | customers | 0
+```
+
+- **데이터베이스가 지킨다**: 같은 이메일, 음수 가격, 없는 손님의 주문이 모두 거부되었습니다. 프로그램의 모든 경로에서 따로 검사하는 대신 스키마 한곳에 규칙을 두면, 다른 프로그램이나 사람이 SQL로 직접 넣어도 지켜집니다
+- **두 열로 된 기본 키**: 주문 줄은 (주문, 상품) 쌍이 기본 키라 같은 상품을 한 주문에 두 줄로 넣지 못합니다. 주문과 상품처럼 여럿과 여럿이 이어지는 관계는 이런 연결 테이블로 나타냅니다
+- **지울 때의 규칙**: 주문이 남은 손님은 지워지지 않았고(`RESTRICT`), 주문을 지우자 주문 줄이 함께 지워졌습니다(`CASCADE`)
+- **SQLite의 함정**: SQLite는 옛 프로그램과 맞추느라 외래 키 검사가 꺼진 채로 연결이 열립니다. 검사를 끄자 없는 손님의 주문이 그대로 들어갔습니다. 연결을 열 때마다 `PRAGMA foreign_keys = ON`을 실행하고, 이미 들어간 위반은 `PRAGMA foreign_key_check`로 찾습니다
+
+## 나누어 담기
+
+주문 테이블에 손님 이름을 같이 적어 두면 편해 보이지만, 손님이 이름을 바꾸면 그 손님의 모든 주문을 고쳐야 하고 하나라도 빠뜨리면 데이터가 서로 어긋납니다. 그래서 한 가지 사실은 한 곳에만 적고, 필요할 때 키로 이어 붙입니다([「SQL 기본」](#/read/cpp-database/db-sql)의 JOIN). 한 칸에 `"1,2,3"`처럼 목록을 넣지 않고 주문 줄 테이블로 나누는 것도 같은 이유입니다. 이렇게 테이블을 나누는 규칙을 **정규화**라고 부르며, 제1정규형부터 차례로 정해져 있습니다. 성능 때문에 일부러 겹쳐 적는 것은 그 비용을 알고 나서 고르는 일입니다.
+
+<Note>
+이메일처럼 실제 의미가 있는 값(자연 키)을 기본 키로 쓰면, 그 값이 바뀔 때 그것을 가리키는 모든 외래 키를 고쳐야 합니다. 그래서 기본 키는 바뀌지 않는 정수 번호로 두고, 이메일에는 `UNIQUE`만 겁니다. 가격을 정수 센트(원)로 담은 이유는 [「시간과 소수」](#/read/cpp-database/map-time)에서 봅니다.
+</Note>
+
+## 정리
+
+- 관계형 데이터베이스는 데이터를 같은 열을 가진 행들의 테이블로 담고, 기본 키로 행을 가리키며 외래 키로 테이블을 잇는다
+- `UNIQUE`, `NOT NULL`, `CHECK`, 외래 키 같은 제약을 스키마에 두면 어느 경로로 들어오는 데이터든 데이터베이스가 지키며, SQLite는 연결마다 외래 키 검사를 켜야 한다
+- 한 가지 사실은 한 곳에만 적고 목록은 별도 테이블로 나누는 정규화로 데이터가 서로 어긋나는 것을 막는다

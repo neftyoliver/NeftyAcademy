@@ -1,0 +1,195 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '재려는 것이 사라지지 않게 하는 법, 벤치마크 틀, 프로파일러로 느린 곳 찾기, 숫자를 믿는 조건';
+export const terms = ['DoNotOptimize', 'benchmark::DoNotOptimize', 'benchmark::State'];
+
+이 책의 숫자들은 거의 다 `steady_clock`으로 [루프 전체를 재서 횟수로 나눈](#/read/cpp-stl/chr-clocks) 것입니다. 그렇게 재는 데에도 함정이 있습니다. 이 챕터는 빠르게 만드는 법을 다루기 전에 **재는 법**부터 봅니다. 잘못 잰 숫자는 없는 숫자보다 나쁩니다.
+
+## 재려는 것이 사라진다
+
+0부터 999까지의 제곱을 더하는 함수를 네 가지 방법으로 잽니다.
+
+```cpp
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
+#include <print>
+
+std::uint64_t sum_squares(std::uint64_t n)
+{
+    std::uint64_t sum = 0;
+    for (std::uint64_t i = 0; i < n; ++i)
+        sum += i * i;
+    return sum;
+}
+
+using Clock = std::chrono::steady_clock;
+double ns_since(Clock::time_point start)
+{
+    return std::chrono::duration<double, std::nano>(Clock::now() - start).count();
+}
+
+// 컴파일러가 이 값을 "어딘가에서 쓴다"고 믿게 한다
+template <typename T>
+[[gnu::always_inline]] inline void keep(const T& value)
+{
+    asm volatile("" : : "r"(value));
+}
+// 컴파일러가 이 값을 "모른다"고 믿게 한다
+template <typename T>
+[[gnu::always_inline]] inline void hide(T& value)
+{
+    asm volatile("" : "+r"(value));
+}
+
+int main()
+{
+    const int rounds = 1'000'000;
+
+    auto start = Clock::now();
+    for (int r = 0; r < rounds; ++r)
+        sum_squares(1000);
+    std::println("1. 결과를 버림        {:8.2f} ns", ns_since(start) / rounds);
+
+    start = Clock::now();
+    std::uint64_t total = 0;
+    for (int r = 0; r < rounds; ++r)
+        total += sum_squares(1000);
+    std::println("2. 입력이 상수        {:8.2f} ns ({})", ns_since(start) / rounds,
+                 total);
+
+    start = Clock::now();
+    for (int r = 0; r < rounds; ++r) {
+        std::uint64_t n = 1000;
+        hide(n);
+        keep(sum_squares(n));
+    }
+    std::println("3. 숨기고 붙듦        {:8.2f} ns", ns_since(start) / rounds);
+
+    double sum = 0, worst = 0;
+    for (int r = 0; r < 100'000; ++r) {
+        std::uint64_t n = 1000;
+        hide(n);
+        const auto one = Clock::now();
+        keep(sum_squares(n));
+        const double took = ns_since(one);
+        sum += took;
+        worst = std::max(worst, took);
+    }
+    std::println("4. 한 번씩 따로 잼    {:8.2f} ns, 가장 긴 것 {:.0f} ns",
+                 sum / 100'000, worst);
+}
+```
+
+```text nocheck
+1. 결과를 버림            0.00 ns
+2. 입력이 상수            0.00 ns (332833500000000)
+3. 숨기고 붙듦          356.47 ns
+4. 한 번씩 따로 잼      442.92 ns, 가장 긴 것 162128 ns
+```
+
+GCC 14 `-O2`의 결과입니다.
+
+| 방법 | 일어난 일 |
+| --- | --- |
+| 1. 결과를 버린다 | 쓰이지 않는 계산이라 컴파일러가 **호출을 통째로 지웠다** |
+| 2. 입력이 상수다 | 답을 컴파일할 때 계산해 두었다. 루프는 상수를 더할 뿐이다 |
+| 3. 입력을 숨기고 결과를 붙든다 | 함수가 실제로 돈다. 이것이 잰 값이다 |
+| 4. 한 번씩 따로 잰다 | `now()` 두 번의 값이 더해졌다. 그리고 한 번은 162 µs가 걸렸다. 운영체제가 다른 일을 한 것이다 |
+
+`keep`과 `hide`는 이 책의 예제에서 써 온 장치입니다. 아무 명령도 내지 않는 인라인 어셈블리인데, 컴파일러는 그 안에서 값이 읽히거나 바뀐다고 가정합니다. 벤치마크 틀의 `DoNotOptimize`가 같은 것입니다.
+
+같은 프로그램을 Clang 20으로 컴파일하면 3번이 **2.0 ns**입니다. 천 번 도는 루프가 2 ns일 수는 없습니다. Clang이 "제곱의 합"을 알아보고 루프를 공식 하나로 바꾼 것입니다. 틀린 측정이 아니라, 그 컴파일러에서는 이 함수가 정말 2 ns입니다. **무엇을 재고 있는지**는 숫자가 아니라 기계어를 봐야 알 때가 있습니다.
+
+| 함정 | 대비 |
+| --- | --- |
+| 계산이 지워지거나 미리 계산된다 | 입력을 숨기고 결과를 붙든다. 이상하게 빠르면 기계어를 본다 |
+| 시계를 읽는 값(20 ns)이 섞인다 | 여러 번 돌려 전체를 재고 나눈다 |
+| 운영체제와 다른 프로그램의 끼어들기 | 여러 번 재서 **가장 짧은 것**이나 가운뎃값을 쓴다. 평균은 튀는 값에 끌려간다 |
+| 처음 몇 바퀴가 느리다 | 캐시와 분기 예측이 데워진 뒤부터 잰다 |
+| `-O0`이나 새니타이저를 켠 빌드로 잰다 | 릴리스 빌드와 같은 옵션으로 잰다. 이 예제의 `-O0`은 1,900 ns였다 |
+| 데이터가 작아 캐시에 다 들어간다 | 실제 크기로도 잰다. [배치](#/read/cpp-advanced/mm-layout)의 차이는 큰 데이터에서만 보였다 |
+
+## 벤치마크 틀
+
+되풀이 횟수를 정하고, 데우고, 통계를 내는 일은 틀에 맡길 수 있습니다. Google Benchmark로 쓴 것입니다.
+
+```cpp norun pkg=benchmark
+#include <benchmark/benchmark.h>
+#include <string>
+
+static void BM_append_plus(benchmark::State& state)
+{
+    for (auto _ : state) {
+        std::string s;
+        for (int i = 0; i < 100; ++i)
+            s = s + "x";
+        benchmark::DoNotOptimize(s);
+    }
+}
+BENCHMARK(BM_append_plus);
+
+static void BM_append_inplace(benchmark::State& state)
+{
+    for (auto _ : state) {
+        std::string s;
+        for (int i = 0; i < 100; ++i)
+            s += "x";
+        benchmark::DoNotOptimize(s);
+    }
+}
+BENCHMARK(BM_append_inplace);
+
+BENCHMARK_MAIN();
+```
+
+```text nocheck
+Benchmark                  Time             CPU   Iterations
+BM_append_plus          1406 ns         1392 ns       503418
+BM_append_inplace        140 ns          139 ns      5515115
+```
+
+`for (auto _ : state)`의 안쪽만 재고, 몇 번 돌릴지는 틀이 정합니다. `s = s + "x"`는 바퀴마다 문자열을 새로 만들어 열 배가 듭니다. 벤치마크를 저장소에 함께 두고 고칠 때마다 돌리면, 느려진 것을 그 자리에서 압니다.
+
+## 프로파일러: 어디가 느린가
+
+벤치마크는 "얼마나"를, 프로파일러는 "어디가"를 알려 줍니다. 낱말 200만 개를 소문자로 바꿔 `std::map`으로 세는 프로그램에 써 봤습니다.
+
+```cpp nocheck
+std::string lowered(const std::string& word);   // 소문자로 바꾼 사본
+std::map<std::string, int> count_words(const std::vector<std::string>& words)
+{
+    std::map<std::string, int> counts;
+    for (const std::string& word : words)
+        ++counts[lowered(word)];
+    return counts;
+}
+```
+
+```text nocheck
+$ valgrind --tool=callgrind ./prof && callgrind_annotate callgrind.out.*
+1,881,355,214 (100.0%)  PROGRAM TOTALS
+  426,309,138 (22.66%)  __memcmp_avx2_movbe [libc.so.6]
+  142,428,061 ( 7.57%)  char_traits.h:count_words(...)
+  135,853,410 ( 7.22%)  ctype.c:tolower [libc.so.6]
+  118,101,860 ( 6.28%)  prof.cpp:lowered(...)
+```
+
+가장 큰 것은 `lowered`가 아니라 <strong>`memcmp`</strong>입니다. `map`이 낱말을 찾으며 문자열을 비교하는 값입니다. 소문자 변환을 다듬기 전에 자료구조를 [해시 표](#/read/cpp-stl/assoc-unordered)로 바꾸는 쪽이 먼저라는 것을, 짐작이 아니라 숫자로 알게 됩니다.
+
+| 도구 | 재는 법 | 이 프로그램에서 |
+| --- | --- | --- |
+| `gprof` (`-pg`로 빌드) | 10 ms마다 어디를 돌고 있는지 본다 | 0.14초짜리라 표본이 14개뿐이다. `count_words` 43%, `make_words` 36%까지만 보였다 |
+| Valgrind의 callgrind | 실행한 명령을 하나하나 센다. 돌릴 때마다 같은 숫자가 나온다 | 위의 출력. 0.28초가 9.3초로 **34배** 느려진다 |
+| Valgrind의 cachegrind | 캐시와 분기 예측을 흉내 내어 빗나간 횟수를 센다 | [다음 페이지들](#/read/cpp-advanced/perf-cache)에서 쓴다 |
+| `perf` | CPU의 계수기로 표본을 뜬다. 느려지지 않는다 | 이 책의 환경에는 없어서 돌려 보지 못했다 |
+
+<Note kind="warn">
+callgrind가 세는 것은 명령의 **수**이지 시간이 아닙니다. 캐시를 놓쳐 100배 느린 명령도 하나로 셉니다. 어디가 많이 도는지는 정확하지만, 메모리 때문에 느린 곳은 작게 보입니다. 시간은 벤치마크로 다시 확인합니다.
+</Note>
+
+## 정리
+
+- 결과를 버리거나 입력이 상수면 재려는 계산이 사라진다. 입력을 숨기고 결과를 붙든다. 이상한 숫자는 기계어로 확인한다
+- 여러 번 돌려 전체를 재고, 되풀이한 것 가운데 짧은 쪽을 본다. 릴리스 옵션과 실제 크기의 데이터로 잰다
+- 고치기 전에 프로파일러로 어디가 느린지부터 본다. 예제에서 가장 큰 것은 짐작과 달리 문자열 비교였다

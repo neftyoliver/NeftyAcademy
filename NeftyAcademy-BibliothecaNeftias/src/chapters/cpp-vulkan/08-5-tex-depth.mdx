@@ -1,0 +1,158 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '깊이 버퍼: 깊이 시험과 비교 방법, 깊이 값이 몰리는 곳, 뒤집은 깊이, 깊이 포맷 고르기, 이른 깊이 시험';
+export const terms = [
+  'VkClearAttachment', 'VkClearRect', 'VkCompareOp', 'vkCmdClearAttachments',
+  'vkCmdSetDepthCompareOp', 'gl_FragDepth',
+];
+
+**깊이 버퍼**는 픽셀마다 지금까지 그려진 것 가운데 가장 가까운 깊이를 적어 두는 첨부물입니다. 새 프래그먼트의 깊이를 적힌 값과 비교해 더 가까울 때만 그리므로(깊이 시험), 물체를 어떤 순서로 그려도 가려지는 관계가 맞습니다. 벌칸의 깊이는 0에서 1 사이이고, 보통은 가까운 면을 0, 먼 면을 1에 두고 `LESS`로 비교합니다. 아래 프로그램은 일부가 겹치는 사각형 둘(N이 가깝고 F가 멂)을 네 가지 설정으로 그립니다. 가운데 겹친 3분의 1에 N이 보여야 맞는 그림입니다.
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp,vkx_cmd.hpp,vkx_resource.hpp,vkx_bind.hpp,vkx_pipeline.hpp,vkx_draw.hpp
+#include <bit>
+#include "vkx_bind.hpp"
+#include "vkx_cmd.hpp"
+#include "vkx_draw.hpp"
+#include "vkx_pipeline.hpp"
+
+// 시점에서 dist만큼 떨어진, 화면과 나란한 사각형. 투영 행렬의 셋째·넷째 행을
+// 손으로 적용한다: z = a * dist + b, w = dist (나누면 깊이가 된다)
+const char* VS = R"(#version 450
+layout(push_constant) uniform Push {
+    float x0; float x1; float dist; float mark; float a; float b;
+} pc;
+const vec2 corner[6] = vec2[](vec2(0, 0), vec2(1, 0), vec2(0, 1),
+                              vec2(0, 1), vec2(1, 0), vec2(1, 1));
+void main() {
+    vec2 c = corner[gl_VertexIndex];
+    vec2 ndc = vec2(mix(pc.x0, pc.x1, c.x), c.y * 2.0 - 1.0);
+    gl_Position = vec4(ndc * pc.dist, pc.a * pc.dist + pc.b, pc.dist);
+})";
+
+const char* FS = R"(#version 450
+layout(push_constant) uniform Push {
+    float x0; float x1; float dist; float mark; float a; float b;
+} pc;
+layout(location = 0) out float value;
+void main() { value = pc.mark; })";
+
+struct Push { float x0, x1, dist, mark, a, b; };
+
+int main() {
+    vkx::Instance inst = vkx::make_instance();
+    vkx::Device dev = vkx::make_device(inst.handle);
+    vkx::Commands cmds = vkx::make_commands(dev);
+
+    const float N = 0.1f, F = 10000.0f;      // 가까운 면과 먼 면까지의 거리
+    // 보통 깊이: 가까운 면이 0, 먼 면이 1. 뒤집은 깊이: 가까운 면이 1, 먼 면이 0
+    const float STD_A = F / (F - N), STD_B = -F * N / (F - N);
+    const float REV_A = -N / (F - N), REV_B = F * N / (F - N);
+    auto steps = [](float a, float b) {      // 두 값 사이에 float이 몇 칸 있는지
+        return std::abs(std::bit_cast<int32_t>(a) - std::bit_cast<int32_t>(b));
+    };
+    auto z = [](float a, float b, float d) { return (a * d + b) / d; };
+    const float s0 = z(STD_A, STD_B, 2000), s1 = z(STD_A, STD_B, 2001);
+    const float r0 = z(REV_A, REV_B, 2000), r1 = z(REV_A, REV_B, 2001);
+    std::printf("거리 2000과 2001의 깊이\n");
+    std::printf("  보통:   %.9g과 %.9g, float %d칸 차이\n", s0, s1, steps(s0, s1));
+    std::printf("  뒤집음: %.9g과 %.9g, float %d칸 차이\n", r0, r1, steps(r0, r1));
+
+    struct Row { const char* label; VkCompareOp op; bool reversed;
+                 float near_d, far_d; bool near_first; };
+    const Row rows[] = {
+        {"ALWAYS  near, then far", VK_COMPARE_OP_ALWAYS, false, 1, 2, true},
+        {"LESS    near, then far", VK_COMPARE_OP_LESS, false, 1, 2, true},
+        {"LESS    2001, then 2000", VK_COMPARE_OP_LESS, false, 2000, 2001, false},
+        {"GREATER 2001, then 2000", VK_COMPARE_OP_GREATER, true, 2000, 2001,
+         false}};
+    const uint32_t W = 48, H = std::size(rows);
+    vkx::Image target = vkx::make_image(
+        dev, {W, H}, VK_FORMAT_R32_SFLOAT,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    vkx::Image depth = vkx::make_image(dev, {W, H}, VK_FORMAT_D32_SFLOAT,
+                                       VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+    vkx::Buffer pixels =
+        vkx::make_buffer(dev, W * H * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+    VkPipelineLayout layout = vkx::make_layout(dev, {}, sizeof(Push));
+    auto vs = vkx::make_shader(dev, vkx::compile(VS, shaderc_vertex_shader));
+    auto fs = vkx::make_shader(dev, vkx::compile(FS, shaderc_fragment_shader));
+    VkPipeline pipeline = vkx::make_pipeline(   // 비교 방법은 그릴 때 정한다
+        dev, {.vertex = vs, .fragment = fs, .layout = layout,
+              .color = target.format, .depth = depth.format,
+              .dynamic = {VK_DYNAMIC_STATE_DEPTH_COMPARE_OP}});
+
+    VkCommandBuffer cmd = vkx::begin(cmds);
+    vkx::begin_drawing(cmd, target, {{0.0f}}, &depth);   // 깊이는 1.0으로 지워진다
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    for (uint32_t y = 0; y < H; ++y) {
+        const Row& r = rows[y];
+        VkRect2D line{{0, int32_t(y)}, {W, 1}};
+        vkCmdSetScissor(cmd, 0, 1, &line);
+        if (r.reversed) {          // 뒤집은 깊이에서는 가장 먼 값이 0이다
+            VkClearAttachment zero{.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                                   .clearValue = {.depthStencil = {0.0f, 0}}};
+            VkClearRect where{line, 0, 1};
+            vkCmdClearAttachments(cmd, 1, &zero, 1, &where);
+        }
+        vkCmdSetDepthCompareOp(cmd, r.op);
+        const float a = r.reversed ? REV_A : STD_A, b = r.reversed ? REV_B : STD_B;
+        const Push near_quad{-1.0f, 1.0f / 3, r.near_d, 1.0f, a, b};   // 왼쪽 2/3
+        const Push far_quad{-1.0f / 3, 1.0f, r.far_d, 2.0f, a, b};     // 오른쪽 2/3
+        for (const Push* p : {r.near_first ? &near_quad : &far_quad,
+                              r.near_first ? &far_quad : &near_quad}) {
+            vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_ALL, 0, sizeof(Push),
+                               p);
+            vkCmdDraw(cmd, 6, 1, 0, 0);
+        }
+    }
+    vkx::end_drawing(cmd, target, pixels);
+    vkx::submit_and_wait(dev, cmds);
+
+    auto* v = static_cast<const float*>(pixels.mapped);
+    for (uint32_t y = 0; y < H; ++y) {
+        std::printf("%-24s|", rows[y].label);
+        for (uint32_t x = 0; x < W; ++x) std::putchar(".NF"[int(v[y * W + x])]);
+        std::puts("|");
+    }
+
+    vkDestroyPipeline(dev.handle, pipeline, nullptr);
+    vkDestroyPipelineLayout(dev.handle, layout, nullptr);
+    vkDestroyShaderModule(dev.handle, vs, nullptr);
+    vkDestroyShaderModule(dev.handle, fs, nullptr);
+    for (vkx::Image* i : {&target, &depth}) vkx::destroy(dev, *i);
+    vkx::destroy(dev, pixels);
+    vkx::destroy(dev, cmds);
+    vkx::destroy(dev);
+    vkx::destroy(inst);
+}
+```
+
+```text
+거리 2000과 2001의 깊이
+  보통:   0.999960005과 0.999960065, float 1칸 차이
+  뒤집음: 4.00003992e-05과 3.99754063e-05, float 6870칸 차이
+ALWAYS  near, then far  |NNNNNNNNNNNNNNNNFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF|
+LESS    near, then far  |NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNFFFFFFFFFFFFFFFF|
+LESS    2001, then 2000 |NNNNNNNNNNNNNNNNFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF|
+GREATER 2001, then 2000 |NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNFFFFFFFFFFFFFFFF|
+```
+
+- **깊이 시험**: `ALWAYS`는 시험이 없는 것과 같아서 나중에 그린 먼 사각형이 가까운 것을 덮었습니다. `LESS`에서는 먼 사각형의 프래그먼트가 겹친 곳에서 시험에 져서 버려집니다. 비교 방법은 파이프라인에 굳히는 값이지만, 여기서는 동적 상태로 두고 `vkCmdSetDepthCompareOp`로 줄마다 바꿨습니다([「동적 상태」](#/read/cpp-vulkan/ps-dynamic))
+- **깊이 값이 몰리는 곳**: 원근 투영을 거친 깊이는 거리에 반비례해서, 0~1의 대부분을 가까운 곳이 차지합니다. 가까운 면 0.1, 먼 면 10000에서 거리 2000과 2001의 깊이는 둘 다 0.99996쯤이고 `float`으로 한 칸 차이입니다. GPU 안의 계산에서 반올림 한 번이면 같아지므로, 셋째 줄에서 가까운 사각형이 시험에 졌습니다. 멀리 있는 면들이 깜빡이며 서로 뚫고 나오는 현상(z-fighting)이 이것입니다
+- **뒤집은 깊이**: 가까운 면을 1, 먼 면을 0에 두면 먼 곳의 값이 0 근처로 갑니다. `float`은 0에 가까울수록 촘촘하므로 같은 두 거리가 6870칸 떨어지고, 넷째 줄처럼 바르게 가려집니다. 투영 행렬의 두 원소를 바꾸고, 깊이를 0으로 지우고, 비교를 `GREATER`로 하면 됩니다. 이득은 `D32_SFLOAT`처럼 실수 포맷일 때만 있습니다
+- **지우기**: 깊이 첨부물은 렌더링을 시작할 때 지웁니다(`begin_drawing`은 1.0으로). 넷째 줄은 0이어야 해서 렌더링 도중에 영역을 지우는 `vkCmdClearAttachments`를 썼습니다. 깊이는 대개 패스가 끝나면 필요 없으므로 저장 연산을 `DONT_CARE`로 둡니다
+- **포맷**: 깊이 첨부물로 반드시 지원되는 것은 `D16_UNORM`뿐이고, `D32_SFLOAT`과 `X8_D24_UNORM_PACK32` 가운데 하나, 스텐실이 붙은 `D24_UNORM_S8_UINT`와 `D32_SFLOAT_S8_UINT` 가운데 하나가 보장됩니다. `vkGetPhysicalDeviceFormatProperties`로 확인해 고릅니다
+
+## 이른 깊이 시험
+
+깊이 시험은 원래 프래그먼트 셰이더 다음 단계지만, 결과가 같다면 GPU는 셰이더를 돌리기 전에 시험해서 가려진 프래그먼트의 셰이딩을 건너뜁니다. 셰이더가 `gl_FragDepth`에 쓰거나 `discard`를 하면 미리 시험한 결과를 믿을 수 없어 이 최적화가 약해집니다([「정점 셰이더와 프래그먼트 셰이더」](#/read/cpp-vulkan/glsl-stages)). 불투명한 물체를 가까운 것부터 그리거나, 깊이만 먼저 그리는 패스를 두면 이른 시험에서 버려지는 프래그먼트가 늘어납니다. 셰이더에 `layout(early_fragment_tests) in;`을 적으면 시험을 셰이더 앞으로 못박습니다.
+
+<Note>
+OpenGL의 깊이는 -1에서 1이고 벌칸은 0에서 1입니다. OpenGL용으로 만든 투영 행렬을 그대로 쓰면 가까운 쪽이 잘려 나가고, 깊이 범위도 절반만 쓰입니다. GLM을 쓴다면 헤더를 넣기 전에 `GLM_FORCE_DEPTH_ZERO_TO_ONE`을 정의합니다. 화면의 Y축도 벌칸은 아래쪽이 +라서 OpenGL과 반대입니다.
+</Note>
+
+## 정리
+
+- 깊이 버퍼는 픽셀마다 가장 가까운 깊이를 적어 두고, 깊이 시험이 그보다 먼 프래그먼트를 버린다
+- 원근 투영의 깊이는 가까운 곳에 몰리므로, 먼 곳의 정밀도는 가까운 면을 1, 먼 면을 0으로 뒤집고 실수 포맷과 `GREATER`를 써서 얻는다
+- 깊이 포맷은 장치에 물어 고르고, 이른 깊이 시험이 살도록 `gl_FragDepth`와 `discard`는 필요한 셰이더에만 쓴다

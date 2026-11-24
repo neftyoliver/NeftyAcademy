@@ -1,0 +1,231 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '경합을 막는 mutex와 lock_guard, 조건 변수로 기다리기, 스레드에 안전한 작업 큐 만들기, 잠금의 값';
+export const terms = ['std::mutex', '~mutex', 'std::lock'];
+
+[앞 페이지](#/read/cpp-stl/conc-thread)의 끝에서 두 스레드가 같은 변수를 고쳐 값이 틀어졌습니다. 고치는 방법은 "한 번에 한 스레드만 들어오게" 하는 것이고, 그 문지기가 `std::mutex`입니다.
+
+## mutex와 lock_guard
+
+```cpp
+#include <atomic>
+#include <mutex>
+#include <print>
+#include <thread>
+
+int main()
+{
+    int counter = 0;
+    std::mutex guard;               // counter 를 지킨다
+    {
+        auto work = [&] {
+            for (int i = 0; i < 1'000'000; ++i) {
+                const std::lock_guard lock(guard);  // 잠근다
+                ++counter;
+            }                                       // 블록을 나가며 푼다
+        };
+        std::jthread a(work);
+        std::jthread b(work);
+    }
+    std::println("mutex  {}", counter);
+
+    // 수 하나뿐이면 atomic 이 더 간단하다
+    std::atomic<int> atomic_counter = 0;
+    {
+        auto work = [&] {
+            for (int i = 0; i < 1'000'000; ++i)
+                ++atomic_counter;
+        };
+        std::jthread a(work);
+        std::jthread b(work);
+    }
+    std::println("atomic {}", atomic_counter.load());
+}
+```
+
+```text
+mutex  2000000
+atomic 2000000
+```
+
+`guard.lock()`과 `guard.unlock()`을 직접 부르지 않습니다. 사이에서 `return`하거나 예외가 나면 풀리지 않은 채 남고, 다음에 들어오려는 스레드는 영영 기다립니다. `std::lock_guard`는 [생성자에서 잠그고 소멸자에서 풉니다](#/read/cpp-syntax/class-dtor).
+
+| 잠금 객체 | 쓰는 곳 |
+| --- | --- |
+| `std::lock_guard` | 블록 하나를 잠근다. 가장 단순하고 대부분 이것이면 된다 |
+| `std::unique_lock` | 중간에 풀었다 다시 잠가야 할 때. 조건 변수가 이것을 요구한다 |
+| `std::scoped_lock` | 뮤텍스 **여럿**을 한꺼번에 잠근다. [교착](#/read/cpp-advanced/sync-deadlock)이 나지 않는 순서로 잠가 준다 |
+
+뮤텍스는 자료를 지키는 것이지 코드를 지키는 것이 아닙니다. "이 뮤텍스는 이 변수들을 지킨다"를 정해 두고, 그 변수에 닿는 **모든** 곳에서 잠급니다. 한 곳이라도 빠지면 경합입니다. 그래서 뮤텍스와 그것이 지키는 자료를 한 클래스의 `private` 멤버로 묶어, 잠그지 않고는 닿을 길이 없게 만듭니다. 아래의 큐가 그 꼴입니다.
+
+## 조건 변수
+
+큐가 빌 때 꺼내려는 스레드는 무엇을 해야 할까요. 루프를 돌며 계속 확인하면 코어 하나를 다 태웁니다. `std::condition_variable`은 **조건이 맞을 때까지 잠들어 있다가, 누가 깨워 주면 다시 확인하는** 도구입니다.
+
+```cpp
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <print>
+#include <thread>
+
+using namespace std::chrono_literals;
+
+int main()
+{
+    std::mutex guard;
+    std::condition_variable changed;
+    bool ready = false;             // guard 가 지킨다
+
+    std::jthread producer([&] {
+        std::this_thread::sleep_for(20ms);
+        {
+            const std::lock_guard lock(guard);
+            ready = true;
+        }
+        changed.notify_one();       // 기다리는 스레드 하나를 깨운다
+    });
+
+    std::unique_lock lock(guard);
+    // 조건이 참이 될 때까지 잔다. 자는 동안에는 잠금을 풀어 둔다
+    changed.wait(lock, [&] { return ready; });
+    std::println("깨어났다. ready = {}", ready);
+
+    // 마감을 둔 기다림: 조건이 끝내 거짓이면 false 를 준다
+    bool never = false;
+    const bool arrived = changed.wait_for(lock, 30ms, [&] { return never; });
+    std::println("30ms 를 기다렸지만 {}", arrived ? "왔다" : "오지 않았다");
+}
+```
+
+```text
+깨어났다. ready = true
+30ms 를 기다렸지만 오지 않았다
+```
+
+`wait`가 하는 일은 셋입니다. 조건을 확인하고, 거짓이면 **잠금을 풀고 잠들고**, 깨어나면 다시 잠근 뒤 조건을 또 확인합니다. 잠금을 풀어 주니까 다른 스레드가 들어와 `ready`를 바꿀 수 있습니다.
+
+조건을 주는 둘째 인자를 **빼면 안 됩니다.** 조건 변수는 아무도 깨우지 않았는데 깨어나기도 하고(가짜 깨어남), 깨우는 쪽이 먼저 `notify`한 뒤에 기다리기 시작하면 그 알림은 이미 지나가 버렸습니다. 조건을 함께 주면 두 경우 모두 맞게 동작합니다. 마감을 주는 `wait_until`에는 [`steady_clock`의 시각](#/read/cpp-stl/chr-clocks)을 넘깁니다.
+
+## 작업 큐 만들기
+
+[「stack과 queue」](#/read/cpp-stl/adp-stack)에서 미뤄 둔 것을 만듭니다. 한쪽에서 일을 넣고 다른 쪽 스레드들이 꺼내 가는 큐입니다.
+
+```cpp
+#include <condition_variable>
+#include <cstddef>
+#include <mutex>
+#include <optional>
+#include <print>
+#include <queue>
+#include <thread>
+#include <utility>
+#include <vector>
+
+template <typename T>
+class WorkQueue {
+public:
+    void push(T item)
+    {
+        {
+            const std::lock_guard lock(guard_);
+            items_.push(std::move(item));
+        }
+        ready_.notify_one();        // 잠금을 푼 뒤에 깨운다
+    }
+
+    // 항목이 올 때까지 기다린다. 닫히고 비었으면 빈 값을 준다
+    std::optional<T> pop()
+    {
+        std::unique_lock lock(guard_);
+        ready_.wait(lock, [this] { return !items_.empty() || closed_; });
+        if (items_.empty())
+            return std::nullopt;
+        T item = std::move(items_.front());
+        items_.pop();
+        return item;
+    }
+
+    // 더 넣지 않겠다고 알린다. 기다리던 스레드가 모두 깨어난다
+    void close()
+    {
+        {
+            const std::lock_guard lock(guard_);
+            closed_ = true;
+        }
+        ready_.notify_all();
+    }
+
+private:
+    std::mutex guard_;              // items_ 와 closed_ 를 지킨다
+    std::condition_variable ready_;
+    std::queue<T> items_;
+    bool closed_ = false;
+};
+
+int main()
+{
+    WorkQueue<int> queue;
+    std::vector<long long> sums(3, 0);      // 일꾼마다 자기 칸
+    std::vector<int> counts(3, 0);
+    {
+        std::vector<std::jthread> workers;
+        for (std::size_t w = 0; w < 3; ++w) {
+            workers.emplace_back([&queue, &sums, &counts, w] {
+                while (const auto item = queue.pop()) {
+                    sums[w] += *item;
+                    ++counts[w];
+                }
+            });
+        }
+        for (int i = 1; i <= 1000; ++i)
+            queue.push(i);
+        queue.close();
+    }   // 일꾼들이 남은 일을 마치고 끝날 때까지 기다린다
+
+    std::println("합 {} 개수 {}", sums[0] + sums[1] + sums[2],
+                 counts[0] + counts[1] + counts[2]);
+}
+```
+
+```text
+합 500500 개수 1000
+```
+
+1부터 1000까지가 하나도 빠지거나 겹치지 않고 처리됐습니다. 어느 일꾼이 몇 개를 가져갔는지는 돌릴 때마다 다릅니다. 이 코드는 `-fsanitize=thread`로도 돌려 경합이 없음을 확인했습니다.
+
+설계에서 눈여겨볼 곳이 넷입니다.
+
+- **`pop`이 값을 돌려준다.** `std::queue`처럼 `front()`와 `pop()`을 나누면, "보는 것"과 "빼는 것" 사이에 다른 스레드가 끼어듭니다. 한 번의 잠금 안에서 꺼내서 돌려줍니다
+- **`close`가 있다.** 없으면 일꾼은 빈 큐 앞에서 영원히 자고, `jthread`의 `join`이 끝나지 않습니다. 끝내는 방법은 처음부터 설계에 넣습니다
+- **잠금 안에서는 큐만 만진다.** 꺼낸 일을 처리하는 것은 잠금 밖입니다. 잠근 채로 오래 걸리는 일을 하면 모두가 그 뒤에 줄을 섭니다
+- **길이에 끝이 없다.** 넣는 쪽이 더 빠르면 메모리가 끝없이 늡니다. 실제로는 한도를 두고 꽉 차면 `push`가 기다리거나 실패하게 합니다
+
+<Note>
+큐로 일을 주고받는 구조는 "자료를 함께 쓰지 않고 **넘겨주는**" 방식입니다. 큐 하나만 제대로 만들면 나머지 코드는 잠금을 몰라도 됩니다. 스레드를 쓰는 프로그램은 될 수 있는 한 이 꼴로 짭니다. 조건 변수의 더 자세한 동작은 [「조건 변수」](#/read/cpp-advanced/sync-condvar)에서, 미리 띄워 둔 일꾼들에게 일을 나눠 주는 구조는 [「스레드 풀 만들기」](#/read/cpp-advanced/asy-pool)에서 다룹니다.
+</Note>
+
+## 잠금의 값
+
+| 일 (한 번에) | 혼자 쓸 때 | 두 스레드가 다툴 때 |
+| --- | --- | --- |
+| `std::mutex` 잠그고 풀기 | 20 ns | 50 ns |
+| `std::atomic<int>` 더하기 | 5 ns | 12 ns |
+
+x86-64 서버(코어 2개), GCC 14 `-O2`에서 잰 값입니다. 다투지 않는 잠금은 쌉니다. 비싸지는 것은 **다툴 때**이고, 잠든 스레드를 깨워야 하면 마이크로초 단위가 됩니다. 그래서 잠금을 없애려 애쓰기보다 **잠근 채로 머무는 시간**을 줄입니다.
+
+| 흔한 실수 | 일어나는 일 |
+| --- | --- |
+| 잠근 채로 파일을 쓰거나 네트워크를 기다린다 | 다른 스레드가 모두 그 뒤에서 기다린다 |
+| 지키는 자료의 참조나 포인터를 밖으로 돌려준다 | 받은 쪽이 잠금 없이 쓴다 |
+| 잠근 채로 남의 함수(콜백)를 부른다 | 그 함수가 같은 뮤텍스를 잠그려 하면 [교착](#/read/cpp-advanced/sync-deadlock) |
+| 읽는 쪽은 잠그지 않는다 | 쓰는 쪽만 잠가서는 경합이 그대로다 |
+| `wait`에 조건을 주지 않는다 | 가짜 깨어남과 놓친 알림에 틀린다 |
+
+`std::atomic`은 수 하나, 깃발 하나를 여러 스레드가 고칠 때 씁니다. 변수 둘 이상이 **함께** 맞아야 하는 상태(큐의 내용과 `closed_`처럼)는 `atomic` 여럿으로 지킬 수 없고 뮤텍스가 필요합니다. `atomic`의 속사정은 [「std::atomic」](#/read/cpp-advanced/atm-atomic)에서 봅니다.
+
+## 정리
+
+- 함께 쓰는 자료는 뮤텍스 하나가 지키게 정하고, 닿는 모든 곳에서 `lock_guard`로 잠근다. 자료와 뮤텍스를 한 클래스에 가둔다
+- 조건 변수의 `wait`에는 늘 조건을 함께 준다. 자는 동안에는 잠금이 풀리고, 깨어나면 조건을 다시 확인한다
+- 스레드 사이에는 자료를 함께 쓰기보다 큐로 넘겨준다. 큐는 꺼내기를 한 동작으로 하고, 닫는 방법을 가진다

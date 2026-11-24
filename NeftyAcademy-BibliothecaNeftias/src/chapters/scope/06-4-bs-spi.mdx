@@ -1,0 +1,107 @@
+import { Figure, Note } from 'paragoniahex';
+import { Scope } from '../../components/Scope';
+import { modeClk, modeData0, modeData1, spiClk, spiCs, spiMiso, spiMosi } from './data/bs-spi';
+
+export const summary = '네 선의 구실, 쉬는 높이와 읽는 변으로 모드 알아내기, 채널이 둘일 때 칩 선택으로 걸기, 화면의 병';
+export const terms = [];
+
+SPI에는 클럭 선이 따로 있어서 시간을 잴 일이 적습니다. 그 대신 선이 넷이고, 클럭의 어느 변에서 데이터를 읽는지가 장치마다 다릅니다. 화면에서 확인할 것은 그 약속이 두 쪽에서 같은지입니다.
+
+## 네 선
+
+<Figure caption="1MHz로 두 바이트를 주고받는 모습. 위에서부터 칩 선택, 클럭, 컨트롤러가 보내는 선, 장치가 보내는 선이다. T는 칩 선택이 내려가는 곳">
+  <Scope tdiv={2e-6} dt={1e-8} traces={[{ name: 'CH1 CS', data: spiCs, vdiv: 2, pos: 2.2 }, { name: 'CH2 SCLK', data: spiClk, vdiv: 2, pos: 0.2 }, { name: 'CH3 MOSI', data: spiMosi, vdiv: 2, pos: -1.8 }, { name: 'CH4 MISO', data: spiMiso, vdiv: 2, pos: -3.8 }]} trigger={{ level: 1.65 }} triggerAt={1e-6} />
+</Figure>
+
+- **칩 선택(CS)**: LOW인 동안이 대화 한 번입니다. 장치마다 하나씩 따로 있고, 대개 LOW일 때 골라진 것입니다
+- **클럭(SCLK)**: 컨트롤러가 냅니다. 주고받을 비트가 있을 때에만 움직이고 그 밖에는 쉽니다
+- **MOSI와 MISO**: MOSI는 컨트롤러에서 장치로, MISO는 장치에서 컨트롤러로 갑니다. 클럭 하나에 두 선이 한 비트씩 함께 움직입니다. 데이터시트에 따라 SDI, SDO 같은 다른 이름으로 적혀 있고, 클럭도 SCK나 CLK로 적힙니다
+- **높은 비트부터 읽는다**: 그림의 MOSI는 첫 여덟 클럭 동안 1, 0, 0, 1, 1, 1, 1, 1, 곧 0x9F입니다. 낮은 비트부터 보내는 장치도 있으므로 데이터시트를 확인합니다
+- **받으려면 클럭을 보내야 한다**: 둘째 바이트에서 MOSI는 0x00인데 MISO에는 0x3C가 실려 옵니다. 대답을 받으려고 보내는 빈 바이트입니다([「더미 바이트」](#/read/spidev/pt-dummy))
+- **대답했다는 표시가 따로 없다**: I2C의 ACK 같은 것이 없어서, 장치가 없어도 세 선은 똑같이 움직입니다. 장치가 살아 있는지는 MISO에 값이 실리는지로 봅니다
+
+## 모드: 쉬는 높이와 읽는 변
+
+| 모드 | CPOL, CPHA | 클럭이 쉴 때 | 데이터를 읽는 변 |
+| --- | --- | --- | --- |
+| 0 | 0, 0 | LOW | 오르는 변(첫째 변) |
+| 1 | 0, 1 | LOW | 내려가는 변(둘째 변) |
+| 2 | 1, 0 | HIGH | 내려가는 변(첫째 변) |
+| 3 | 1, 1 | HIGH | 오르는 변(둘째 변) |
+
+<Figure caption="0x9F 한 바이트를 1µs/칸으로 늘린 것. CH2는 모드 0으로, CH3은 모드 1로 보낸 데이터다. 세로 커서는 오르는 변 하나와 그다음 내려가는 변">
+  <Scope tdiv={1e-6} dt={1e-8} traces={[{ name: 'CH1 SCLK', data: modeClk, vdiv: 2, pos: 2 }, { name: 'CH2 모드 0의 데이터', data: modeData0, vdiv: 2, pos: -0.5 }, { name: 'CH3 모드 1의 데이터', data: modeData1, vdiv: 2, pos: -3 }]} cursorsT={[2.5e-6, 3e-6]} />
+</Figure>
+
+```python
+def wave(byte, cpha):                    # (SCLK, 데이터)를 찍은 값. 한 주기에 넷
+    s, prev = [], 0
+    for b in [byte >> i & 1 for i in range(7, -1, -1)]:
+        low = b if cpha == 0 else prev   # CPHA가 1이면 오르는 변에서야 바뀐다
+        s += [(0, low), (0, low), (1, b), (1, b)]
+        prev = b
+    return s + [(0, prev), (0, prev)]
+
+def read(samples, rising, after):        # 변 바로 앞이나 뒤의 값을 모은다
+    out = 0
+    for (c0, d0), (c1, d1) in zip(samples, samples[1:]):
+        if (c0, c1) == ((0, 1) if rising else (1, 0)):
+            out = (out << 1 | (d1 if after else d0)) & 0xFF
+    return out
+
+for name, cpha in (("모드 0", 0), ("모드 1", 1)):
+    w = wave(0x9F, cpha)
+    for edge, rising in (("오르는 변", True), ("내려가는 변", False)):
+        a, b = read(w, rising, False), read(w, rising, True)
+        verdict = "읽는 변이다" if a == b else "데이터가 바뀌는 변이다"
+        print(f"{name}의 파형, {edge}: 앞 0x{a:02X}, 뒤 0x{b:02X} → {verdict}")
+```
+
+```text
+모드 0의 파형, 오르는 변: 앞 0x9F, 뒤 0x9F → 읽는 변이다
+모드 0의 파형, 내려가는 변: 앞 0x9F, 뒤 0x3F → 데이터가 바뀌는 변이다
+모드 1의 파형, 오르는 변: 앞 0x4F, 뒤 0x9F → 데이터가 바뀌는 변이다
+모드 1의 파형, 내려가는 변: 앞 0x9F, 뒤 0x9F → 읽는 변이다
+```
+
+- **쉬는 높이가 CPOL이다**: 칩 선택이 내려가는 순간의 클럭이 LOW면 0, HIGH면 1입니다. 데이터시트의 타이밍 그림에서도 같은 곳을 봅니다
+- **데이터가 가만히 있는 변이 읽는 변이다**: CH2는 클럭이 오를 때마다 가만히 있고 내려갈 때 바뀝니다. CH3은 거꾸로입니다. 프로그램의 출력에서 앞뒤의 값이 같은 변이 그 변입니다
+- **틀린 변에서 읽으면 한 비트 밀린다**: 모드 1의 파형을 오르는 변에서 읽으면 0x9F가 0x4F가 됩니다. 값이 반이나 두 배로 읽히면 모드를 의심합니다([「모드가 틀렸을 때의 증상」](#/read/spidev/tr-mode))
+- **될 때도 있어서 더 고약하다**: 데이터가 바뀌는 변에서 읽으면 바뀌기 직전의 값이 잡힐 때도, 바뀐 뒤의 값이 잡힐 때도 있습니다. 선의 길이나 온도에 따라 달라지는 고장이 됩니다
+- **모드 0과 3은 둘 다 오르는 변에서 읽는다**: 그래서 둘을 다 받는 장치가 많습니다. 모드의 번호는 CPOL을 윗자리, CPHA를 아랫자리로 둔 수인데, 자료에 따라 2와 3을 바꿔 적은 것도 있습니다. 번호보다 데이터시트의 타이밍 그림을 믿습니다
+
+## 채널이 둘일 때
+
+- **칩 선택으로 건다**: 칩 선택의 내려가는 에지가 대화의 시작입니다. 외부 트리거 단자가 있는 장비라면 칩 선택을 거기에 잇고, 두 채널에는 클럭과 데이터를 물립니다([「홀드오프와 흐르는 화면 멈추기」](#/read/scope/tr-holdoff))
+- **데이터 선은 번갈아 본다**: 클럭을 CH1에 두고 CH2를 MOSI에 한 번, MISO에 한 번 물립니다. 같은 대화가 되풀이되게 프로그램을 돌려 두면 두 화면을 이어 붙여 읽을 수 있습니다
+- **가로는 클럭 한 주기가 반 칸에서 한 칸**: 1MHz면 1µs/칸이나 2µs/칸입니다. 변의 모양까지 보려면 장비의 대역폭이 클럭의 세 배에서 다섯 배는 되어야 합니다([「대역폭과 상승 시간」](#/read/scope/lm-bandwidth))
+- **네 선을 다 보려면**: 채널이 넷인 장비나 로직 분석기를 씁니다([「로직 분석기를 쓸 때」](#/read/scope/bs-logic))
+
+## 화면에 보이는 병
+
+| 화면 | 뜻 |
+| --- | --- |
+| 칩 선택이 LOW인데 MISO가 움직이지 않는다 | 장치가 대답하지 않는다. 전원, 칩 선택의 배선, 모드를 본다 |
+| 칩 선택이 HIGH일 때 MISO가 어중간하다 | 아무도 몰지 않는 선이다. 고장이 아니다 |
+| 클럭의 변 뒤에 울림이 문턱을 다시 넘는다 | 장치가 클럭을 한 번 더 센다. 값이 밀린다 |
+| 바이트 사이에 칩 선택이 올라갔다 내려온다 | 장치는 대개 대화가 끝나고 새로 시작한 것으로 안다 |
+
+- **울림은 클럭에서 가장 해롭다**: 데이터의 울림은 읽는 변까지 가라앉으면 그만이지만, 클럭의 울림은 변 하나를 둘로 만듭니다. 프로브의 접지를 짧게 하고도 남아 있으면 보내는 쪽에 직렬 저항을 넣습니다([「링잉과 오버슈트」](#/read/scope/sh-ringing))
+- **선이 길면 느리게 한다**: 점퍼 선으로 이은 장치가 높은 속도에서만 틀린 값을 준다면 클럭을 낮춰 봅니다. 낮추면 되는 고장은 변과 울림의 문제입니다
+
+<Note>
+두 그림은 변이 곧은 이상적인 파형을 계산으로 그린 것이고, 장비를 찍은 화면이 아닙니다. 0x9F와 0x3C는 비트의 모양이 잘 보이라고 고른 값이고 어느 장치의 명령도 아닙니다. 예제는 변의 바로 앞과 바로 뒤의 값을 견줄 뿐이고, 진짜 칩이 변의 앞뒤로 얼마 동안 데이터가 가만히 있기를 바라는지는 그 칩의 데이터시트에 있습니다. 모드의 뜻은 리눅스 커널의 SPI 문서를 따랐습니다.
+</Note>
+
+## 정리
+
+- 칩 선택이 LOW인 동안이 대화 한 번이고, 클럭 하나에 MOSI와 MISO가 한 비트씩 함께 움직인다
+- 모드는 클럭이 쉬는 높이와 데이터를 읽는 변으로 정해진다. 화면에서 데이터가 가만히 있는 변이 읽는 변이다
+- 채널이 둘이면 칩 선택으로 트리거를 걸고 데이터 선을 번갈아 본다. 값이 한 비트 밀리면 모드나 클럭의 울림이다
+
+## 참고 문서
+
+- [리눅스 커널 문서: Overview of Linux kernel SPI support(CPOL과 CPHA의 뜻, 모드 번호, 모드 0과 3을 함께 받는 장치, 높은 비트부터)](https://docs.kernel.org/7.2/spi/spi-summary.html)
+- [Analog Devices: Introduction to SPI Interface(네 선, 모드의 표, 칩 선택이 LOW일 때 골라진다는 것)](https://www.analog.com/en/resources/analog-dialogue/articles/introduction-to-spi-interface.html)
+- [Analog Devices: AN-1248 SPI Interface(선의 이름이 부품마다 다르다는 것, 읽는 변을 피해 데이터를 바꾼다는 것)](https://www.analog.com/en/app-notes/an-1248.html)
+- [Rigol: DHO900 사용 설명서의 트리거 소스(두 채널로 재면서 외부 트리거 단자로 셋째 신호에 거는 것)](https://www.manualslib.com/manual/3223075/Rigol-Dho900.html?page=75)

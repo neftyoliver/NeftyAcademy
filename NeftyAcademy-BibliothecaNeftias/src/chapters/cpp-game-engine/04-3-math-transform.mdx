@@ -1,0 +1,143 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '변환과 계층: 위치·회전·크기, 지역과 세계, 부모가 앞에 오는 배열, 더러움 표시, 찌그러짐';
+
+배 위의 포탑, 포탑 위의 포신, 캐릭터 손에 든 칼처럼 게임 속 물체는 다른 물체에 **붙어서** 함께 움직입니다. 이것을 표현하는 것이 변환의 **계층**입니다. [「벡터와 행렬」](#/read/cpp-game-engine/math-vectors)과 [「쿼터니언과 회전」](#/read/cpp-game-engine/math-quaternion)을 모아, 엔진이 물체의 위치를 어떻게 담고 갱신하는지 봅니다.
+
+## 위치, 회전, 크기로 담기
+
+물체의 변환을 4×4 행렬 하나로 담을 수도 있지만, 엔진은 보통 위치(T), 회전(R, 쿼터니언), 크기(S)를 **따로** 담습니다. 에디터에서 "회전만 바꾸기"가 쉽고, 섞을 때도 각각 따로 섞을 수 있으며(위치는 선형, 회전은 slerp), 행렬보다 작습니다. 행렬은 그릴 때 필요한 순간에 T·R·S로 만듭니다.
+
+- **지역 변환**(local): 부모에 대해 어디에 있나. "배 앞쪽으로 2"
+- **세계 변환**(world): 세상 전체에 대해 어디에 있나. 세계 = 부모의 세계 · 나의 지역
+
+## 계층 갱신하기
+
+평면으로 줄인 예제입니다(3차원도 같은 원리). 물체들을 **부모가 언제나 자식보다 앞에 오는** 배열에 담으면, 앞에서부터 한 번만 훑어도 부모의 세계 변환이 먼저 계산되어 있습니다.
+
+```cpp
+#include <cmath>
+#include <numbers>
+#include <print>
+#include <string>
+#include <vector>
+
+// 평면으로 줄인 TRS: 위치, 회전(라디안), 크기
+struct Xform {
+    float x = 0, y = 0, angle = 0, scale = 1;
+};
+
+// 부모 변환 다음에 자식의 지역 변환: world = parent · local
+Xform combine(const Xform& p, const Xform& l)
+{
+    float c = std::cos(p.angle), s = std::sin(p.angle);
+    return {p.x + p.scale * (c * l.x - s * l.y),
+            p.y + p.scale * (s * l.x + c * l.y), p.angle + l.angle,
+            p.scale * l.scale};
+}
+
+struct Scene {
+    std::vector<std::string> name;
+    std::vector<int> parent;           // -1이면 뿌리. 부모가 언제나 앞에 온다
+    std::vector<Xform> local, world;
+    std::vector<bool> dirty;
+    int updates = 0;
+
+    int add(std::string n, int par, Xform l)
+    {
+        name.push_back(std::move(n));
+        parent.push_back(par);
+        local.push_back(l);
+        world.push_back({});
+        dirty.push_back(true);
+        return static_cast<int>(name.size()) - 1;
+    }
+    void set_local(int i, Xform l) { local[i] = l; dirty[i] = true; }
+
+    // 앞에서부터 한 번 훑으면 부모가 먼저 계산된다
+    void update()
+    {
+        for (std::size_t i = 0; i < name.size(); ++i) {
+            int p = parent[i];
+            if (p >= 0 && dirty[p]) dirty[i] = true;   // 부모가 바뀌면 나도
+            if (!dirty[i]) continue;
+            world[i] = p < 0 ? local[i] : combine(world[p], local[i]);
+            ++updates;
+        }
+        for (std::size_t i = 0; i < name.size(); ++i) dirty[i] = false;
+    }
+    void print() const
+    {
+        for (std::size_t i = 0; i < name.size(); ++i)
+            std::println("  {:<6} 세계 위치 ({:6.2f}, {:6.2f})", name[i],
+                         std::abs(world[i].x) < 1e-5f ? 0.f : world[i].x,
+                         std::abs(world[i].y) < 1e-5f ? 0.f : world[i].y);
+    }
+};
+
+int main()
+{
+    const float PI = std::numbers::pi_v<float>;
+    Scene sc;
+    int ship = sc.add("배", -1, {10, 0, 0, 1});
+    int turret = sc.add("포탑", ship, {2, 0, 0, 1});      // 배 앞쪽 2
+    sc.add("포신", turret, {1, 0, 0, 1});                // 포탑 앞쪽 1
+    sc.add("깃발", ship, {-1, 1, 0, 1});
+
+    sc.update();
+    std::println("처음 (갱신 {}번):", sc.updates);
+    sc.print();
+
+    sc.updates = 0;
+    sc.set_local(turret, {2, 0, PI / 2, 1});                 // 포탑만 90도
+    sc.update();
+    std::println("포탑을 돌린 뒤 (갱신 {}번):", sc.updates);
+    sc.print();
+
+    sc.updates = 0;
+    sc.set_local(ship, {10, 0, 0, 2});                       // 배를 두 배로
+    sc.update();
+    std::println("배를 두 배로 키운 뒤 (갱신 {}번):", sc.updates);
+    sc.print();
+}
+```
+
+```text
+처음 (갱신 4번):
+  배     세계 위치 ( 10.00,   0.00)
+  포탑   세계 위치 ( 12.00,   0.00)
+  포신   세계 위치 ( 13.00,   0.00)
+  깃발   세계 위치 (  9.00,   1.00)
+포탑을 돌린 뒤 (갱신 2번):
+  배     세계 위치 ( 10.00,   0.00)
+  포탑   세계 위치 ( 12.00,   0.00)
+  포신   세계 위치 ( 12.00,   1.00)
+  깃발   세계 위치 (  9.00,   1.00)
+배를 두 배로 키운 뒤 (갱신 4번):
+  배     세계 위치 ( 10.00,   0.00)
+  포탑   세계 위치 ( 14.00,   0.00)
+  포신   세계 위치 ( 14.00,   2.00)
+  깃발   세계 위치 (  8.00,   2.00)
+```
+
+- **포탑을 돌리면** 포탑 자신의 위치는 그대로이고, 그 앞에 붙은 포신이 (13, 0)에서 (12, 1)로 함께 돌았습니다. 갱신은 포탑과 포신 **두 번**뿐이었습니다. 배와 깃발은 바뀐 것이 없어서 건너뛰었습니다
+- **배를 키우면** 모든 자식이 배에서 두 배 멀어집니다. 포탑은 배 앞쪽 2가 4가 되어 (14, 0)입니다. 배가 바뀌었으니 넷 모두 다시 계산했습니다
+- 바뀐 물체에 **더러움 표시**(dirty)를 하고, 부모가 더러우면 자식도 더러워지게 했습니다. 정지한 물체가 대부분인 장면에서 갱신이 크게 줍니다
+
+## 왜 배열인가
+
+계층을 "자식 포인터 목록을 가진 노드의 나무"로 만들고 재귀로 훑는 것이 가장 자연스러워 보이지만, 노드가 메모리 여기저기 흩어져 있어 캐시에 나쁩니다. 위처럼 **부모가 앞에 오는 순서의 배열**(위치·회전 같은 칸별 배열)로 두면, 갱신이 배열을 처음부터 끝까지 한 번 읽는 일이 됩니다. 대신 물체를 다른 부모로 옮길 때 순서를 지키도록 배열을 고쳐야 합니다. 이 비용과 장면 그래프의 다른 쓰임은 [「장면 그래프」](#/read/cpp-game-engine/scene-graph)에서 봅니다.
+
+## 균등하지 않은 크기의 함정
+
+크기를 축마다 다르게(x로 2배, y로 1배) 준 부모 아래에서 자식이 **돌아가 있으면**, 자식의 세계 변환에는 회전과 크기만으로는 표현할 수 없는 **찌그러짐**(shear)이 생깁니다. 그러면 세계 변환을 다시 T, R, S로 나눌 수 없고, 법선 벡터도 그냥 변환 행렬로 돌리면 틀어집니다(역전치 행렬을 써야 합니다). 많은 엔진이 "균등하지 않은 크기는 자식이 없는 맨 끝 물체에만"이라는 규칙을 두거나, 계층을 따라 크기를 전달하는 방식을 단순하게 제한하는 까닭입니다.
+
+<Note>
+세계 위치가 원점에서 아주 멀어지면 float의 정밀도가 모자라 물체가 떨립니다. float는 유효 숫자가 7자리쯤이라, 원점에서 10km 떨어진 곳에서는 1mm 단위가 흐려지기 시작합니다. 넓은 세계의 게임은 세계 위치를 double로 담거나, 카메라 근처를 원점으로 다시 잡는(원점 옮기기) 방법을 씁니다. 이 이야기는 [「좌표계의 약속」](#/read/cpp-game-engine/math-conventions)에서 이어집니다.
+</Note>
+
+## 정리
+
+- 엔진은 변환을 위치·회전·크기로 따로 담고, 세계 변환은 부모의 세계 변환에 자신의 지역 변환을 곱해 얻는다
+- 부모가 언제나 앞에 오는 배열에 담으면 한 번 훑어 계층을 갱신할 수 있고, 더러움 표시로 바뀐 것과 그 자식만 다시 계산한다
+- 돌아간 자식 위의 균등하지 않은 크기는 찌그러짐을 만들므로 제한하고, 원점에서 먼 곳의 float 정밀도를 조심한다

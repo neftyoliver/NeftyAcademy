@@ -1,0 +1,177 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'SQL Server: ODBC Driver 18과 기본 암호화, OUTPUT INSERTED, NVARCHAR와 UTF-16 바인딩, T-SQL의 사투리';
+export const terms = ['SQL_C_WCHAR', 'SQL_WVARCHAR'];
+
+**SQL Server**는 마이크로소프트의 데이터베이스입니다. 윈도에서 시작했지만 2017년판부터 리눅스에서도 돌고, 클라우드에서는 Azure SQL로 쓰며, 최신판은 2025년 11월에 나온 SQL Server 2025입니다. SQL의 사투리를 T-SQL이라고 부르고, 클라이언트와 서버는 TDS라는 프로토콜로 말합니다. C++에서는 윈도, 리눅스, macOS에서 모두 쓰는 **Microsoft ODBC Driver 18 for SQL Server**로 붙는 것이 가장 흔하고, 윈도에는 OLE DB 드라이버도 있습니다. 개발과 시험에는 무료인 Developer 판이나 공식 컨테이너 이미지를 씁니다([「컨테이너로 띄우기」](#/read/cpp-database/dbtest-container)).
+
+## ODBC Driver 18로 붙기
+
+[「ODBC」](#/read/cpp-database/cs-odbc)의 코드에서 연결 문자열과 T-SQL만 바뀝니다. 이 책의 검사 환경에는 SQL Server가 없어 아래 조각은 문서와 대조만 했습니다.
+
+```cpp nocheck
+// SQL Server에 ODBC Driver 18로 붙어 주문을 넣고 새 id를 받는다
+const char* conn =
+    "Driver={ODBC Driver 18 for SQL Server};Server=tcp:db.example.com,1433;"
+    "Database=shop;Uid=app;Pwd=...;"               // 암호는 비밀 관리 도구에서
+    "Encrypt=yes;TrustServerCertificate=no;";       // 18판부터 암호화가 기본
+// 윈도 통합 인증이면 Uid, Pwd 대신 "Trusted_Connection=yes;"
+SQLDriverConnect(dbc, nullptr, S(conn), SQL_NTS, nullptr, 0, nullptr,
+                 SQL_DRIVER_NOPROMPT);
+
+// 영향받은 행 수 메시지를 끄고, 오류가 나면 트랜잭션 전체를 되돌리게 한다
+SQLExecDirect(st, S("SET NOCOUNT ON; SET XACT_ABORT ON;"), SQL_NTS);
+SQLPrepare(st, S("INSERT INTO orders (customer_id, memo) OUTPUT INSERTED.id "
+                 "VALUES (?, ?)"), SQL_NTS);
+std::u16string memo = to_utf16("빠른 배송 부탁드립니다");   // memo는 NVARCHAR
+SQLLEN bytes = SQLLEN(memo.size() * sizeof(char16_t));
+SQLBindParameter(st, 1, SQL_PARAM_INPUT, SQL_C_SLONG, SQL_INTEGER, 0, 0,
+                 &customer_id, 0, nullptr);
+SQLBindParameter(st, 2, SQL_PARAM_INPUT, SQL_C_WCHAR, SQL_WVARCHAR, 200, 0,
+                 memo.data(), bytes, &bytes);
+SQLExecute(st);
+SQLFetch(st);                                       // OUTPUT의 결과가 행으로 온다
+SQLGetData(st, 1, SQL_C_SLONG, &new_id, 0, nullptr);
+```
+
+- **기본이 암호화**: ODBC Driver 18부터 `Encrypt`의 기본값이 yes로 바뀌어, 서버 인증서를 믿을 수 없으면 연결이 실패합니다. 갓 설치한 서버의 자체 서명 인증서로 개발할 때만 `TrustServerCertificate=yes`를 쓰고, 운영에서는 믿을 수 있는 인증서를 둡니다
+- **새 번호 받기**: `OUTPUT INSERTED.id`는 PostgreSQL의 `RETURNING`처럼 넣은 행의 값을 결과로 돌려줍니다. 따로 물을 때는 `SCOPE_IDENTITY()`를 씁니다. `@@IDENTITY`는 트리거가 다른 테이블에 넣은 번호를 돌려줄 수 있습니다
+- **SET NOCOUNT ON**: 문장마다 오는 "몇 행이 바뀌었다"는 메시지가 결과 집합 사이에 끼지 않게 합니다. `SET XACT_ABORT ON`은 오류가 나면 트랜잭션 전체를 되돌리게 합니다
+
+## 한글과 NVARCHAR
+
+SQL Server의 `VARCHAR`는 정렬 규칙(collation)이 정한 코드 페이지로 글자를 담아서, 한국어 정렬 규칙이면 CP949(완성형 확장)로 담습니다. 모든 글자를 담으려면 UTF-16으로 담는 `NVARCHAR`를 쓰거나, 2019년판부터 생긴 UTF-8 정렬 규칙을 씁니다. `NVARCHAR`에 넣을 값은 ODBC의 넓은 문자(`SQL_C_WCHAR`)로 묶습니다. C++의 문자열은 보통 UTF-8이므로 UTF-16으로 바꾸는 함수가 필요합니다.
+
+SQL Server가 없으므로, 같은 코드 경로를 PostgreSQL의 유니코드 ODBC 드라이버로 돌려 보았습니다. 넓은 문자로 묶어 넣고 넓은 문자로 꺼내며, SQL Server도 알아듣는 표준 페이지 문법(`OFFSET ... FETCH NEXT`)으로 둘째 쪽을 읽습니다.
+
+```cpp flags=-lodbc
+#include <sql.h>
+#include <sqlext.h>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <string_view>
+
+// UTF-8 <-> UTF-16. SQL Server의 NVARCHAR와 ODBC의 W 함수는 UTF-16을 쓴다
+std::u16string to_utf16(std::string_view s) {
+    std::u16string out;
+    for (size_t i = 0; i < s.size();) {
+        unsigned char c = s[i];
+        int n = c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+        char32_t cp = n == 1 ? c : c & (0x3F >> (n - 1));
+        for (int k = 1; k < n; ++k) cp = (cp << 6) | (s[i + k] & 0x3F);
+        i += n;
+        if (cp < 0x10000) {
+            out += char16_t(cp);
+        } else {                               // 넘치는 글자는 대리 쌍 두 개로
+            cp -= 0x10000;
+            out += char16_t(0xD800 + (cp >> 10));
+            out += char16_t(0xDC00 + (cp & 0x3FF));
+        }
+    }
+    return out;
+}
+
+std::string to_utf8(std::u16string_view w) {
+    std::string out;
+    for (size_t i = 0; i < w.size(); ++i) {
+        char32_t cp = w[i];
+        if (cp >= 0xD800 && cp < 0xDC00 && i + 1 < w.size())
+            cp = 0x10000 + ((cp - 0xD800) << 10) + (w[++i] - 0xDC00);
+        if (cp < 0x80) {
+            out += char(cp);
+        } else {
+            int n = cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+            out += char((0xF00 >> n) | (cp >> (6 * (n - 1))));
+            for (int k = n - 2; k >= 0; --k)
+                out += char(0x80 | ((cp >> (6 * k)) & 0x3F));
+        }
+    }
+    return out;
+}
+
+SQLCHAR* S(const char* s) {
+    return reinterpret_cast<SQLCHAR*>(const_cast<char*>(s));
+}
+
+int main() {
+    // psqlODBC는 넓은 문자를 바꿀 때 환경의 로캘을 따른다 (UTF-8이 아니면 실패)
+    setenv("LC_ALL", "C.UTF-8", 1);
+    SQLHENV env;
+    SQLHDBC dbc;
+    SQLHSTMT st;
+    SQLAllocHandle(SQL_HANDLE_ENV, SQL_NULL_HANDLE, &env);
+    auto v3 = reinterpret_cast<SQLPOINTER>(SQL_OV_ODBC3);
+    SQLSetEnvAttr(env, SQL_ATTR_ODBC_VERSION, v3, 0);
+    SQLAllocHandle(SQL_HANDLE_DBC, env, &dbc);
+    const char* conn = "Driver={PostgreSQL Unicode};Server=localhost;"
+                       "Database=academy;Uid=academy;Pwd=academy;";
+    SQLDriverConnect(dbc, nullptr, S(conn), SQL_NTS, nullptr, 0, nullptr,
+                     SQL_DRIVER_NOPROMPT);
+    SQLAllocHandle(SQL_HANDLE_STMT, dbc, &st);
+    SQLExecDirect(st, S("DROP TABLE IF EXISTS wide_parts"), SQL_NTS);
+    SQLExecDirect(st, S("CREATE TABLE wide_parts (id int PRIMARY KEY, "
+                        "name varchar(50))"), SQL_NTS);
+
+    SQLPrepare(st, S("INSERT INTO wide_parts VALUES (?, ?)"), SQL_NTS);
+    const char* names[] = {"육각 볼트", "너트 🔩", "스프링 와셔", "평 와셔"};
+    for (int i = 0; i < 4; ++i) {
+        SQLINTEGER id = i + 1;
+        std::u16string w = to_utf16(names[i]);
+        SQLLEN bytes = SQLLEN(w.size() * sizeof(char16_t));
+        SQLBindParameter(st, 1, SQL_PARAM_INPUT, SQL_C_SLONG, SQL_INTEGER, 0, 0,
+                         &id, 0, nullptr);
+        SQLBindParameter(st, 2, SQL_PARAM_INPUT, SQL_C_WCHAR, SQL_WVARCHAR, 50, 0,
+                         w.data(), bytes, &bytes);
+        bool ok = SQL_SUCCEEDED(SQLExecute(st));
+        std::printf("%s %d: UTF-8 %zu바이트, UTF-16 %zu단위\n",
+                    ok ? "넣음" : "실패", id, std::string_view(names[i]).size(),
+                    w.size());
+    }
+    SQLFreeStmt(st, SQL_RESET_PARAMS);
+
+    // 표준 페이지 문법: SQL Server 2012+, PostgreSQL, MariaDB 10.6+ 공통
+    SQLExecDirect(st, S("SELECT name FROM wide_parts ORDER BY id "
+                        "OFFSET 1 ROWS FETCH NEXT 2 ROWS ONLY"), SQL_NTS);
+    while (SQL_SUCCEEDED(SQLFetch(st))) {
+        char16_t buf[64];
+        SQLLEN got;
+        SQLGetData(st, 1, SQL_C_WCHAR, buf, sizeof buf, &got);
+        std::u16string_view w(buf, size_t(got) / sizeof(char16_t));
+        std::printf("2쪽: %s\n", to_utf8(w).c_str());
+    }
+    SQLFreeHandle(SQL_HANDLE_STMT, st);
+    SQLDisconnect(dbc);
+    SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+    SQLFreeHandle(SQL_HANDLE_ENV, env);
+}
+```
+
+```text
+넣음 1: UTF-8 13바이트, UTF-16 5단위
+넣음 2: UTF-8 11바이트, UTF-16 5단위
+넣음 3: UTF-8 16바이트, UTF-16 6단위
+넣음 4: UTF-8 10바이트, UTF-16 4단위
+2쪽: 너트 🔩
+2쪽: 스프링 와셔
+```
+
+이모지 하나는 UTF-16에서 두 단위(대리 쌍)라서, "너트 🔩"는 글자 넷이지만 5단위가 되었습니다. `NVARCHAR(50)`의 50도 글자 수가 아니라 이 단위의 수입니다. 그리고 리눅스의 psqlODBC는 넓은 문자를 바꿀 때 환경의 로캘을 따르기 때문에, 로캘이 UTF-8이 아닌 환경(이 책의 검사 환경처럼 `LANG`이 비어 있는 경우)에서는 한글을 넣다가 "Could not convert from wide characters" 오류가 났습니다. 그래서 예제는 시작할 때 로캘을 정해 둡니다. ODBC 드라이버마다 이런 문자 변환의 버릇이 있으므로, 한글과 이모지로 꼭 시험해 봅니다.
+
+| 할 일 | SQL Server | PostgreSQL |
+| --- | --- | --- |
+| 앞에서 n행 | `TOP (n)`, `OFFSET … FETCH` | `LIMIT n`, `OFFSET … FETCH` |
+| 자동 번호 | `IDENTITY(1,1)` | `GENERATED … AS IDENTITY` |
+| 넣은 행의 값 | `OUTPUT INSERTED.id` | `RETURNING id` |
+| 유니코드 상수 | `N'한글'` | `'한글'` |
+| 이름 감싸기 | `[이름]` | `"이름"` |
+
+<Note>
+SQL Server의 기본 격리 수준인 READ COMMITTED는 잠금으로 구현되어 읽기와 쓰기가 서로 기다리는 일이 많습니다. 데이터베이스에 `READ_COMMITTED_SNAPSHOT`을 켜면 PostgreSQL처럼 행의 옛 판을 읽어 기다림이 줄어듭니다. 리눅스에서 오픈 소스로 TDS를 말하는 FreeTDS도 있지만, 새 기능과 인증 방식은 마이크로소프트의 드라이버가 먼저 지원합니다.
+</Note>
+
+## 정리
+
+- SQL Server는 C++에서 주로 ODBC Driver 18로 붙고, 18판부터 암호화가 기본이라 운영에서는 믿을 수 있는 인증서와 Encrypt=yes를 쓴다
+- 새 번호는 OUTPUT INSERTED나 SCOPE_IDENTITY로 받고, 한글은 NVARCHAR(UTF-16)나 UTF-8 정렬 규칙에 담으며 ODBC에서는 SQL_C_WCHAR로 묶는다
+- UTF-16에서 이모지는 두 단위이고 리눅스 ODBC 드라이버는 로캘에 따라 문자 변환이 실패할 수 있으므로, 표준 문법을 쓰되 사투리와 문자 처리를 직접 시험한다

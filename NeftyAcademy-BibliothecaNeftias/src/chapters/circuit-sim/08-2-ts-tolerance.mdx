@@ -1,0 +1,175 @@
+import { Figure, Note } from 'paragoniahex';
+import { Plot } from '../../components/Plot';
+import { tolCount15k, tolCount20k, tolV } from './data/ts-tolerance';
+
+export const summary = '부품의 값은 적힌 값과 다르다. 구석을 모두 돌리기, 아무렇게나 뽑아 천 번 돌리기, 답을 범위로 읽기';
+export const terms = ['sunif', 'setseed', 'altermod'];
+
+넷리스트의 `R1 in out 10k`는 정확히 10kΩ입니다. 가게에서 산 10kΩ 저항은 9.5kΩ일 수도 10.5kΩ일 수도 있습니다. 그래서 시뮬레이션의 답 하나는 가운데 값일 뿐이고, 회로를 믿으려면 답이 어디까지 움직이는지를 알아야 합니다. 이 쪽은 2장의 분배기로 그 범위를 구합니다. 5V 신호를 저항 둘로 낮춰 라즈베리파이의 핀에 넣는 회로입니다.
+
+## 얼마나 벗어나는가
+
+| 부품 | 흔히 적힌 오차 |
+| --- | --- |
+| 저항 | ±1%, ±5% |
+| 세라믹 커패시터 | ±10%, ±20% |
+| 5V 전원 | 이 쪽에서는 ±5%로 잡는다 |
+| MOSFET의 문턱 전압 | 2N7002는 1V에서 2.5V까지 |
+
+- **오차는 한계다**: ±5%는 그 안에 든다는 약속이고, 어디에 몰려 있는지는 말해 주지 않습니다
+- **핀이 받을 수 있는 범위**: 이 쪽에서는 2.0V보다 높고 3.465V보다 낮으면 괜찮은 것으로 칩니다. 2.0V는 HIGH로 읽히는 문턱이고, 3.465V는 3.3V에 5%를 더한 값입니다([「3.3V 논리와 전류 한계」](#/read/sbc-start/hdr-voltage))
+
+## 구석을 모두 돌려 본다
+
+부품마다 가장 작은 값과 가장 큰 값만 넣어서, 모든 짝을 돌립니다.
+
+```spice
+분배기의 여덟 구석: 전원, R1, R2
+V1 in 0 5
+R1 in out 10k
+R2 out 0 20k
+.control
+foreach v 4.75 5.25
+  foreach a 9.5k 10.5k
+    foreach b 19k 21k
+      alter V1 = $v
+      alter R1 = $a
+      alter R2 = $b
+      op
+      echo $v $a $b $&v(out)
+    end
+  end
+end
+.endc
+.end
+```
+
+```text
+$ ngspice -b corner.cir
+4.75 9.5k 19k 3.16667
+4.75 9.5k 21k 3.27049
+4.75 10.5k 19k 3.05932
+4.75 10.5k 21k 3.16667
+5.25 9.5k 19k 3.5
+5.25 9.5k 21k 3.61475
+5.25 10.5k 19k 3.38136
+5.25 10.5k 21k 3.5
+```
+
+- **가운데 값은 3.333V였다**: 구석에서는 3.059V에서 3.615V까지 움직입니다. 가장 높은 구석은 전원이 높고 `R1`이 작고 `R2`가 큰 때입니다
+- **한도를 넘는 구석이 셋이다**: 3.5V가 둘, 3.615V가 하나입니다. 오차를 생각하지 않고 고른 10kΩ과 20kΩ은 안전하지 않습니다
+- **구석의 수는 곱절로 는다**: 부품이 셋이면 여덟, 열이면 1024입니다. 그리고 가장 나쁜 답이 늘 구석에 있는 것은 아닙니다. 필터처럼 값의 가운데에서 가장 나빠지는 회로도 있습니다
+
+## 아무렇게나 뽑아 천 번 돌린다
+
+오차 안에서 값을 아무렇게나 뽑아 여러 번 돌리고, 답이 어떻게 퍼지는지를 봅니다. 몬테카를로라고 부르는 방법입니다.
+
+```spice
+분배기 천 번: 저항 5%, 전원 5%
+V1 in 0 5
+R1 in out 10k
+R2 out 0 20k
+.control
+setseed 7
+let n = 1000
+let outs = vector(n)
+let k = 0
+dowhile k < n
+  let v = 5 * (1 + 0.05 * sunif(0))
+  let a = 10k * (1 + 0.05 * sunif(0))
+  let b = 20k * (1 + 0.05 * sunif(0))
+  alter V1 = $&v
+  alter R1 = $&a
+  alter R2 = $&b
+  op
+  let const.outs[k] = v(out)
+  destroy
+  let k = k + 1
+end
+setplot const
+let m = mean(outs)
+let sd = sqrt(mean((outs - m)^2))
+let over = mean(outs gt 3.465)
+print m sd
+print vecmin(outs) vecmax(outs) over
+.endc
+.end
+```
+
+```text
+$ ngspice -b mc.cir
+m            = 3.333588e+00
+sd           = 1.044157e-01
+vecmin(outs) = 3.090917e+00
+vecmax(outs) = 3.582027e+00
+over         = 1.200000e-01
+```
+
+<Figure caption="천 번의 out이 퍼진 모습. R2가 20kΩ일 때와 15kΩ일 때. 세로 점선이 한도인 3.465V다">
+  <Plot x={tolV} xUnit="V" xName="out" yUnit="번" yName="천 번 가운데" series={[{ name: 'R2 20kΩ', data: tolCount20k }, { name: 'R2 15kΩ', data: tolCount15k }]} vmarks={[{ at: 3.465, label: '3.465V' }]} />
+</Figure>
+
+- **`sunif(0)`**: −1과 1 사이에서 고르게 뽑은 수입니다. 0.05를 곱해 더하면 ±5% 안의 값이 됩니다. `sgauss(0)`은 가운데에 몰린 종 모양으로 뽑습니다
+- **`setseed 7`**: 뽑기의 출발점입니다. 같은 수를 주면 같은 차례로 뽑히므로, 다시 돌려도 같은 답이 나옵니다
+- **결과를 모으는 벡터**: `outs`를 해석보다 먼저 만들어 두고, 돌 때마다 `const.outs[k]`에 적습니다. `destroy`는 방금의 결과를 버려 천 개가 쌓이지 않게 합니다
+- **천 번 가운데 120번이 한도를 넘었다**: `over`가 0.12입니다. 평균은 3.334V, 흩어진 정도는 0.104V입니다
+- **`R2`를 15kΩ으로 바꾸면**: 평균이 3.000V가 되고, 천 번 가운데 가장 높은 것이 3.243V입니다. 한도를 넘는 것이 없고, 가장 낮은 2.764V도 2.0V보다 넉넉히 높습니다. 여덟 구석으로 돌려도 2.735V에서 3.275V 사이입니다
+- **두 방법이 묻는 것이 다르다**: 구석은 가장 나쁜 때에도 괜찮은지를, 몬테카를로는 얼마나 자주 나쁜지를 답합니다. 핀을 망가뜨릴 수 있는 한도는 구석으로 확인합니다
+
+## 범위가 넓은 숫자
+
+모델 안의 숫자도 흩어져 있습니다. 4장의 MOSFET 모델은 문턱을 대푯값인 2.1V로 적었는데, 데이터시트의 범위는 1V에서 2.5V입니다.
+
+```spice
+문턱이 다른 2N7002 셋: 3.3V로 켜기
+V1 vcc 0 5
+VG g 0 3.3
+R1 vcc d 50
+M1 d g 0 0 N7002
+.model N7002 NMOS(LEVEL=1 VTO=2.1
++ KP=0.44 RD=0.91)
+.control
+foreach vt 1.0 2.1 2.5
+  altermod N7002 vto=$vt
+  op
+  echo vto $vt d $&v(d)
+end
+.endc
+.end
+```
+
+```text
+$ ngspice -b vto.cir
+vto 1.0 d 0.184851
+vto 2.1 d 0.280407
+vto 2.5 d 0.411432
+```
+
+- **`altermod`**: 모델의 숫자를 바꾸는 명령입니다. `alter`는 소자의 값을 바꿉니다
+- **켜지기는 셋 다 켜진다**: 드레인이 0.18V에서 0.41V 사이입니다. 부하에는 4.5V 넘게 걸립니다
+- **MOSFET이 내는 열은 두 배가 넘게 달라진다**: 문턱이 1.0V인 것은 18mW, 2.5V인 것은 38mW입니다. 대푯값으로 돌린 답 26mW만 보고 여유를 잡으면 모자랄 수 있습니다([「MOSFET」](#/read/circuit-sim/dv-mosfet))
+- **온도도 같은 식으로 본다**: `.dc temp`로 훑거나 가장 추운 때와 가장 더운 때를 구석에 더합니다. 다만 모델이 온도에 맞춰져 있어야 합니다([「이상적인 부품이 숨기는 것」](#/read/circuit-sim/ts-ideal))
+
+## 다른 프로그램에서는
+
+- **LTspice**: 부품의 값을 `{mc(10k, 0.05)}`처럼 적으면 돌릴 때마다 ±5% 안에서 고르게 뽑힙니다. 쓰이지 않는 매개변수 하나를 `.step`으로 1부터 1000까지 세게 해서 천 번을 돌립니다
+- **KiCad**: 시뮬레이터 창의 값 돌려 보기를 Multi Run으로 바꾸면, 범위의 아래 끝에서 위 끝까지 Steps에 적은 횟수만큼 값을 바꿔 돌리고 결과를 겹쳐 그립니다. 값을 아무렇게나 뽑는 방식은 아닙니다([「시뮬레이터 창」](#/read/circuit-sim/kc-run))
+
+<Note>
+넷리스트 셋과 그림은 ngspice 42로 돌린 결과이고, `R2`를 15kΩ으로 바꾼 천 번과 여덟 구석, `sunif(0)`을 `sgauss(0)/3`으로 바꾼 천 번(한도를 넘는 것이 21번)도 따로 돌려 확인했습니다. 전원의 ±5%와 저항의 ±5%는 보기로 고른 값이고, 값이 그 안에 고르게 퍼져 있다고 친 것도 제가 정한 것입니다. 실제 부품이 어떻게 퍼져 있는지는 제조사의 자료에 없는 경우가 많습니다. 3.465V라는 한도는 「라즈베리파이 시작하기」에서 쓴 기준을 따랐습니다. LTspice의 `mc()`는 Analog Devices의 글에서, KiCad의 Multi Run은 KiCad 10의 설명서에서 옮겼고 제가 돌려 본 것이 아닙니다.
+</Note>
+
+## 정리
+
+- 시뮬레이션의 답 하나는 가운데 값이다. 부품의 오차를 넣어 답의 범위를 구해야 회로를 믿을 수 있다
+- 구석을 모두 돌리면 가장 나쁜 답을, 아무렇게나 뽑아 천 번 돌리면 나쁜 답이 나오는 비율을 안다
+- 10kΩ과 20kΩ의 분배기는 천 번에 120번 한도를 넘었고, 15kΩ으로 바꾸니 한 번도 넘지 않았다
+
+## 참고 문서
+
+- [ngspice: Ngspice User's Manual Version 43(18장 통계 해석: sunif와 sgauss, 씨앗과 setseed, alter와 altermod로 도는 몬테카를로의 보기)](https://ftp.fau.de/gentoo/distfiles/d4/ngspice-43-manual.pdf)
+- [onsemi: 2N7002의 데이터시트(문턱 전압의 범위 1V에서 2.5V)](https://www.onsemi.com/pub/Collateral/NDS7002A-D.PDF)
+- [Analog Devices: Are Random Numbers in LTspice Truly Random?(mc(x,y)가 고르게 뽑는 범위, .STEP으로 여러 번 돌리기)](https://www.analog.com/en/resources/technical-articles/random-numbers-in-ltspice.html)
+- [Analog Devices: LTspice: Worst-Case Circuit Analysis with Minimal Simulations Runs(구석만 골라 돌리는 법)](https://www.analog.com/en/resources/technical-articles/ltspice-worst-case-circuit-analysis-with-minimal-simulations-runs.html)
+- [KiCad 10 설명서: Schematic Editor(Simulator 장의 Tuning components: Single Run과 Multi Run, Steps)](https://docs.kicad.org/10.0/en/eeschema/eeschema.html)
+- [Raspberry Pi 문서: Raspberry Pi computer hardware(입력을 HIGH로 읽는 문턱)](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html)

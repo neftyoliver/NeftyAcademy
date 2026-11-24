@@ -1,0 +1,212 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '문자열에 쓰고 문자열에서 읽는 스트림, str()과 view(), 다시 쓸 때의 clear, 힙을 쓰지 않는 spanstream';
+export const terms = [
+  'stringstream', 'istringstream', 'ostringstream', 'spanstream', 'ispanstream', 'ospanstream',
+];
+
+`<sstream>`의 문자열 스트림은 [스트림 버퍼](#/read/cpp-stl/io-streams)가 `std::string`에 이어진 스트림입니다. `std::ostringstream`은 쓴 것을 문자열로 모으고, `std::istringstream`은 문자열을 입력처럼 읽습니다.
+
+## 문자열에 쓰기
+
+```cpp
+#include <print>
+#include <sstream>
+#include <string>
+#include <string_view>
+#include <utility>
+
+int main()
+{
+    std::ostringstream out;
+    out << "temp=" << 21.5 << " n=" << 3;
+
+    const std::string copy = out.str();         // 복사해서 준다
+    const std::string_view peek = out.view();   // C++20. 복사 없이 본다
+    std::println("[{}] [{}]", copy, peek);
+
+    std::string taken = std::move(out).str();   // C++20. 속을 통째로 가져간다
+    std::println("[{}] 남은 것 [{}]", taken, out.view());
+}
+```
+
+```text
+[temp=21.5 n=3] [temp=21.5 n=3]
+[temp=21.5 n=3] 남은 것 []
+```
+
+`str()`은 부를 때마다 문자열을 **복사**합니다. 루프 안에서 `out.str().size()`처럼 쓰면 매번 전체를 복사합니다. 보기만 할 때는 `view()`를, 다 쓰고 결과를 꺼낼 때는 `std::move(out).str()`을 씁니다. `view()`가 준 [`string_view`](#/read/cpp-stl/str-view)는 스트림에 더 쓰면 무효가 됩니다.
+
+새 코드에서 문자열을 조립하는 일은 [`std::format`](#/read/cpp-stl/str-format)이 더 짧고 빠릅니다. `ostringstream`이 필요한 곳은 `operator<<`만 가진 타입을 문자열로 바꿀 때와, `std::ostream&`를 받는 기존 함수의 출력을 문자열로 받을 때입니다.
+
+## 문자열에서 읽기
+
+한 줄을 공백으로 나눠 타입별로 읽는 일은 `istringstream`이 가장 짧습니다.
+
+```cpp
+#include <print>
+#include <sstream>
+#include <string>
+
+struct Command {
+    std::string name;
+    int pin = 0;
+    std::string state;
+};
+
+// "led 17 on" 같은 줄을 푼다
+bool parse(const std::string& line, Command& out)
+{
+    std::istringstream in(line);
+    return static_cast<bool>(in >> out.name >> out.pin >> out.state);
+}
+
+int main()
+{
+    const char* lines[] = {
+        "led 17 on",
+        "fan   4   off",
+        "led seventeen on",
+        "led 17",
+    };
+    for (const char* line : lines) {
+        Command c;
+        if (parse(line, c))
+            std::println("{} / {} / {}", c.name, c.pin, c.state);
+        else
+            std::println("풀지 못함: {}", line);
+    }
+
+    // 구분자를 정해 자르기
+    for (const char* text : {"a,b,,d", "a,b,"}) {
+        std::istringstream csv(text);
+        std::string cell;
+        while (std::getline(csv, cell, ','))
+            std::print("[{}]", cell);
+        std::println("");
+    }
+}
+```
+
+```text
+led / 17 / on
+fan / 4 / off
+풀지 못함: led seventeen on
+풀지 못함: led 17
+[a][b][][d]
+[a][b]
+```
+
+`>>`는 공백이 몇 개든 건너뛰고, 하나라도 읽지 못하면 사슬 전체가 실패합니다. `getline`의 셋째 인자는 줄바꿈 대신 쓸 구분자입니다. 가운데의 빈 칸은 나오지만 **끝이 구분자로 끝나면 마지막 빈 칸은 나오지 않습니다.** 따옴표 안의 쉼표도 모릅니다. 진짜 CSV는 이것으로 읽지 않습니다.
+
+## 다시 쓸 때는 clear까지
+
+스트림 하나를 여러 줄에 돌려 쓰면 생성 비용이 줄어듭니다. 그때 빠뜨리기 쉬운 것이 [상태](#/read/cpp-stl/io-streams)입니다.
+
+```cpp
+#include <print>
+#include <sstream>
+
+int main()
+{
+    std::stringstream ss;
+    ss << "1 2";
+    int a = 0;
+    int b = 0;
+    int c = -1;
+    ss >> a >> b;
+    std::println("{} {} eof={}", a, b, ss.eof());
+
+    ss.str("3");            // 내용만 바꿨다
+    ss >> c;
+    std::println("clear 없이 {} fail={}", c, ss.fail());
+
+    ss.clear();             // 상태도 지운다
+    ss.str("3");
+    ss >> c;
+    std::println("clear 뒤   {}", c);
+}
+```
+
+```text
+1 2 eof=true
+clear 없이 -1 fail=true
+clear 뒤   3
+```
+
+끝까지 읽은 스트림에는 `eofbit`가 켜져 있고, `str()`로 내용을 갈아도 그 비트는 그대로입니다. 다음 읽기는 시도조차 하지 않습니다. 다시 쓸 때는 **`clear()`와 `str()`을 늘 함께** 부릅니다.
+
+## spanstream
+
+문자열 스트림은 힙을 씁니다. C++23의 `<spanstream>`은 **내가 준 버퍼** 위에서 같은 일을 합니다. 버퍼는 [`std::span<char>`](#/read/cpp-stl/seq-span)으로 넘깁니다.
+
+```cpp
+#include <array>
+#include <print>
+#include <span>
+#include <spanstream>
+#include <string>
+#include <string_view>
+
+int main()
+{
+    std::array<char, 16> buffer{};
+    std::ospanstream out{std::span<char>(buffer)};
+
+    out << "t=" << 21.5 << ' ';
+    auto written = out.span();          // 지금까지 쓴 부분
+    std::println("[{}] good={}", std::string_view(written), out.good());
+
+    out << "humidity=" << 40;           // 16칸을 넘는다
+    written = out.span();
+    std::println("[{}] bad={}", std::string_view(written), out.bad());
+
+    // 읽기: 문자열을 복사하지 않고 그 자리에서 읽는다
+    std::ispanstream in{std::string_view("12 3.5 led")};
+    int a = 0;
+    double b = 0;
+    std::string c;
+    in >> a >> b >> c;
+    std::println("{} {} {}", a, b, c);
+}
+```
+
+```text
+[t=21.5 ] good=true
+[t=21.5 humidity=] bad=true
+12 3.5 led
+```
+
+버퍼가 차면 넘치지 않고 **`badbit`가 켜집니다.** 들어간 데까지만 남습니다. `sprintf`로 고정 버퍼에 쓰던 코드를 넘칠 걱정 없이 스트림으로 옮길 수 있고, 로그 한 줄을 스택 버퍼에 조립하는 데 맞습니다.
+
+<Note kind="warn">
+`std::ispanstream`에 `char` 배열을 그대로 주면 끝의 `'\0'`까지 입력에 들어갑니다. `const char text[] = "12 3.5 led";`로 만들어 읽으면 마지막 낱말이 `"led"`가 아니라 `'\0'`이 붙은 네 글자가 됩니다. 위처럼 `std::string_view`로 감싸 넘깁니다.
+</Note>
+
+## 언제 쓰나
+
+[「숫자와 문자열 바꾸기」](#/read/cpp-stl/str-convert)에서 스트림이 가장 느린 길이라고 했습니다. 정수 100만 개를 바꾸는 시간입니다(x86-64, GCC 14 `-O2`).
+
+| 숫자 → 문자열 | 시간 | 문자열 → 숫자 | 시간 |
+| --- | --- | --- | --- |
+| `ostringstream`을 매번 새로 | 80 ms | `istringstream`을 매번 새로 | 90 ms |
+| `ostringstream` 하나를 돌려 쓰기 | 25 ms | `istringstream` 하나를 돌려 쓰기 | 45 ms |
+| `std::format` | 24 ms | `std::stoi` | 14 ms |
+| `std::to_string` | 5 ms | `std::from_chars` | 8 ms |
+| `std::to_chars` | 3 ms | | |
+
+스트림을 만드는 일 자체가 비쌉니다. 만들 때마다 로캘을 붙들고 버퍼를 준비합니다. 그래서 고르는 기준은 이렇습니다.
+
+| 하려는 일 | 쓰는 것 |
+| --- | --- |
+| 값 몇 개로 문자열 만들기 | `std::format` |
+| 숫자 하나를 빠르게 바꾸기 | `std::to_chars`, `std::from_chars` |
+| 공백으로 나뉜 줄을 타입별로 읽기, 양이 많지 않다 | `std::istringstream` |
+| `operator<<`만 있는 타입을 문자열로 | `std::ostringstream` |
+| 힙 없이 고정 버퍼에 조립하기 | `std::ospanstream`, `std::format_to_n` |
+
+## 정리
+
+- `ostringstream`의 `str()`은 복사한다. 보기만 할 때는 `view()`, 꺼내 갈 때는 `std::move(out).str()`을 쓴다
+- 스트림을 돌려 쓸 때는 `clear()`와 `str()`을 함께 부른다. 끝까지 읽은 스트림은 내용을 갈아도 읽지 않는다
+- `spanstream`은 내가 준 버퍼 위에서 일하고, 차면 `badbit`를 켠다. 양이 많은 변환에는 스트림 대신 `to_chars`와 `from_chars`를 쓴다

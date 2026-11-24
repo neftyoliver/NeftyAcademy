@@ -1,0 +1,123 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '리플렉션: SPIR-V에서 바인딩·오프셋·입출력 읽기, SPIRV-Cross C API, 레이아웃 만들기와 구조체 맞추기';
+export const terms = [
+  'spvc_compiler', 'spvc_context', 'spvc_context_create', 'spvc_context_create_compiler',
+  'spvc_context_destroy', 'spvc_context_parse_spirv', 'spvc_parsed_ir', 'SpvDecorationBinding',
+  'SpvDecorationDescriptorSet', 'SpvDecorationLocation', 'SpvId',
+  'spvc_compiler_create_shader_resources', 'spvc_compiler_get_decoration',
+  'spvc_compiler_get_member_name', 'spvc_compiler_get_type_handle',
+  'spvc_compiler_type_struct_member_array_stride',
+  'spvc_compiler_type_struct_member_matrix_stride', 'spvc_compiler_type_struct_member_offset',
+  'spvc_reflected_resource', 'spvc_resource_type', 'spvc_resources',
+  'spvc_resources_get_resource_list_for_type', 'spvc_type', 'spvc_type_get_member_type',
+  'spvc_type_get_num_member_types', 'spvc_type_id',
+];
+
+SPIR-V에는 셰이더가 바깥과 주고받는 모든 것이 장식으로 적혀 있습니다. 어느 세트·바인딩에 어떤 종류의 리소스가 오는지, 블록 멤버의 오프셋과 배열 간격, 입출력의 location, 컴퓨트의 워크그룹 크기, 특수화 상수까지 읽어 낼 수 있습니다. 이것을 **리플렉션**이라 하고, 디스크립터 세트 레이아웃과 파이프라인 레이아웃을 손으로 쓰는 대신 셰이더에서 만들어 내거나, C++ 구조체가 블록과 맞는지 검사하는 데 씁니다. 아래 프로그램은 [「인터페이스 블록과 레이아웃」](#/read/cpp-vulkan/glsl-interface)의 블록들을 SPIRV-Cross의 C API로 읽습니다(scalar 블록은 세트 1로 옮겼습니다).
+
+```cpp vk pkg=spirv-cross-c-shared with=vkx_instance.hpp,vkx_device.hpp,vkx_pipeline.hpp
+#include <spirv_cross/spirv_cross_c.h>
+#include "vkx_pipeline.hpp"
+
+// 「인터페이스 블록과 레이아웃」의 셰이더에서 블록 부분
+const char* FS = R"(#version 450
+#extension GL_EXT_scalar_block_layout : require
+struct S { float a; vec3 b; float c; vec2 d[2]; mat3 m; float e; };
+layout(std140, binding = 0) uniform U { S s; } u140;
+layout(std430, binding = 1) readonly buffer B { S s; } b430;
+layout(scalar, set = 1, binding = 0) readonly buffer C { S s; } bsc;
+layout(location = 0) out vec4 o;
+void main() { o = vec4(u140.s.a + b430.s.e + bsc.s.m[1].x); })";
+
+// 블록 res 안의 구조체 S를 훑어 멤버마다 오프셋(과 배열·행렬 간격)을 찍는다
+void members(spvc_compiler comp, const spvc_reflected_resource& res) {
+    spvc_type block = spvc_compiler_get_type_handle(comp, res.base_type_id);
+    spvc_type_id s_id = spvc_type_get_member_type(block, 0);   // 블록의 멤버 s
+    spvc_type s = spvc_compiler_get_type_handle(comp, s_id);
+    for (unsigned i = 0; i < spvc_type_get_num_member_types(s); ++i) {
+        unsigned offset = 0, stride = 0;
+        spvc_compiler_type_struct_member_offset(comp, s, i, &offset);
+        const char* name = spvc_compiler_get_member_name(comp, s_id, i);
+        std::printf("  %s=%u", name, offset);
+        if (spvc_compiler_type_struct_member_array_stride(comp, s, i, &stride) ==
+            SPVC_SUCCESS)
+            std::printf("(간격 %u)", stride);
+        if (spvc_compiler_type_struct_member_matrix_stride(comp, s, i, &stride) ==
+            SPVC_SUCCESS)
+            std::printf("(열 간격 %u)", stride);
+    }
+    std::printf("\n");
+}
+
+int main() {
+    std::vector<uint32_t> spirv = vkx::compile(FS, shaderc_fragment_shader);
+    spvc_context ctx;
+    spvc_context_create(&ctx);
+    spvc_parsed_ir ir;
+    spvc_context_parse_spirv(ctx, spirv.data(), spirv.size(), &ir);
+    spvc_compiler comp;
+    spvc_context_create_compiler(ctx, SPVC_BACKEND_NONE, ir,
+                                 SPVC_CAPTURE_MODE_TAKE_OWNERSHIP, &comp);
+    spvc_resources res;
+    spvc_compiler_create_shader_resources(comp, &res);
+
+    // 종류마다 자원 목록을 받아, 장식에서 세트와 바인딩 번호를 읽는다
+    struct { spvc_resource_type type; const char* vk; } kinds[] = {
+        {SPVC_RESOURCE_TYPE_UNIFORM_BUFFER, "UNIFORM_BUFFER"},
+        {SPVC_RESOURCE_TYPE_STORAGE_BUFFER, "STORAGE_BUFFER"}};
+    for (auto kind : kinds) {
+        const spvc_reflected_resource* list;
+        size_t n;
+        spvc_resources_get_resource_list_for_type(res, kind.type, &list, &n);
+        for (size_t i = 0; i < n; ++i) {
+            SpvId id = list[i].id;
+            unsigned set =
+                spvc_compiler_get_decoration(comp, id, SpvDecorationDescriptorSet);
+            unsigned binding =
+                spvc_compiler_get_decoration(comp, id, SpvDecorationBinding);
+            std::printf("세트 %u 바인딩 %u: %s (블록 %s)\n", set, binding, kind.vk,
+                        list[i].name);
+            members(comp, list[i]);
+        }
+    }
+    const spvc_reflected_resource* outs;
+    size_t n;
+    spvc_resources_get_resource_list_for_type(res, SPVC_RESOURCE_TYPE_STAGE_OUTPUT,
+                                              &outs, &n);
+    for (size_t i = 0; i < n; ++i) {
+        unsigned loc =
+            spvc_compiler_get_decoration(comp, outs[i].id, SpvDecorationLocation);
+        std::printf("출력 location %u: %s\n", loc, outs[i].name);
+    }
+    spvc_context_destroy(ctx);   // 컴파일러와 IR도 함께 풀린다
+}
+```
+
+```text
+세트 0 바인딩 0: UNIFORM_BUFFER (블록 U)
+  a=0  b=16  c=28  d=32(간격 16)  m=64(열 간격 16)  e=112
+세트 0 바인딩 1: STORAGE_BUFFER (블록 B)
+  a=0  b=16  c=28  d=32(간격 8)  m=48(열 간격 16)  e=96
+세트 1 바인딩 0: STORAGE_BUFFER (블록 C)
+  a=0  b=4  c=16  d=20(간격 8)  m=36(열 간격 12)  e=72
+출력 location 0: o
+```
+
+- **같은 숫자**: 4.3에서 셰이더를 돌려 알아낸 오프셋을 리플렉션은 돌리지 않고 장식만 읽어 똑같이 내놓습니다. 배열 간격(std140은 16, 나머지는 8)과 행렬의 열 간격(scalar만 12)도 함께 나옵니다
+- **레이아웃 만들기**: 세트마다 바인딩과 종류를 모으면 `VkDescriptorSetLayoutBinding` 목록이 됩니다. 여기서는 세트 0에 UBO 하나와 SSBO 하나, 세트 1에 SSBO 하나입니다. 정점 셰이더와 프래그먼트 셰이더처럼 단계가 여럿이면 단계마다 읽은 결과를 합치고, 그 바인딩을 쓰는 단계들을 `stageFlags`에 적습니다
+- **구조체 맞추기**: 빌드 단계에서 리플렉션으로 C++ 헤더(구조체와 `static_assert(offsetof(...) == 오프셋)`)를 만들어 두면, 셰이더를 고쳤을 때 어긋남이 컴파일 오류로 드러납니다
+
+## 도구
+
+SPIRV-Cross는 리플렉션과 함께 GLSL·HLSL·MSL로 되돌리는 번역도 하는 라이브러리로, `spirv-cross 파일.spv --reflect`는 같은 내용을 JSON으로 냅니다. 리플렉션만 필요하면 더 가벼운 C 라이브러리 SPIRV-Reflect가 있고, Slang은 자체 리플렉션 API를 줍니다. 번역기는 쓰지 않는 리소스를 지울 수 있으므로, 리플렉션 결과는 원문이 아니라 실제로 남은 SPIR-V를 기준으로 합니다.
+
+<Note>
+리플렉션으로 레이아웃을 만들면 편하지만, 여러 셰이더가 같은 레이아웃을 함께 써야 파이프라인을 바꿀 때 세트를 다시 붙이지 않아도 됩니다. 그래서 큰 엔진은 "세트 0은 프레임 공용, 1은 재질, 2는 물체"처럼 규칙을 정해 두고, 리플렉션은 셰이더가 그 규칙을 지키는지 검사하는 데 쓰기도 합니다([「세트와 레이아웃」](#/read/cpp-vulkan/desc-sets)).
+</Note>
+
+## 정리
+
+- 리플렉션은 SPIR-V의 장식에서 세트·바인딩·종류, 블록 오프셋과 간격, 입출력 location 같은 인터페이스를 읽어 낸다
+- 그 결과로 디스크립터 세트 레이아웃과 파이프라인 레이아웃을 만들거나, C++ 구조체가 블록과 맞는지 검사한다
+- SPIRV-Cross(C API, `--reflect`), SPIRV-Reflect, Slang의 API가 있고, 단계가 여럿이면 결과를 합쳐 쓴다

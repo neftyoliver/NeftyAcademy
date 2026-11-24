@@ -1,0 +1,211 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '연산별 규칙 전부, 반복자와 포인터의 차이, 옮기고 바꿀 때, 죽지 않는 손잡이 만들기';
+
+[「반복자와 참조의 무효화」](#/read/cpp-syntax/ubc-invalidation)에서 "컨테이너를 고치면 그 안을 가리키던 것이 죽는다"는 것과 흔한 실수, 고치는 법을 보았습니다. 여기는 찾아보는 쪽입니다. 순차 컨테이너의 규칙을 연산별로 모으고, 규칙을 외우지 않아도 되게 하는 설계를 봅니다.
+
+## 셋을 나눠서 본다
+
+"가리키던 것"은 세 가지이고 규칙이 서로 다릅니다.
+
+| 가리키는 것 | 예 |
+| --- | --- |
+| 반복자 | `auto it = v.begin() + 2;` |
+| 포인터와 참조 | `int& r = v[2];`, `int* p = &v[2];` |
+| 끝 반복자 | `auto end = v.end();` |
+
+`vector`에서는 셋이 함께 죽고 삽니다. `deque`와 `unordered_map`에서는 **반복자만 죽고 포인터와 참조는 사는** 경우가 있습니다.
+
+## 연산별 규칙
+
+`vector`와 `string`:
+
+| 연산 | 죽는 것 |
+| --- | --- |
+| 넣기, 용량이 모자라 다시 할당됨 | 전부 |
+| 넣기, 용량 안 | 넣은 자리와 그 뒤. 끝 반복자도 |
+| `erase`, `pop_back` | 지운 자리와 그 뒤. 끝 반복자도 |
+| `reserve`(늘어날 때), `shrink_to_fit` | 전부 |
+| `clear`, `assign`, 대입 | 전부 |
+
+`deque`:
+
+| 연산 | 반복자 | 포인터와 참조 |
+| --- | --- | --- |
+| 양 끝에 넣기 | 전부 죽는다 | 모두 산다 |
+| 양 끝에서 빼기 | 뺀 원소의 것. 뒤에서 빼면 끝 반복자도 | 뺀 원소의 것만 |
+| 가운데에 넣기, 지우기 | 전부 죽는다 | 전부 죽는다 |
+
+`list`와 `forward_list`:
+
+| 연산 | 죽는 것 |
+| --- | --- |
+| 넣기, `splice`, `sort`, `merge` | 없다 |
+| 지우기 | 지운 원소의 것만 |
+
+`array`와 [`span`](#/read/cpp-stl/seq-span)은 크기가 바뀌지 않으므로 규칙이 없습니다. 연관 컨테이너의 규칙은 [「map과 set」](#/read/cpp-stl/assoc-map)과 [「unordered_map과 unordered_set」](#/read/cpp-stl/assoc-unordered)에서 봅니다.
+
+## 옮기고 바꿀 때
+
+컨테이너를 `std::move`하거나 `swap`하면 원소는 힙의 그 자리에 있고 **주인만 바뀝니다.** 가리키던 것은 살아 있고, 이제 새 주인의 원소를 가리킵니다.
+
+```cpp
+#include <print>
+#include <string>
+#include <utility>
+#include <vector>
+
+int main()
+{
+    std::vector<int> a = {1, 2, 3};
+    const int* in_a = &a[1];
+    std::vector<int> b = std::move(a);
+    std::println("vector 를 옮긴 뒤 같은 주소인가: {}", in_a == &b[1]);
+
+    std::string long_text(40, 'x');
+    const char* in_long = long_text.data();
+    std::string moved_long = std::move(long_text);
+    std::println("긴 string 을 옮긴 뒤:  {}", in_long == moved_long.data());
+
+    std::string short_text = "pi";
+    const char* in_short = short_text.data();
+    std::string moved_short = std::move(short_text);
+    std::println("짧은 string 을 옮긴 뒤: {}", in_short == moved_short.data());
+}
+```
+
+```text
+vector 를 옮긴 뒤 같은 주소인가: true
+긴 string 을 옮긴 뒤:  true
+짧은 string 을 옮긴 뒤: false
+```
+
+예외는 둘입니다. 짧은 `std::string`은 글자가 [객체 안에](#/read/cpp-stl/impl-sso) 있어서 옮기면 글자도 따라 옮겨집니다. `std::array`는 원소가 객체 자체이므로 `swap`이 원소를 하나하나 바꿉니다.
+
+## 끝 반복자를 들고 돌지 않기
+
+```cpp nocheck
+for (auto it = v.begin(), end = v.end(); it != end; ++it)   // end 를 미리 받아 둔다
+    if (*it < 0)
+        v.push_back(-*it);      // 다시 할당되지 않아도 end 는 이제 끝이 아니다
+```
+
+넣는 연산은 용량 안에서 끝나더라도 끝 반복자를 죽입니다. 돌면서 넣어야 하면 반복자 대신 첨자로 돌고, 처음의 `size()`를 따로 받아 둡니다.
+
+## 죽지 않는 손잡이
+
+규칙을 다 외워 조심하는 것보다, 죽을 수 없는 것을 손잡이로 쓰는 편이 낫습니다.
+
+| 손잡이 | 다른 원소를 넣고 지울 때 | 값 |
+| --- | --- | --- |
+| `vector`의 포인터, 반복자 | 죽는다 | 없음 |
+| `vector`의 첨자 | 넣을 때는 산다. 앞쪽을 지우면 밀린다 | 없음 |
+| `list`의 반복자 | 산다 | 노드마다 할당, 느린 순회 |
+| `vector<unique_ptr<T>>` 속 `T*` | 산다 | 원소마다 할당 |
+| 첨자와 세대 번호 | 산다. **죽은 손잡이도 알아챈다** | 칸마다 4바이트 |
+
+마지막 것이 게임 엔진과 장치 관리 코드에서 널리 쓰는 방법입니다. 칸을 다시 쓸 때마다 세대 번호를 올려서, 옛 손잡이가 새 주인을 잘못 가리키는 일을 막습니다.
+
+```cpp
+#include <cstdint>
+#include <print>
+#include <string>
+#include <utility>
+#include <vector>
+
+struct Handle {
+    std::uint32_t index;
+    std::uint32_t generation;
+};
+
+template <typename T>
+class SlotMap {
+public:
+    Handle insert(T value)
+    {
+        if (free_.empty()) {
+            slots_.push_back({std::move(value), 0, true});
+            return {static_cast<std::uint32_t>(slots_.size() - 1), 0};
+        }
+        const std::uint32_t index = free_.back();   // 비어 있던 칸을 다시 쓴다
+        free_.pop_back();
+        slots_[index].value = std::move(value);
+        slots_[index].alive = true;
+        return {index, slots_[index].generation};
+    }
+
+    void erase(Handle h)
+    {
+        if (get(h) == nullptr)
+            return;
+        slots_[h.index].alive = false;
+        ++slots_[h.index].generation;       // 이 칸의 옛 손잡이를 모두 죽인다
+        free_.push_back(h.index);
+    }
+
+    T* get(Handle h)
+    {
+        if (h.index >= slots_.size())
+            return nullptr;
+        Slot& slot = slots_[h.index];
+        const bool valid = slot.alive && slot.generation == h.generation;
+        return valid ? &slot.value : nullptr;
+    }
+
+private:
+    struct Slot {
+        T value;
+        std::uint32_t generation;
+        bool alive;
+    };
+    std::vector<Slot> slots_;
+    std::vector<std::uint32_t> free_;
+};
+
+int main()
+{
+    SlotMap<std::string> devices;
+    const Handle camera = devices.insert("camera");
+    const Handle sensor = devices.insert("sensor");
+    for (int i = 0; i < 100; ++i)
+        devices.insert("filler");           // 여러 번 다시 할당된다
+    std::println("{}", *devices.get(sensor));
+
+    devices.erase(camera);
+    const Handle display = devices.insert("display");   // camera 의 칸을 다시 쓴다
+    std::println("같은 칸인가: {}", camera.index == display.index);
+    const bool stale = devices.get(camera) == nullptr;
+    std::println("옛 손잡이: {}", stale ? "죽었다" : "산 것으로 보인다");
+    std::println("새 손잡이: {}", *devices.get(display));
+}
+```
+
+```text
+sensor
+같은 칸인가: true
+옛 손잡이: 죽었다
+새 손잡이: display
+```
+
+`get`이 돌려준 포인터는 그 자리에서 쓰고 버립니다. 보관하는 것은 `Handle`입니다. 원소는 여전히 `vector` 한 덩어리에 줄지어 있어서 차례로 돌 때 빠릅니다.
+
+<Note>
+C++26에는 "넣고 지워도 원소가 제자리에 있고, 지운 칸을 다시 쓰는" 컨테이너 `std::hive`가 들어옵니다. GCC 14에는 없습니다. 그 전에는 위와 같은 구조를 직접 만들거나 `std::list`, `std::deque`(끝에만 넣을 때)를 씁니다.
+</Note>
+
+## 잡아내기
+
+무효가 된 것을 쓰는 코드는 [조용히 돌아가는 일이 많습니다](#/read/cpp-syntax/ubc-invalidation). 도구 둘을 함께 씁니다.
+
+| 도구 | 잡는 것 |
+| --- | --- |
+| `-fsanitize=address` | 다시 할당되어 풀려난 메모리를 읽고 쓰는 것 |
+| `-D_GLIBCXX_DEBUG` | 죽은 반복자를 쓰는 것. 다시 할당되지 않았어도 잡는다 |
+
+둘째는 [「디버그 모드와 경화 모드」](#/read/cpp-stl/impl-debug)에서 다룹니다.
+
+## 정리
+
+- 반복자, 포인터·참조, 끝 반복자를 나눠서 본다. `deque`의 양 끝에 넣으면 반복자만 죽는다
+- 옮기고 바꾸면 원소는 제자리이고 주인만 바뀐다. 짧은 `string`과 `array`가 예외다
+- 오래 들고 있을 손잡이는 포인터가 아니라 첨자와 세대 번호, 또는 주소가 안정적인 컨테이너로 만든다

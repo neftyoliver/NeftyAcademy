@@ -1,0 +1,161 @@
+import { Figure, Note } from 'paragoniahex';
+import { Circuit } from '../../components/Circuit';
+import { Plot } from '../../components/Plot';
+import { Scope } from '../../components/Scope';
+import { bjtVc, bjtVin } from './data/dv-bjt-dc';
+import { relayBare, relayDiode } from './data/dv-bjt-relay';
+
+export const summary = '트랜지스터를 스위치로 쓴다. 베이스 전류와 포화, 입력에 따른 출력, 코일을 끌 때 치솟는 전압';
+export const terms = [];
+
+3.3V 핀이 직접 몰 수 없는 부하는 트랜지스터가 대신 켜고 끕니다. 시뮬레이터로 확인할 것은 둘입니다. 다 켜졌는가, 그리고 끌 때 무슨 일이 생기는가입니다.
+
+## 모델을 파일에 두기
+
+```spice file=2N3904.lib
+* 2N3904. Fairchild 데이터시트의 모델
+.model Q2N3904 NPN(IS=6.734f XTI=3
++ EG=1.11 VAF=74.03 BF=416.4 NE=1.259
++ ISE=6.734f IKF=66.78m XTB=1.5
++ BR=.7371 NC=2 ISC=0 IKR=0 RC=1
++ CJC=3.638p MJC=.3085 VJC=.75 FC=.5
++ CJE=4.493p MJE=.2593 VJE=.75
++ TR=239.5n TF=301.2p ITF=.4 VTF=4
++ XTF=2 RB=10)
+```
+
+- **트랜지스터의 모델은 숫자가 많다**: 종류는 `NPN`이고 숫자가 스물일곱 개입니다. 전류 증폭률의 위 끝(`BF`), 접합의 커패시턴스(`CJC`, `CJE`), 켜고 끄는 데 걸리는 시간(`TF`, `TR`) 같은 것들입니다. 하나하나 고칠 일은 없고, 제조사가 준 것을 그대로 씁니다
+- **파일에 따로 두고 `.include`로 부른다**: 위의 줄들을 `2N3904.lib`로 저장해 두면 넷리스트마다 `.include 2N3904.lib` 한 줄로 가져옵니다
+
+## 스위치 하나
+
+<Figure caption="3.3V 핀(in)이 5V에 물린 LED를 켜는 회로. 베이스 저항 R1이 베이스 전류를 정한다">
+  <Circuit spec="V 0,3 0,0 V1 5V; W 0,0 4,0; R 4,0 4,1 R2 150Ω; E 4,1 4,2 D1; Q 4,2 4,3 Q1; O 4,2 c; O 1.5,2.5 ^in; R 1.5,2.5 3.5,2.5 R1 4.7kΩ; W 4,3 0,3; G 0,3" label="5볼트 전원에서 150옴 저항 R2와 LED D1을 지나 트랜지스터 Q1의 컬렉터(마디 c)로 이어지고, 이미터는 접지에 닿으며, 입력 in이 4.7킬로옴 저항 R1을 거쳐 베이스로 들어가는 회로" />
+</Figure>
+
+```spice with=2N3904.lib
+NPN 스위치: 3.3V 핀으로 5V의 LED 켜기
+V1 vcc 0 5
+V2 in 0 3.3
+R1 in b 4.7k
+R2 vcc a 150
+D1 a c RED
+Q1 c b 0 Q2N3904
+.model RED D(IS=1e-18 N=1.9 RS=5)
+.include 2N3904.lib
+.op
+.end
+```
+
+```text
+$ ngspice -b switch.cir
+c           1.351982e-01
+b           7.555048e-01
+v1#branch   -1.94935e-02
+v2#branch   -5.41382e-04
+...
+device           q1
+ic        0.0194935
+ib      0.000541385
+vbe        0.750091
+```
+
+- **`Q1 컬렉터 베이스 이미터 모델이름`**: 마디를 이 차례로 적습니다
+- **베이스 전류가 컬렉터 전류를 허락한다**: 베이스로 0.54mA가 들어가고, 컬렉터로 19.5mA가 흐릅니다. 베이스 전류는 (3.3V − 0.75V) ÷ 4.7kΩ입니다. 핀이 내는 것은 이 0.54mA뿐입니다
+- **다 켜졌다**: 컬렉터의 전압 `c`가 0.135V입니다. 스위치가 닫힌 것처럼 거의 0V까지 내려왔습니다. 이 상태를 포화라고 합니다
+- **베이스 저항이 너무 크면 다 켜지지 않는다**: `R1`을 470kΩ으로 바꾸면 베이스 전류가 5.6µA로 줄고, 컬렉터 전류는 0.74mA, `c`는 3.2V가 됩니다. LED는 흐릿하고 트랜지스터는 어중간한 상태에 머뭅니다
+- **넉넉히 넣는다**: 데이터시트는 포화했을 때의 전압을, 베이스에 컬렉터 전류의 10분의 1을 넣은 조건으로 적어 둡니다. 스위치로 쓸 때는 그쯤을 넣는다는 뜻입니다. 위 회로는 36분의 1이지만 이 모델에서는 충분했습니다
+
+## 입력에 따른 출력
+
+<Figure caption="입력 전압을 0V에서 3.3V까지 올릴 때 컬렉터의 전압. 세로 점선은 0.8V와 2.0V">
+  <Plot x={bjtVin} xUnit="V" xName="입력 in" yUnit="V" yName="컬렉터 c" series={[{ name: 'c', data: bjtVc }]} vmarks={[{ at: 0.8, label: '0.8V' }, { at: 2.0, label: '2.0V' }]} />
+</Figure>
+
+```spice with=2N3904.lib
+NPN 스위치의 입력을 훑기
+V1 vcc 0 5
+V2 in 0 3.3
+R1 in b 4.7k
+R2 vcc a 150
+D1 a c RED
+Q1 c b 0 Q2N3904
+.model RED D(IS=1e-18 N=1.9 RS=5)
+.include 2N3904.lib
+.dc V2 0 3.3 0.01
+.meas dc c_at_04 FIND v(c) AT=0.4
+.meas dc v_half WHEN v(c)=2.5 FALL=1
+.meas dc c_at_20 FIND v(c) AT=2.0
+.end
+```
+
+```text
+$ ngspice -b switch-sweep.cir
+c_at_04 = 3.804596e+00
+v_half  = 8.45371e-01
+c_at_20 = 1.621474e-01
+```
+
+- **출력이 뒤집힌다**: 입력이 낮으면 컬렉터가 높고, 입력이 높으면 컬렉터가 낮습니다
+- **0.5V 아래에서는 꺼져 있다**: 입력이 0.4V일 때 `c`는 3.8V이고 LED에는 전류가 거의 흐르지 않습니다. LOW가 꼭 0V가 아니어도 꺼집니다
+- **0.85V 둘레에서 넘어간다**: `c`가 2.5V를 지나는 입력이 0.845V입니다. 2.0V에서는 0.16V로 다 켜져 있습니다
+- **문턱이 낮다는 것을 기억한다**: 디지털 핀의 LOW와 HIGH 사이(0.8V에서 2.0V)가 아니라 그 아래쪽 끝에서 넘어갑니다. 입력이 0.8V일 때 이미 3.4mA가 흘러 LED가 흐릿하게 켜집니다. 입력이 느리게 변하거나 잡음이 실리면 이 둘레에서 어중간한 상태가 됩니다
+
+## 코일을 끌 때
+
+<Figure caption="릴레이의 코일(L1과 R2)을 켜고 끄는 회로. 다이오드 D1을 코일과 나란히, 거꾸로 단다">
+  <Circuit spec="V 0,3 0,0 V1 5V; W 0,0 5,0; L 4,0 4,1 L1 50mH; R 4,1 4,2 R2 70Ω; Q 4,2 4,3 Q1; D 4,0; D 4,2; W 4,2 5,2; K 5,2 5,0 D1; O 1.5,2.5 ^in; R 1.5,2.5 3.5,2.5 R1 1kΩ; W 4,3 0,3; G 0,3" label="5볼트 전원에서 50밀리헨리 인덕터 L1과 70옴 저항 R2를 지나 트랜지스터 Q1의 컬렉터로 이어지고, 컬렉터에서 5볼트 쪽으로 다이오드 D1이 달려 있으며, 입력 in이 1킬로옴 저항 R1을 거쳐 베이스로 들어가는 회로" />
+</Figure>
+
+```spice with=2N3904.lib
+릴레이 코일을 끄는 순간: 다이오드 있음
+V1 vcc 0 5
+V2 in 0 PULSE(0 3.3 1m 1u 1u 4m 10m)
+R1 in b 1k
+L1 vcc x 50m
+R2 x c 70
+D1 c vcc D4148
+Q1 c b 0 Q2N3904
+.include 2N3904.lib
+.model D4148 D(IS=4.352n N=1.906
++ RS=0.6458 BV=110 IBV=0.0001
++ CJO=0.7048p VJ=0.869 M=0.03
++ FC=0.5 TT=3.48n)
+.tran 1u 8m 0 1u
+.meas tran i_on FIND i(L1) AT=4.9m
+.meas tran v_peak MAX v(c)
+.meas tran i_55 FIND i(L1) AT=5.5m
+.end
+```
+
+```text
+$ ngspice -b relay.cir
+i_on   = 6.845799e-02
+v_peak = 5.864309e+00 at= 5.001929e-03
+i_55   = 2.820633e-02
+```
+
+<Figure caption="5ms에 코일을 끄는 순간의 컬렉터 전압. CH1은 다이오드가 없을 때(한 칸이 1kV), CH2는 다이오드를 달았을 때(한 칸이 2V)">
+  <Scope tdiv={1e-4} dt={1e-6} t0={4.8e-3} traces={[{ name: 'CH1 다이오드 없음', data: relayBare, vdiv: 1000, pos: 0.5 }, { name: 'CH2 다이오드 있음', data: relayDiode, vdiv: 2, pos: -3.5 }]} />
+</Figure>
+
+- **인덕터는 전류가 갑자기 끊기는 것을 받아들이지 않는다**: 68mA가 흐르던 코일을 끄면, 그 전류가 갈 곳을 찾아 컬렉터의 전압을 밀어 올립니다
+- **다이오드가 없으면 2,849V까지 올라간다**: 위 넷리스트에서 `D1`의 줄만 빼고 돌린 결과입니다. 실제 2N3904가 견디는 전압은 40V이므로 그 전에 망가집니다. 모델에는 그 한계가 없어서 시뮬레이터는 숫자를 끝없이 키웁니다. 터무니없이 큰 전압이 나왔다면 부품이 견디지 못한다는 신호로 읽습니다
+- **다이오드를 달면 5.86V에서 멈춘다**: 전류는 다이오드를 지나 코일로 되돌아 돌면서 줄어듭니다. 0.5ms 뒤에도 28mA가 남아 있습니다. 코일의 전류가 천천히 줄기 때문에 릴레이가 떨어지는 시각도 그만큼 늦어집니다
+- **동작점으로는 보이지 않는다**: 이 일은 끄는 순간에만 일어납니다. 코일, 모터처럼 감긴 부하를 켜고 끄는 회로는 과도 해석으로 끄는 순간을 꼭 봅니다
+
+<Note>
+넷리스트 셋과 그림들은 ngspice 42로 돌린 결과이고, 베이스 저항을 470kΩ으로 바꾼 경우, 입력을 0.8V로 둔 경우, 다이오드를 뺀 경우도 따로 돌려 확인했습니다. 2N3904의 모델은 Fairchild의 데이터시트에 실린 것입니다. 데이터시트에는 `Ise=6.734`로 찍혀 있으나, 같은 모델을 다룬 로드아일랜드 대학의 글에 실린 값이 6.734E-15여서 `6.734f`로 적었습니다. 40V와 포화 전압의 조건은 그 데이터시트의 값입니다. LED의 모델, 코일의 50mH와 70Ω은 제가 고른 값입니다. 2,849V라는 숫자는 이 모델에서 나온 것일 뿐 실제로 잴 수 있는 값이 아닙니다. 그림의 바늘 같은 꼭대기를 놓치지 않도록, 화면의 점마다 그 구간에서 가장 큰 값을 그렸습니다.
+</Note>
+
+## 정리
+
+- `Q1 컬렉터 베이스 이미터 모델`로 적는다. 스위치로 쓸 때는 컬렉터의 전압이 0V 가까이 내려왔는지, 곧 포화했는지를 동작점에서 확인한다
+- 베이스 전류가 모자라면 다 켜지지 않는다. 입력을 훑어 보면 어느 전압에서 넘어가는지가 보인다
+- 코일을 끄는 순간에는 전압이 치솟는다. 다이오드를 나란히 달고, 과도 해석으로 끄는 순간을 확인한다
+
+## 참고 문서
+
+- [Fairchild Semiconductor: 2N3904 / MMBT3904 / PZT3904 NPN General Purpose Amplifier(SPICE 모델의 숫자들, 견디는 전압, 포화 전압을 잰 조건)](https://web.ece.ucsb.edu/~ilan/Classes/ECE2A_F2010/Labs/Datasheets/2n3904.pdf)
+- [University of Rhode Island ELE443: The 2N3904 SPICE model(PSpice 라이브러리에 실린 같은 모델의 값, 낮은 전류에서 증폭률이 낮게 나오는 까닭)](https://www.ele.uri.edu/Courses/ele443/tutorials/q2n3904.model/)
+- [Nexperia: 1N4148 SPICE model(코일에 단 다이오드의 모델)](https://assets.nexperia.com/documents/spice-model/1N4148.txt)

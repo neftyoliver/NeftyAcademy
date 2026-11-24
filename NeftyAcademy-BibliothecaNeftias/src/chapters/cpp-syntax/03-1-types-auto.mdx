@@ -1,0 +1,123 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '타입 추론, 참조와 const가 떨어지는 규칙, decltype';
+export const terms = ['~decltype'];
+
+`auto`는 "이 변수의 타입은 오른쪽 식을 보고 컴파일러가 정하라"는 뜻입니다. 실행 중에 타입이 바뀌는 것이 아닙니다. 컴파일할 때 한 번 정해지고, 그 뒤로는 직접 적은 것과 똑같습니다.
+
+## 기본
+
+```cpp nocheck
+auto count = 42;                    // int
+auto ratio = 0.5;                   // double
+auto name = std::string("led");     // std::string
+auto it = names.begin();            // std::vector<std::string>::iterator
+```
+
+마지막 줄이 `auto`의 쓸모를 보여 줍니다. 타입 이름이 길거나, 아예 적을 수 없는 경우(람다)에 꼭 필요합니다. 초기값이 없으면 추론할 것이 없으므로 `auto x;`는 오류입니다.
+
+## 참조와 const는 떨어진다
+
+```cpp
+#include <print>
+#include <string>
+#include <type_traits>
+#include <vector>
+
+int main()
+{
+    std::vector<std::string> names = {"led", "button"};
+
+    auto copy = names[0];           // std::string: 복사
+    auto& ref = names[0];           // std::string&: 그 칸 자체
+    const auto& view = names[1];    // const std::string&: 읽기만
+
+    copy += "-1";
+    ref += "-2";
+    std::println("{} {} {}", names[0], copy, view);
+
+    auto text = "abc";              // const char*. std::string이 아니다
+    std::println("{}", std::is_same_v<decltype(text), const char*>);
+
+    decltype(names.size()) n = 0;   // names.size()가 돌려주는 바로 그 타입
+    std::println("{}", std::is_same_v<decltype(n), std::size_t>);
+}
+```
+
+```text
+led-2 led-1 button
+true
+true
+```
+
+`names[0]`은 `std::string&`을 돌려주지만 `auto copy`는 `std::string`이 됩니다. <strong>`auto`만 쓰면 값(복사본)</strong>이고, 참조를 원하면 `auto&`, 읽기만 하려면 `const auto&`라고 적어야 합니다.
+
+| 적은 것 | 오른쪽이 `const std::string&`일 때의 타입 |
+| --- | --- |
+| `auto x` | `std::string` (복사, const도 떨어진다) |
+| `auto& x` | `const std::string&` |
+| `const auto& x` | `const std::string&` |
+| `auto* p` | 오른쪽이 포인터일 때만. 포인터임을 드러낸다 |
+
+## 헷갈리는 경우
+
+| 코드 | 추론되는 타입 | 까닭 |
+| --- | --- | --- |
+| `auto s = "abc";` | `const char*` | 문자열 상수는 `std::string`이 아니다 |
+| `auto n = v.size();` | `std::size_t` | 부호가 없다. `n - 1`이 음수가 되지 않는다 |
+| `auto x = {1, 2};` | `std::initializer_list<int>` | 중괄호 목록의 특별 규칙 |
+| `auto b = 3'000'000'000;` | `long` (64비트 리눅스) | `int`에 안 들어가면 큰 타입이 된다 |
+
+## 함수의 반환 타입
+
+```cpp
+#include <print>
+
+auto area(double w, double h) { return w * h; }     // return 문에서 추론
+
+auto ratio(int a, int b) -> double                   // 뒤에 적는 반환 타입
+{
+    return static_cast<double>(a) / b;
+}
+
+int main()
+{
+    std::println("{} {}", area(2, 3), ratio(1, 4));
+}
+```
+
+```text
+6 0.25
+```
+
+`-> double`은 반환 타입을 인자 목록 뒤에 적는 문법입니다. 뜻은 앞에 적는 것과 같고, 반환 타입이 인자에 따라 정해지는 템플릿과 람다에서 주로 씁니다.
+
+## decltype
+
+`decltype(식)`은 식을 계산하지 않고 그 타입만 알려 줍니다. "저 변수와 같은 타입", "저 함수가 돌려주는 타입"이라고 말하고 싶을 때 씁니다. `auto`와 달리 참조와 `const`를 그대로 보존합니다.
+
+```cpp nocheck
+int x = 0;
+const int& r = x;
+auto a = r;             // int
+decltype(r) b = x;      // const int&
+decltype(auto) c = r;   // const int& (auto처럼 쓰되 decltype의 규칙으로)
+```
+
+## 언제 쓰고 언제 안 쓰나
+
+| 쓴다 | 안 쓴다 |
+| --- | --- |
+| 오른쪽에 타입이 이미 보인다: `auto p = std::make_unique<Sensor>();` | 오른쪽만 봐서는 타입을 알 수 없다: `auto x = compute();` |
+| 타입 이름이 길다: 반복자, 람다 | 타입 변환을 의도했다: `double d = count;` |
+| 범위 기반 for: `for (const auto& item : items)` | 폭이 중요한 정수: `std::uint8_t reg = 0x1f;` |
+
+<Note kind="tip">
+`auto`를 쓴 변수의 타입이 궁금하면 IDE에서 마우스를 올려 보세요. 컴파일러에게 물으려면 일부러 틀린 대입(`int* check = x;`)을 적어 오류 메시지를 읽는 방법도 있습니다.
+</Note>
+
+## 정리
+
+- `auto`는 컴파일할 때 정해지는 타입 추론. 초기값이 있어야 한다
+- `auto`는 값, `auto&`는 참조, `const auto&`는 읽기 전용 참조
+- `decltype(식)`은 식의 타입을 참조와 `const`까지 그대로 가져온다

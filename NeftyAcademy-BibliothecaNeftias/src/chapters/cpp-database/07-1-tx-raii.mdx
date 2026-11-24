@@ -1,0 +1,171 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'RAII 트랜잭션: 소멸자가 되돌리는 Tx, 커밋은 명시적으로, 저장점으로 중첩, PostgreSQL의 중단 상태';
+export const terms = [
+  'ExecStatusType', 'pqxx::robusttransaction', 'pqxx::subtransaction', 'soci::transaction',
+];
+
+`BEGIN`과 `COMMIT`, `ROLLBACK`을 손으로 짝지으면, 함수가 중간에 돌아가거나 예외가 나는 길마다 `ROLLBACK`을 빠뜨리기 쉽습니다. 열린 채 남은 트랜잭션은 잠금을 쥔 채 풀로 돌아가 다음 사람에게까지 번집니다([「연결 풀」](#/read/cpp-database/pool-pool)). 파일이나 뮤텍스처럼 트랜잭션도 객체의 수명에 묶으면, 빠져나가는 길이 몇 개든 정리가 한 곳에서 일어납니다.
+
+## 트랜잭션을 객체로
+
+`Tx`는 생성자에서 `BEGIN`하고, `commit()`을 불러야만 커밋하며, 그러지 않고 사라지면 소멸자가 `ROLLBACK`합니다. 이미 트랜잭션 안인 연결에서 `Tx`를 또 만들면 `BEGIN` 대신 저장점(`SAVEPOINT`)을 만들어 중첩을 흉내 냅니다. 몇 겹 안인지는 연결과 함께 다니는 `Conn::depth`가 셉니다.
+
+```cpp pkg=libpq
+#include <libpq-fe.h>
+#include <cstdio>
+#include <stdexcept>
+#include <string>
+
+struct DbError : std::runtime_error {
+    std::string state;
+    DbError(const char* s, const char* msg)
+        : std::runtime_error(msg), state(s ? s : "") {}
+};
+
+struct Conn {
+    PGconn* raw;
+    int depth = 0;                               // 지금 몇 겹의 트랜잭션 안인가
+};
+
+void exec(Conn& c, const std::string& sql) {    // 실패하면 SQLSTATE를 담아 던진다
+    PGresult* r = PQexec(c.raw, sql.c_str());
+    ExecStatusType st = PQresultStatus(r);
+    if (st != PGRES_COMMAND_OK && st != PGRES_TUPLES_OK) {
+        DbError e(PQresultErrorField(r, PG_DIAG_SQLSTATE),
+                  PQresultErrorField(r, PG_DIAG_MESSAGE_PRIMARY));
+        PQclear(r);
+        throw e;
+    }
+    PQclear(r);
+}
+
+// 바깥은 BEGIN, 안쪽은 SAVEPOINT. commit()을 부르지 않고 사라지면 되돌린다
+class Tx {
+public:
+    explicit Tx(Conn& c) : c_(c), name_("sp" + std::to_string(c.depth)) {
+        exec(c_, c_.depth == 0 ? "BEGIN" : "SAVEPOINT " + name_);
+        nested_ = c_.depth++ > 0;
+    }
+    Tx(const Tx&) = delete;
+    Tx& operator=(const Tx&) = delete;
+    void commit() {
+        done_ = true;                            // 커밋이 실패해도 끝난 것으로 본다
+        --c_.depth;
+        exec(c_, nested_ ? "RELEASE SAVEPOINT " + name_ : "COMMIT");
+    }
+    ~Tx() {
+        if (done_) return;
+        --c_.depth;
+        try {                                    // 소멸자는 던지지 않는다
+            if (nested_) {
+                exec(c_, "ROLLBACK TO SAVEPOINT " + name_);
+                exec(c_, "RELEASE SAVEPOINT " + name_);
+            } else {
+                exec(c_, "ROLLBACK");
+            }
+        } catch (const DbError&) {
+        }
+    }
+
+private:
+    Conn& c_;
+    std::string name_;
+    bool nested_ = false, done_ = false;
+};
+
+std::string one(Conn& c, const char* sql) {
+    PGresult* r = PQexec(c.raw, sql);
+    std::string v = PQntuples(r) > 0 ? PQgetvalue(r, 0, 0) : "";
+    PQclear(r);
+    return v;
+}
+
+int main() {
+    Conn c{PQconnectdb("host=localhost dbname=academy user=academy "
+                       "password=academy")};
+    exec(c, "SET client_min_messages = warning");
+    exec(c, "DROP TABLE IF EXISTS tx_lines, tx_orders");
+    exec(c, "CREATE TABLE tx_orders (id int PRIMARY KEY, note text)");
+    exec(c, "CREATE TABLE tx_lines (order_id int REFERENCES tx_orders "
+            "DEFERRABLE INITIALLY DEFERRED, qty int)");
+    const char* list = "SELECT coalesce(string_agg(id || ' ' || note, ', ' "
+                       "ORDER BY id), '없음') FROM tx_orders";
+
+    try {                                        // 1. 커밋 전에 예외가 나면
+        Tx tx(c);
+        exec(c, "INSERT INTO tx_orders VALUES (1, '볼트')");
+        throw std::runtime_error("계산 중 예외");
+        tx.commit();
+    } catch (const std::exception& e) {
+        std::printf("예외: %s → 주문 %s, 트랜잭션 밖: %s\n", e.what(),
+                    one(c, list).c_str(),
+                    PQtransactionStatus(c.raw) == PQTRANS_IDLE ? "예" : "아니오");
+    }
+
+    {                                            // 2. 안쪽 실패는 저장점까지만
+        Tx outer(c);
+        exec(c, "INSERT INTO tx_orders VALUES (1, '볼트')");
+        try {
+            Tx inner(c);                         // SAVEPOINT sp1
+            exec(c, "INSERT INTO tx_orders VALUES (1, '중복')");
+            inner.commit();
+        } catch (const DbError& e) {
+            std::printf("안쪽 실패 %s, 바깥은 계속\n", e.state.c_str());
+        }
+        exec(c, "INSERT INTO tx_orders VALUES (2, '너트')");
+        outer.commit();
+        std::printf("  주문 %s\n", one(c, list).c_str());
+    }
+
+    try {                                        // 3. 저장점 없이 같은 실패를 하면
+        Tx tx(c);
+        try {
+            exec(c, "INSERT INTO tx_orders VALUES (1, '중복')");
+        } catch (const DbError& e) {
+            std::printf("저장점 없이 실패 %s, ", e.state.c_str());
+        }
+        exec(c, "INSERT INTO tx_orders VALUES (3, '와셔')");
+        tx.commit();
+    } catch (const DbError& e) {
+        std::printf("다음 문장도 %s\n", e.state.c_str());
+    }
+
+    try {                                        // 4. 커밋도 실패할 수 있다
+        Tx tx(c);
+        exec(c, "INSERT INTO tx_lines VALUES (99, 5)");   // 없는 주문, 커밋 때 검사
+        std::printf("미룬 외래 키: INSERT 통과, ");
+        tx.commit();
+    } catch (const DbError& e) {
+        std::printf("COMMIT에서 %s, 깊이 %d\n", e.state.c_str(), c.depth);
+    }
+    PQfinish(c.raw);
+}
+```
+
+```text
+예외: 계산 중 예외 → 주문 없음, 트랜잭션 밖: 예
+안쪽 실패 23505, 바깥은 계속
+  주문 1 볼트, 2 너트
+저장점 없이 실패 23505, 다음 문장도 25P02
+미룬 외래 키: INSERT 통과, COMMIT에서 23503, 깊이 0
+```
+
+- **예외에도 되돌린다**: 커밋 전에 예외가 나자 소멸자가 `ROLLBACK`해서 주문이 남지 않았고, 연결도 트랜잭션 밖으로 돌아왔습니다
+- **커밋은 소멸자에서 하지 않는다**: 마지막 경우처럼 `COMMIT`도 실패할 수 있습니다. 미뤄 둔(DEFERRABLE INITIALLY DEFERRED) 외래 키는 커밋할 때 검사되어 23503이 났습니다. 소멸자는 예외를 던질 수 없으므로, 소멸자에서 커밋하면 이런 실패를 알릴 길이 없습니다. 그래서 커밋은 `commit()`으로 드러나게 하고 소멸자는 되돌리기만 합니다. 커밋이 실패하면 서버가 이미 트랜잭션을 되돌렸으므로, `commit()`은 실행 전에 끝난 것으로 표시해 둡니다
+- **저장점으로 중첩**: 안쪽 `Tx`는 `SAVEPOINT sp1`이 되고, 안쪽이 실패하자 소멸자가 `ROLLBACK TO SAVEPOINT`와 `RELEASE SAVEPOINT`로 그 뒤만 되돌렸습니다. 바깥 트랜잭션은 이어져서 볼트와 너트가 모두 저장되었습니다
+- **PostgreSQL의 중단 상태**: 저장점 없이 실패한 트랜잭션에서는 다음 문장이 25P02로 거절되었습니다. PostgreSQL은 오류가 난 트랜잭션을 끝날 때까지 받아 주지 않으므로([「트랜잭션과 격리 수준」](#/read/cpp-database/db-transactions)), 트랜잭션 안에서 실패를 견디려면 저장점이 있어야 합니다. SQLite는 대부분의 오류에서 실패한 문장만 되돌리고 트랜잭션은 이어 갑니다([「트랜잭션」](#/read/cpp-database/sqlite-tx))
+
+## 라이브러리의 트랜잭션 객체
+
+라이브러리들도 같은 모양을 제공합니다. libpqxx의 `pqxx::work`는 `commit()` 없이 사라지면 되돌리고, `pqxx::subtransaction`은 저장점으로 안쪽 트랜잭션을 만듭니다. SOCI의 `soci::transaction`도 `commit()`이나 `rollback()`을 부르지 않으면 소멸자가 되돌립니다. 저장점은 공짜가 아니어서, PostgreSQL에서 한 트랜잭션에 저장점을 아주 많이 만들면 서브트랜잭션을 추적하는 비용이 커집니다. 행마다 저장점을 두기보다 실패를 견뎌야 하는 단위에만 둡니다.
+
+<Note>
+libpqxx의 `pqxx::robusttransaction`은 커밋하는 도중에 연결이 끊긴 경우를 다룹니다. 이때 클라이언트는 서버가 커밋을 마쳤는지 알 수 없는데([「재연결과 타임아웃」](#/read/cpp-database/pool-reconnect)), robusttransaction은 다시 연결해 그 트랜잭션이 어떻게 되었는지 알아봅니다. 그만큼 느리므로 꼭 필요한 곳에 씁니다.
+</Note>
+
+## 정리
+
+- 트랜잭션을 객체로 감싸 생성자에서 시작하고 소멸자에서 되돌리면, 예외나 이른 반환에도 열린 트랜잭션이 남지 않는다
+- 커밋은 실패할 수 있고 소멸자는 던질 수 없으므로, 커밋은 명시적인 commit()으로 하고 소멸자는 되돌리기만 한다
+- 안쪽 트랜잭션은 저장점으로 만들어 실패를 그 범위에서 되돌리며, PostgreSQL에서 트랜잭션 안의 실패를 견디는 방법은 저장점뿐이다

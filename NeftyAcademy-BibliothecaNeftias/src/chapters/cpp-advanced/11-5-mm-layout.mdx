@@ -1,0 +1,165 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '루프가 읽는 바이트 가운데 쓸모 있는 비율. 나눠 담기와 멤버별 배열을 재고, 배치를 들여다보는 도구';
+
+[채움 바이트와 멤버 순서](#/read/cpp-syntax/life-alignment)에서 구조체가 메모리에 놓이는 규칙을 봤습니다. 여기서는 그 배치가 **속도**에 어떻게 닿는지를 봅니다. 물음은 하나입니다. 루프가 메모리에서 읽어 오는 바이트 가운데, 그 루프가 실제로 쓰는 것이 얼마인가.
+
+## 같은 데이터, 세 가지 배치
+
+```cpp
+#include <cstddef>
+#include <cstdint>
+#include <print>
+#include <vector>
+
+// 1. 한 덩어리: 자주 쓰는 것과 드물게 쓰는 것이 함께 있다
+struct Particle {
+    double x, y, z;
+    double vx, vy, vz;
+    char name[40];
+    std::uint64_t created;
+    std::uint32_t color;
+    std::uint32_t flags;
+};
+
+// 2. 나눠 담기: 루프가 만지는 것만 따로 모은다
+struct Motion {
+    double x, y, z;
+    double vx, vy, vz;
+};
+struct Details {
+    char name[40];
+    std::uint64_t created;
+    std::uint32_t color;
+    std::uint32_t flags;
+};
+
+// 3. 멤버별 배열: 같은 멤버끼리 붙여 둔다
+struct Particles {
+    std::vector<double> x, y, z;
+    std::vector<double> vx, vy, vz;
+    std::vector<Details> details;
+};
+
+double sum_x(const std::vector<Particle>& all)
+{
+    double sum = 0;
+    for (const Particle& p : all)
+        sum += p.x;   // 104바이트마다 8바이트만 읽는다
+    return sum;
+}
+double sum_x(const std::vector<Motion>& all)
+{
+    double sum = 0;
+    for (const Motion& m : all)
+        sum += m.x;   // 48바이트마다 8바이트
+    return sum;
+}
+double sum_x(const Particles& all)
+{
+    double sum = 0;
+    for (double x : all.x)
+        sum += x;     // 읽는 것이 모두 쓸 데이터다
+    return sum;
+}
+
+int main()
+{
+    const std::size_t count = 1000;
+    std::vector<Particle> whole(count);
+    std::vector<Motion> motions(count);
+    Particles columns;
+    columns.x.resize(count);
+    for (std::size_t i = 0; i < count; ++i)
+        whole[i].x = motions[i].x = columns.x[i] = 0.5 * static_cast<double>(i);
+
+    std::println("한 덩어리 {}바이트, 자주 쓰는 것만 {}바이트, 멤버 하나 {}바이트",
+                 sizeof(Particle), sizeof(Motion), sizeof(double));
+    std::println("캐시 줄 하나(64바이트)에 x가 {:.1f}개, {:.1f}개, {}개",
+                 64.0 / sizeof(Particle), 64.0 / sizeof(Motion),
+                 64 / sizeof(double));
+    std::println("합 {} {} {}", sum_x(whole), sum_x(motions), sum_x(columns));
+}
+```
+
+```text
+한 덩어리 104바이트, 자주 쓰는 것만 48바이트, 멤버 하나 8바이트
+캐시 줄 하나(64바이트)에 x가 0.6개, 1.3개, 8개
+합 249750 249750 249750
+```
+
+메모리는 [캐시 줄](#/read/cpp-advanced/thr-hardware) 단위로 읽힙니다. `x` 하나를 읽으면 그 옆의 56바이트도 함께 딸려 옵니다. 한 덩어리로 두면 딸려 온 것이 이름과 색 같은, 이 루프가 쓰지 않는 바이트입니다. 멤버별 배열이면 딸려 온 것이 **다음에 읽을 `x` 일곱 개**입니다.
+
+| 배치 | 흔한 이름 | 한 줄에 든 쓸모 있는 것 |
+| --- | --- | --- |
+| 한 덩어리 | 구조체의 배열(AoS) | `x` 하나가 못 된다 |
+| 나눠 담기 | 뜨거운 것과 찬 것 가르기 | `x` 하나 남짓 |
+| 멤버별 배열 | 배열의 구조체(SoA) | `x` 여덟 |
+
+## 잰 값
+
+원소 하나에 든 시간입니다. x86-64, GCC 14, `-O2`입니다.
+
+| 하는 일 | 한 덩어리 | 나눠 담기 | 멤버별 배열 |
+| --- | --- | --- | --- |
+| `x`만 더한다. 1,000개 | 0.52 ns | 0.57 ns | 0.55 ns |
+| `x`만 더한다. 100만 개 | 3.9 ns | 2.2 ns | 0.57 ns |
+| 위치를 속도만큼 옮긴다. 1,000개 | 1.4 ns | 1.0 ns | 0.86 ns |
+| 위치를 속도만큼 옮긴다. 100만 개 | 6.4 ns | 2.3 ns | 2.0 ns |
+
+- **데이터가 캐시에 다 들어가면 배치는 상관없습니다.** 1,000개에서는 셋이 같습니다.
+- **넘치면 배치가 값을 정합니다.** 100만 개의 한 덩어리는 104 MB입니다. `x`만 더하는데도 그것을 다 읽어 들이고, 멤버별 배열의 **일곱 배**가 듭니다.
+- **멤버를 여럿 쓰면 차이가 줍니다.** 여섯 멤버를 다 쓰는 루프에서는 나눠 담기만으로 멤버별 배열에 가깝습니다. 쓰지 않는 56바이트를 떼어 낸 것으로 충분했습니다.
+
+Clang 20에서도 같은 비율이었습니다. 먼저 물을 것은 "데이터가 캐시보다 큰가"이고, 크다면 "안쪽 루프가 원소의 몇 퍼센트를 쓰는가"입니다.
+
+## 고르기
+
+| 배치 | 맞는 때 | 치르는 것 |
+| --- | --- | --- |
+| 한 덩어리 | 원소 하나의 멤버를 **함께** 쓴다. 원소를 하나씩 찾아가 다룬다 | 일부만 훑는 루프가 느리다 |
+| 나눠 담기 | 훑는 루프가 쓰는 멤버가 정해져 있고 나머지는 드물게 쓴다 | 같은 번호로 묶인 배열 둘을 맞춰 관리한다 |
+| 멤버별 배열 | 멤버 한둘을 수없이 훑는다. [SIMD](#/read/cpp-advanced/perf-simd)를 쓴다 | 원소 하나를 넣고 빼고 넘기기가 번거롭다. 원소 하나의 멤버들이 여러 캐시 줄에 흩어진다 |
+
+마지막 값을 놓치기 쉽습니다. 번호 하나를 받아 그 원소의 멤버 여섯을 다 읽는 코드라면, 멤버별 배열은 캐시 줄 여섯을 건드리고 한 덩어리는 둘이면 됩니다. **훑는가, 찾아가는가**가 기준입니다.
+
+## 작게 만드는 것의 값
+
+| 줄이는 방법 | 줄어드는 것 | 잰 것 |
+| --- | --- | --- |
+| [큰 멤버부터 적는다](#/read/cpp-syntax/life-alignment) | 채움 바이트. 예제의 구조체가 32바이트에서 16바이트로 | 값을 치르지 않는다 |
+| 포인터 대신 값을 안에 둔다 | 포인터 8바이트와 따라가는 한 번 | [가상 함수 쪽의 7 ns와 `variant`의 2.6 ns](#/read/cpp-advanced/te-compare) |
+| `bool` 넷을 비트 필드로 | 4바이트가 1바이트로 | 4,096개: 뒤집기가 0.15 ns에서 0.40 ns로 **느려진다.** 1,600만 개: 읽기가 0.63 ns에서 0.37 ns로 빨라진다 |
+| 64비트 번호 대신 32비트 번호 | 포인터나 `size_t`의 절반 | 재지 않았다 |
+
+비트 필드의 줄이 이 페이지의 요약입니다. 비트를 고치려면 읽고, 가리고, 다시 써야 해서 그 자체는 느립니다. 그런데 데이터가 캐시보다 커지면 **작다는 것**이 그 값을 이깁니다.
+
+## 배치를 들여다보는 도구
+
+```text nocheck
+$ clang++ -std=c++23 -fsyntax-only -Xclang -fdump-record-layouts sample.cpp
+*** Dumping AST Record Layout
+         0 | struct Loose
+         0 |   _Bool active
+         8 |   std::uint64_t stamp
+        16 |   std::uint8_t channel
+        20 |   float value
+        24 |   _Bool dirty
+           | [sizeof=32, dsize=32, align=8,
+```
+
+| 도구 | 알려 주는 것 |
+| --- | --- |
+| Clang의 `-Xclang -fdump-record-layouts` | 멤버마다의 자리와 전체 크기. 위의 출력 |
+| GCC의 `-Wpadded` | 채움이 들어간 자리마다 경고. `padding struct to align 'Loose::stamp'` |
+| `static_assert(sizeof(T) == 16)`, `offsetof` | 정한 배치가 바뀌면 컴파일이 멈춘다 |
+
+<Note>
+어느 배치가 맞는지는 재 봐야 압니다. 캐시 크기에 따른 변화, 순서대로 읽기와 건너뛰며 읽기의 차이는 [「캐시와 자료 배치」](#/read/cpp-advanced/perf-cache)에서 이어서 잽니다. 여러 스레드가 같은 캐시 줄을 고칠 때의 일은 [거짓 공유](#/read/cpp-advanced/atm-false-sharing)에서 봤습니다.
+</Note>
+
+## 정리
+
+- 루프가 읽어 오는 캐시 줄에 그 루프가 쓰는 데이터가 얼마나 들었는지가 속도를 정한다
+- 데이터가 캐시보다 크면 `x`만 더하는 루프에서 한 덩어리 3.9 ns, 나눠 담기 2.2 ns, 멤버별 배열 0.57 ns였다. 캐시에 들어가면 같다
+- 훑는 일이 많으면 나눠 담거나 멤버별로, 원소를 찾아가 통째로 쓰면 한 덩어리로 둔다

@@ -1,0 +1,226 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'CAN과 CANopen: 우선순위 중재, 프레임, COB-ID, 객체 사전, SDO와 PDO, NMT, 리눅스 SocketCAN';
+export const terms = ['can_filter', 'can_frame', 'sockaddr_can'];
+
+CAN(컨트롤러 영역 네트워크)은 원래 자동차 안의 전자 장치들을 잇기 위해 1980년대에 만들어진 버스입니다. 선 두 가닥으로 여러 장치를 잇고 잡음에 강하며 칩이 싸서, 서보 드라이브, 엔코더, 의료 기기, 엘리베이터까지 퍼졌습니다. CAN은 "짧은 메시지를 우선순위대로 보내는" 일만 정하고, 메시지의 뜻은 위의 프로토콜이 정합니다. 산업 자동화에서 그 역할을 가장 많이 하는 것이 **CANopen**입니다.
+
+## CAN의 핵심: 우선순위 중재
+
+고전 CAN 프레임은 11비트 ID와 최대 8바이트 데이터, 그리고 CRC로 되어 있습니다(최대 1Mbit/s). 받는 쪽 주소는 없습니다. 모든 장치가 모든 프레임을 보고, ID를 보고 자기에게 필요한지 판단합니다.
+
+여러 장치가 동시에 보내기 시작하면 **비트 단위 중재**가 일어납니다. 버스에서는 0(우성)이 1(열성)을 이기므로, 장치들은 ID를 높은 비트부터 내보내다가 자기는 1을 보냈는데 버스에 0이 보이면 즉시 물러납니다. 결국 ID가 가장 작은 프레임이 아무 손실 없이 끝까지 전송됩니다. ID가 곧 우선순위이므로, 급한 메시지에 작은 ID를 줍니다.
+
+## CANopen 노드와 말하기
+
+CAN 버스와 CANopen 노드(서보 드라이브라고 칩니다) 하나를 흉내 내어, 마스터가 노드를 설정하고 운전시키는 과정을 candump와 비슷한 모양으로 찍었습니다.
+
+```cpp
+// CAN 버스와 CANopen 노드 하나를 흉내 낸다: 중재, NMT, SDO, SYNC와 PDO
+#include <array>
+#include <cstdint>
+#include <cstdio>
+#include <map>
+#include <utility>
+#include <vector>
+
+// 고전 CAN 프레임: 11비트 ID, 최대 8바이트
+struct Frame {
+    uint16_t id;
+    uint8_t len;
+    std::array<uint8_t, 8> d{};
+};
+
+void dump(const Frame& f, const char* note) {    // candump와 비슷한 모양으로
+    std::printf("  %03X  [%u] ", f.id, f.len);
+    for (int i = 0; i < 8; ++i)
+        i < f.len ? std::printf(" %02X", f.d[i]) : std::printf("   ");
+    std::printf("  %s\n", note);
+}
+
+// 같은 순간에 보내려는 프레임들: ID를 높은 비트부터 한 비트씩 내보낸다.
+// 버스는 0(우성)이 1(열성)을 이긴다. 1을 보냈는데 0이 보이면 물러난다.
+std::vector<Frame> arbitrate(std::vector<Frame> want) {
+    std::vector<Frame> order;
+    while (!want.empty()) {
+        std::vector<size_t> alive(want.size());
+        for (size_t i = 0; i < want.size(); ++i) alive[i] = i;
+        for (int bit = 10; bit >= 0 && alive.size() > 1; --bit) {
+            bool bus = true;                     // 모두 1을 보내야 1
+            for (size_t i : alive) bus = bus && ((want[i].id >> bit) & 1);
+            std::vector<size_t> next;
+            for (size_t i : alive)
+                if (((want[i].id >> bit) & 1) == bus) next.push_back(i);
+            alive = next;
+        }
+        order.push_back(want[alive[0]]);         // 이긴 프레임이 전송된다
+        want.erase(want.begin() + alive[0]);     // 진 프레임은 다음 기회에 다시
+    }
+    return order;
+}
+
+// CANopen 노드(서보 드라이브라고 치자)
+class Node {
+    uint8_t id;
+    bool operational = false;
+    std::map<std::pair<uint16_t, uint8_t>, std::pair<uint32_t, int>> od = {
+        {{0x1000, 0}, {0x00020192, 4}},          // 장치 종류: CiA 402 드라이브
+        {{0x1017, 0}, {0, 2}},                   // 하트비트 주기(ms)
+        {{0x6041, 0}, {0x0637, 2}},              // 상태 워드
+        {{0x6064, 0}, {12345, 4}},               // 실제 위치
+    };
+public:
+    explicit Node(uint8_t id) : id(id) {}
+    Frame bootUp() const { return {uint16_t(0x700 + id), 1, {0x00}}; }
+
+    std::vector<Frame> receive(const Frame& f) {
+        if (f.id == 0x000 && (f.d[1] == id || f.d[1] == 0)) {   // NMT 명령
+            operational = f.d[0] == 0x01;
+            return {};
+        }
+        if (f.id == 0x080 && operational) {      // SYNC → 전송 PDO 1
+            const uint16_t sw = od[{0x6041, 0}].first;
+            const uint32_t pos = od[{0x6064, 0}].first;
+            return {{uint16_t(0x180 + id), 6, {uint8_t(sw), uint8_t(sw >> 8),
+                     uint8_t(pos), uint8_t(pos >> 8), uint8_t(pos >> 16),
+                     uint8_t(pos >> 24)}}};
+        }
+        if (f.id == 0x600 + id) return {sdo(f)};               // SDO 요청
+        return {};
+    }
+private:
+    Frame sdo(const Frame& f) {
+        const uint16_t index = f.d[1] | f.d[2] << 8;
+        const uint8_t sub = f.d[3];
+        Frame r{uint16_t(0x580 + id), 8, {}};
+        r.d[1] = f.d[1]; r.d[2] = f.d[2]; r.d[3] = sub;
+        auto it = od.find({index, sub});
+        if (it == od.end()) {                    // 없는 객체: 중단 코드 0x06020000
+            r.d[0] = 0x80;
+            r.d[4] = 0x00; r.d[5] = 0x00; r.d[6] = 0x02; r.d[7] = 0x06;
+        } else if (f.d[0] == 0x40) {             // 읽기(업로드)
+            auto [value, size] = it->second;
+            r.d[0] = uint8_t(0x43 | (4 - size) << 2);           // 43·4B·4F
+            for (int i = 0; i < size; ++i) r.d[4 + i] = uint8_t(value >> (8 * i));
+        } else {                                 // 쓰기(다운로드): 23·2B·2F
+            it->second.first = f.d[4] | f.d[5] << 8 | f.d[6] << 16 |
+                               uint32_t(f.d[7]) << 24;
+            r.d[0] = 0x60;
+        }
+        return r;
+    }
+};
+
+int main() {
+    Node drive(5);
+    auto send = [&](const Frame& f, const char* note) {
+        dump(f, note);
+        for (const Frame& reply : drive.receive(f)) dump(reply, "  ← 노드 5의 답");
+    };
+
+    dump(drive.bootUp(), "노드 5 부팅(하트비트 00)");
+    send({0x605, 8, {0x40, 0x00, 0x10, 0x00}}, "SDO 읽기 1000:00(장치 종류)");
+    send({0x605, 8, {0x40, 0x00, 0x20, 0x00}}, "SDO 읽기 2000:00(없는 객체)");
+    send({0x605, 8, {0x2B, 0x17, 0x10, 0x00, 0xE8, 0x03}},
+         "SDO 쓰기 1017:00 = 1000");
+    send({0x080, 0, {}}, "SYNC(아직 사전 운전 상태)");
+    send({0x000, 2, {0x01, 0x05}}, "NMT: 노드 5 운전 시작");
+    send({0x080, 0, {}}, "SYNC");
+
+    std::printf("동시에 보내려는 네 프레임의 순서:\n");
+    for (const Frame& f : arbitrate({{0x705, 1, {0x05}}, {0x185, 6, {}},
+                                     {0x085, 8, {}}, {0x080, 0, {}}}))
+        std::printf("  %03X", f.id);
+    std::printf("\n");
+}
+```
+
+```text
+  705  [1]  00                       노드 5 부팅(하트비트 00)
+  605  [8]  40 00 10 00 00 00 00 00  SDO 읽기 1000:00(장치 종류)
+  585  [8]  43 00 10 00 92 01 02 00    ← 노드 5의 답
+  605  [8]  40 00 20 00 00 00 00 00  SDO 읽기 2000:00(없는 객체)
+  585  [8]  80 00 20 00 00 00 02 06    ← 노드 5의 답
+  605  [8]  2B 17 10 00 E8 03 00 00  SDO 쓰기 1017:00 = 1000
+  585  [8]  60 17 10 00 00 00 00 00    ← 노드 5의 답
+  080  [0]                           SYNC(아직 사전 운전 상태)
+  000  [2]  01 05                    NMT: 노드 5 운전 시작
+  080  [0]                           SYNC
+  185  [6]  37 06 39 30 00 00          ← 노드 5의 답
+동시에 보내려는 네 프레임의 순서:
+  080  085  185  705
+```
+
+CANopen은 CAN ID(여기서는 COB-ID라고 부릅니다)를 "기능 + 노드 번호"로 나누어 씁니다.
+
+| 기능 | COB-ID | 쓰임 |
+| --- | --- | --- |
+| NMT | 000 | 노드의 상태를 바꾼다 |
+| SYNC | 080 | 모든 노드가 동시에 값을 보내게 한다 |
+| EMCY | 080 + 노드 | 노드의 고장 알림 |
+| 전송 PDO 1~4 | 180·280·380·480 + 노드 | 노드가 내보내는 실시간 데이터 |
+| 수신 PDO 1~4 | 200·300·400·500 + 노드 | 노드가 받는 실시간 데이터 |
+| SDO 응답 / 요청 | 580 / 600 + 노드 | 객체 사전 읽기·쓰기 |
+| 하트비트 | 700 + 노드 | 살아 있다는 신호와 현재 상태 |
+
+- **객체 사전**: CANopen 노드의 모든 설정과 값은 16비트 인덱스와 8비트 서브인덱스로 찾는 표에 있습니다. `1000`은 장치 종류, `1017`은 하트비트 주기, `6041`(상태 워드)과 `6064`(실제 위치)는 드라이브 프로필(CiA 402)이 정한 항목입니다. 장치 종류의 아래 16비트 `0192`가 십진수 402입니다
+- **SDO**: 객체 사전을 하나씩 읽고 쓰는 요청·응답입니다. 첫 바이트가 명령(40 읽기, 2B 2바이트 쓰기)이고, 응답의 43은 "4바이트 값이 따라온다", 60은 "썼다", 80은 중단입니다. 없는 객체를 읽자 중단 코드 `06020000`(객체 없음, 낮은 바이트부터)이 왔습니다. 느리지만 무엇이든 다루므로 설정에 씁니다
+- **NMT와 상태**: 노드는 부팅 후 사전 운전 상태에서 기다립니다. 이때는 SYNC가 와도 PDO를 보내지 않았습니다. NMT "시작"을 받고 운전 상태가 된 뒤에야 답했습니다
+- **PDO**: 미리 정한 값들을 머리 없이 바이트로 꽉 채워 보냅니다. 여섯 바이트는 상태 워드 `0637`과 위치 `00003039`(12345)이며, 무엇을 담을지는 PDO 매핑 객체(1A00 등)가 정합니다
+- **중재**: 동시에 나가려던 네 프레임은 ID가 작은 순서, 곧 SYNC, 긴급, PDO, 하트비트 순으로 전송되었습니다
+
+## 리눅스에서 진짜 CAN 다루기
+
+리눅스는 CAN 장치를 네트워크 인터페이스(`can0`)로 보여 주고, 프로그램은 소켓으로 프레임을 읽고 씁니다(SocketCAN). 장치가 없으면 가상 인터페이스 `vcan0`으로 시험하고, can-utils의 `candump`와 `cansend`로 버스를 봅니다.
+
+```cpp norun
+// SocketCAN: can0으로 SDO 요청을 보내고 답을 기다린다
+#include <linux/can.h>
+#include <linux/can/raw.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <cstdio>
+#include <cstring>
+
+int main() {
+    const int s = socket(PF_CAN, SOCK_RAW, CAN_RAW);
+    ifreq ifr{};
+    std::strcpy(ifr.ifr_name, "can0");
+    if (s < 0 || ioctl(s, SIOCGIFINDEX, &ifr) < 0) {
+        std::perror("can0");
+        return 1;
+    }
+    sockaddr_can addr{};
+    addr.can_family = AF_CAN;
+    addr.can_ifindex = ifr.ifr_ifindex;
+    bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof addr);
+
+    can_filter only{0x585, CAN_SFF_MASK};        // 노드 5의 SDO 응답만 받는다
+    setsockopt(s, SOL_CAN_RAW, CAN_RAW_FILTER, &only, sizeof only);
+
+    can_frame f{};
+    f.can_id = 0x605;                            // 노드 5에 SDO 요청
+    f.len = 8;
+    const unsigned char req[8] = {0x40, 0x00, 0x10, 0x00};   // 1000:00 읽기
+    std::memcpy(f.data, req, 8);
+    write(s, &f, sizeof f);
+    if (read(s, &f, sizeof f) == sizeof f)
+        std::printf("%03X: %02X %02X %02X %02X\n", f.can_id, f.data[4], f.data[5],
+                    f.data[6], f.data[7]);
+    close(s);
+}
+```
+
+`CAN_RAW_FILTER`로 필요한 ID만 받으면 바쁜 버스에서도 프로그램이 모든 프레임에 깨어나지 않습니다. 검사 환경의 커널에 CAN이 없어 컴파일만 확인했습니다.
+
+<Note>
+8바이트가 모자랄 때를 위해 64바이트까지 담는 CAN FD와 더 큰 CAN XL이 나왔습니다. 실제 CANopen 프로그램은 CANopenNode 같은 스택이나 제조사 라이브러리를 쓰고, 장치의 객체 사전은 EDS 파일로 받아 설정 도구에 읽힙니다.
+</Note>
+
+## 정리
+
+- CAN은 주소 없이 ID로 메시지를 구분하며, 동시에 보내면 ID가 작은 프레임이 비트 단위 중재로 손실 없이 이긴다
+- CANopen은 COB-ID를 기능과 노드 번호로 나누고, 노드의 모든 값을 인덱스와 서브인덱스로 된 객체 사전에 둔다
+- 설정은 요청·응답인 SDO로, 주기 데이터는 머리 없는 PDO로 주고받으며, NMT가 노드의 상태를 바꾸고, 리눅스에서는 SocketCAN으로 다룬다

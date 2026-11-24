@@ -1,0 +1,192 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '노드와 포인터, 옮겨도 살아 있는 반복자, splice로 만드는 LRU 캐시, forward_list, 치르는 값';
+export const terms = ['std::list', '~list', 'forward_list'];
+
+`std::list`는 원소마다 노드를 따로 잡고 앞뒤를 포인터로 잇는 이중 연결 리스트입니다. [앞에서](#/read/cpp-stl/ov-complexity) 차례로 도는 속도가 `vector`의 일곱 배 느리고, [메모리는 여덟 배](#/read/cpp-stl/ov-allocator) 든다는 것을 재어 보았습니다. 그런데도 `list`여야 하는 자리가 있습니다.
+
+## list만 주는 것
+
+| 성질 | 뜻 |
+| --- | --- |
+| 어디든 O(1)로 넣고 지운다 | 자리를 가리키는 반복자가 있을 때 |
+| 반복자와 참조가 죽지 않는다 | 다른 원소를 넣고 지워도, 그 원소가 지워지기 전까지 |
+| 노드를 통째로 옮긴다 (`splice`) | 복사도 할당도 없이, 다른 `list`로도 |
+
+둘째와 셋째가 핵심입니다. "원소를 가리키는 손잡이를 다른 곳에 보관해 두고, 나중에 그 원소를 O(1)로 옮기거나 지운다"는 구조는 `list`로만 됩니다.
+
+## splice로 만드는 LRU 캐시
+
+가장 오래 쓰지 않은 것부터 버리는 캐시가 그 구조입니다. 쓸 때마다 그 항목을 맨 앞으로 옮기고, 꽉 차면 맨 뒤를 버립니다.
+
+```cpp
+#include <cstddef>
+#include <list>
+#include <optional>
+#include <print>
+#include <string>
+#include <unordered_map>
+#include <utility>
+
+class LruCache {
+public:
+    explicit LruCache(std::size_t capacity) : capacity_(capacity) {}
+
+    std::optional<std::string> get(int key)
+    {
+        const auto found = index_.find(key);
+        if (found == index_.end())
+            return std::nullopt;
+        // 그 노드를 맨 앞으로 옮긴다. 포인터 몇 개만 바뀐다
+        items_.splice(items_.begin(), items_, found->second);
+        return found->second->second;
+    }
+
+    void put(int key, std::string value)
+    {
+        if (items_.size() == capacity_) {
+            index_.erase(items_.back().first);      // 맨 뒤가 가장 오래된 것
+            items_.pop_back();
+        }
+        items_.emplace_front(key, std::move(value));
+        index_[key] = items_.begin();               // 노드의 반복자를 적어 둔다
+    }
+
+    void show(const char* label) const
+    {
+        std::print("{:8}", label);
+        for (const auto& [key, value] : items_)
+            std::print("{}:{} ", key, value);
+        std::println("");
+    }
+
+private:
+    using Item = std::pair<int, std::string>;
+    std::size_t capacity_;
+    std::list<Item> items_;                                     // 앞이 최근
+    std::unordered_map<int, std::list<Item>::iterator> index_;  // 열쇠 -> 노드
+};
+
+int main()
+{
+    LruCache cache(3);
+    cache.put(1, "one");
+    cache.put(2, "two");
+    cache.put(3, "three");
+    cache.show("넣은 뒤");
+
+    cache.get(1);               // 1을 썼다
+    cache.show("get(1)");
+
+    cache.put(4, "four");       // 꽉 찼다. 가장 오래된 2가 나간다
+    cache.show("put(4)");
+    std::println("get(2) = {}", cache.get(2).value_or("없음"));
+}
+```
+
+```text
+넣은 뒤 3:three 2:two 1:one
+get(1)  1:one 3:three 2:two
+put(4)  4:four 1:one 3:three
+get(2) = 없음
+```
+
+`index_`에 적어 둔 반복자는 다른 항목이 들어오고 나가고 자리를 바꾸는 동안 내내 유효합니다. `vector`였다면 `push`나 `erase` 한 번에 모두 죽습니다. (이 예제의 `put`은 없는 열쇠만 넣는다고 가정했습니다. 있는 열쇠의 값을 고치는 일은 `get`처럼 찾아서 `splice`하면 됩니다.)
+
+## 자기만의 알고리즘
+
+`std::sort`는 [칸을 건너뛸 수 있는 반복자](#/read/cpp-stl/it-category)를 요구해서 `list`에 쓸 수 없습니다. 그 대신 `list`는 노드의 포인터만 바꾸는 멤버 함수를 가집니다.
+
+```cpp
+#include <list>
+#include <print>
+
+void show(const char* label, const std::list<int>& values)
+{
+    std::print("{:10}", label);
+    for (int v : values)
+        std::print("{} ", v);
+    std::println("");
+}
+
+int main()
+{
+    std::list<int> a = {5, 1, 3, 3};
+    std::list<int> b = {4, 2};
+    a.sort();
+    b.sort();
+    a.merge(b);         // 정렬된 둘을 합친다. b 의 노드가 a 로 옮겨 온다
+    show("merge", a);
+    std::println("b 에 남은 것 {}개", b.size());
+
+    a.unique();         // 이웃한 같은 값을 하나로
+    show("unique", a);
+    a.remove_if([](int v) { return v % 2 == 0; });
+    show("remove_if", a);
+    a.reverse();
+    show("reverse", a);
+}
+```
+
+```text
+merge     1 2 3 3 4 5
+b 에 남은 것 0개
+unique    1 2 3 4 5
+remove_if 1 3 5
+reverse   5 3 1
+```
+
+원소가 복사하기 비싼 큰 객체일 때 이 멤버들이 값을 합니다. 정렬하는 동안 객체는 한 번도 복사되거나 옮겨지지 않습니다.
+
+## forward_list
+
+`std::forward_list`는 다음 노드만 가리키는 단일 연결 리스트입니다. 객체가 포인터 하나(8바이트)뿐이고 노드도 작습니다. 그 대신 뒤로 갈 수 없어서 인터페이스가 다릅니다.
+
+| | `list` | `forward_list` |
+| --- | --- | --- |
+| 넣는 자리 | 반복자의 **앞** (`insert`) | 반복자의 **뒤** (`insert_after`) |
+| 맨 앞에 넣기 | `push_front` | `push_front`, `insert_after(before_begin(), …)` |
+| 맨 뒤에 넣기 | `push_back` | 없다 |
+| `size()` | 있다 | 없다 (세려면 `std::distance`) |
+
+```cpp
+#include <forward_list>
+#include <print>
+
+int main()
+{
+    std::forward_list<int> chain = {1, 4};
+    auto first = chain.begin();
+    chain.insert_after(first, {2, 3});      // 1 뒤에 2, 3
+    chain.push_front(0);
+    chain.erase_after(chain.before_begin());    // 맨 앞(0)을 지운다
+    for (int v : chain)
+        std::print("{} ", v);
+    std::println("");
+}
+```
+
+```text
+1 2 3 4
+```
+
+<Note>
+"메모리를 아끼려면 `forward_list`"라는 말은 할당자에 달려 있습니다. `int` 100만 개를 넣고 [힙 사용량을 재 보면](#/read/cpp-stl/ov-allocator) 64비트 glibc에서 `list`도 `forward_list`도 32.0MB입니다. 노드는 24바이트와 16바이트로 다르지만, `malloc`이 주는 가장 작은 조각이 32바이트이기 때문입니다. 원소가 더 크거나 풀 할당자를 쓸 때 차이가 납니다.
+</Note>
+
+## 치르는 값과 고르는 기준
+
+| 하는 일 | 고르는 것 |
+| --- | --- |
+| 담고, 돌고, 가끔 넣고 지운다 | `vector`. 중간에 넣는 일이 있어도 대개 더 빠르다 |
+| 원소의 손잡이를 밖에 두고 O(1)로 옮기거나 지운다 | `list` |
+| 큰 객체를 복사 없이 정렬하고 합친다 | `list`, 또는 `vector<unique_ptr<T>>` |
+| 버킷처럼 아주 짧은 사슬을 수없이 만든다 | `forward_list` |
+
+"중간에 자주 넣으니 `list`"는 대개 틀린 이유입니다. 넣을 자리를 찾아 걸어가는 값이 넣는 값보다 큽니다. `list`를 고르는 옳은 이유는 **주소가 안정적이어야 한다**는 것입니다.
+
+## 정리
+
+- `list`의 값어치는 속도가 아니라 안정성이다. 반복자가 죽지 않고, `splice`로 노드를 통째로 옮긴다
+- 정렬, 합치기, 뒤집기는 멤버 함수로 한다. 포인터만 바뀌고 원소는 움직이지 않는다
+- `forward_list`는 뒤로만 넣는다(`insert_after`). 메모리를 아끼는지는 할당자에 달렸다

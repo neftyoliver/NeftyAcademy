@@ -1,0 +1,246 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '검증 레이어 읽기: 메시지의 조각들, 이름과 꼬리표, 기록할 때와 제출 뒤, GPU 지원 검증, 검사 고르기';
+export const terms = [
+  'VkDebugUtilsLabelEXT', 'vkCmdBeginDebugUtilsLabelEXT', 'vkCmdEndDebugUtilsLabelEXT',
+  'VkValidationFeatureEnableEXT',
+];
+
+검증 레이어의 메시지는 길지만 꼴이 정해져 있습니다([「개발 환경과 검증 레이어」](#/read/cpp-vulkan/vk-environment)). 어느 규칙을, 어느 객체에, 무엇을 하다 어겼는지를 차례로 읽으면 되고, 콜백이 받는 구조체에는 그 조각들이 따로 들어 있습니다. 아래 프로그램은 잘못 둘을 일부러 저지르고 메시지를 뜯어서 찍습니다.
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp,vkx_cmd.hpp,vkx_resource.hpp,vkx_bind.hpp,vkx_compute.hpp,vkx_pipeline.hpp
+#include <string>
+#include "vkx_bind.hpp"
+#include "vkx_cmd.hpp"
+#include "vkx_compute.hpp"
+#include "vkx_pipeline.hpp"
+
+// 긴 글을 70바이트쯤에서 낱말 사이로 끊어 찍는다. 겹친 빈칸은 하나로 줄인다
+void print_wrapped(const char* head, std::string text) {
+    for (size_t at; (at = text.find("  ")) != std::string::npos;) text.erase(at, 1);
+    if (text[0] == ' ') text.erase(0, 1);
+    for (size_t cut; text.size() > 70; text.erase(0, cut + 1), head = "        ") {
+        cut = text.rfind(' ', 70);
+        std::printf("%s%s\n", head, text.substr(0, cut).c_str());
+    }
+    std::printf("%s%s\n", head, text.c_str());
+}
+
+// 메시지 하나를 뜯어 찍는다: 규칙 이름, 얽힌 객체, 기록하던 구간, 내용, 규칙 원문
+VKAPI_ATTR VkBool32 VKAPI_CALL explain(
+        VkDebugUtilsMessageSeverityFlagBitsEXT, VkDebugUtilsMessageTypeFlagsEXT,
+        const VkDebugUtilsMessengerCallbackDataEXT* d, void*) {
+    std::printf("[%s]\n", d->pMessageIdName);
+    for (uint32_t i = 0; i < d->objectCount; ++i)
+        if (const char* name = d->pObjects[i].pObjectName)
+            std::printf("  객체: %s\n", name);
+    std::string where, last;   // 안쪽 구간부터 온다. 거듭 오는 이름은 한 번만
+    for (uint32_t i = 0; i < d->cmdBufLabelCount; ++i)
+        if (last != d->pCmdBufLabels[i].pLabelName) {
+            last = d->pCmdBufLabels[i].pLabelName;
+            where = last + (where.empty() ? "" : " > ") + where;
+        }
+    if (!where.empty()) std::printf("  구간: %s\n", where.c_str());
+    // 글의 꼴: "… | 함수(): 내용. The Vulkan spec states: 규칙 (명세 주소)"
+    std::string text = d->pMessage;
+    const size_t call = text.find("(): ");
+    if (call != std::string::npos) text.erase(0, call + 4);
+    for (size_t at; (at = text.find("(0x")) != std::string::npos;)
+        text.erase(at, text.find(')', at) - at + 1);   // 핸들 값은 뺀다
+    const std::string MARK = " The Vulkan spec states: ";
+    const size_t rule = text.find(MARK);
+    print_wrapped("  내용: ", text.substr(0, rule));
+    if (rule != std::string::npos) {
+        const size_t from = rule + MARK.size();
+        print_wrapped("  규칙: ", text.substr(from, text.rfind(" (https") - from));
+    }
+    return VK_FALSE;
+}
+
+// 배열 디스크립터를 푸시 상수의 번호로 고른다. 번호가 틀려도 컴파일은 된다
+const char* FILL = R"(#version 450
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0) buffer Block { uint value; } blocks[2];
+layout(push_constant) uniform Push { uint index; };
+void main() { blocks[index].value = 7u; })";
+
+int main() {
+    // 검증 레이어에 GPU 지원 검증을 더한 인스턴스. 메시지는 explain이 받는다
+    const char* layer = "VK_LAYER_KHRONOS_validation";
+    const char* extensions[] = {VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
+                                VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME};
+    VkDebugUtilsMessengerCreateInfoEXT mci{
+        .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+        .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                           VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+        .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT,
+        .pfnUserCallback = explain};
+    const VkValidationFeatureEnableEXT gpu =
+        VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT;
+    VkValidationFeaturesEXT features{
+        .sType = VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT, .pNext = &mci,
+        .enabledValidationFeatureCount = 1, .pEnabledValidationFeatures = &gpu};
+    VkApplicationInfo app{.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+                          .apiVersion = VK_API_VERSION_1_3};
+    VkInstanceCreateInfo ci{.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+                            .pNext = &features, .pApplicationInfo = &app,
+                            .enabledLayerCount = 1, .ppEnabledLayerNames = &layer,
+                            .enabledExtensionCount = 2,
+                            .ppEnabledExtensionNames = extensions};
+    VkInstance instance;
+    vkx::check(vkCreateInstance(&ci, nullptr, &instance), "vkCreateInstance");
+#define VKX_EXT(name) \
+    reinterpret_cast<PFN_##name>(vkGetInstanceProcAddr(instance, #name))
+    VkDebugUtilsMessengerEXT messenger;
+    VKX_EXT(vkCreateDebugUtilsMessengerEXT)(instance, &mci, nullptr, &messenger);
+    vkx::Device dev = vkx::make_device(instance);
+    vkx::Commands cmds = vkx::make_commands(dev);
+
+    // 객체에 이름을, 커맨드 버퍼의 구간에 꼬리표를 붙인다
+    auto name = [&](VkObjectType type, auto handle, const char* text) {
+        VkDebugUtilsObjectNameInfoEXT info{
+            .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
+            .objectType = type, .objectHandle = uint64_t(handle),
+            .pObjectName = text};
+        VKX_EXT(vkSetDebugUtilsObjectNameEXT)(dev.handle, &info);
+    };
+    auto label = [&](VkCommandBuffer cmd, const char* text) {
+        VkDebugUtilsLabelEXT info{.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT,
+                                  .pLabelName = text};
+        VKX_EXT(vkCmdBeginDebugUtilsLabelEXT)(cmd, &info);
+    };
+    const auto USAGE = VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                       VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    vkx::Buffer source = vkx::make_buffer(dev, 64, USAGE, true);
+    vkx::Buffer copy = vkx::make_buffer(dev, 64, USAGE, true);
+    name(VK_OBJECT_TYPE_BUFFER, source.handle, "원본");
+    name(VK_OBJECT_TYPE_BUFFER, copy.handle, "사본");
+    name(VK_OBJECT_TYPE_COMMAND_BUFFER, cmds.cmd, "프레임 커맨드");
+
+    // 버퍼 둘을 배열 디스크립터 하나로 묶은 세트와 컴퓨트 파이프라인
+    const auto BUFFER = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    VkDescriptorSetLayoutBinding binding{
+        .binding = 0, .descriptorType = BUFFER, .descriptorCount = 2,
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT};
+    VkDescriptorSetLayoutCreateInfo lci{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 1, .pBindings = &binding};
+    VkDescriptorSetLayout set_layout;
+    vkCreateDescriptorSetLayout(dev.handle, &lci, nullptr, &set_layout);
+    VkDescriptorPoolSize room{BUFFER, 2};
+    VkDescriptorPoolCreateInfo pci{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1,
+        .poolSizeCount = 1, .pPoolSizes = &room};
+    VkDescriptorPool pool;
+    vkCreateDescriptorPool(dev.handle, &pci, nullptr, &pool);
+    VkDescriptorSetAllocateInfo ai{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = pool, .descriptorSetCount = 1,
+        .pSetLayouts = &set_layout};
+    VkDescriptorSet set;
+    vkAllocateDescriptorSets(dev.handle, &ai, &set);
+    VkDescriptorBufferInfo both[2] = {{source.handle, 0, VK_WHOLE_SIZE},
+                                      {copy.handle, 0, VK_WHOLE_SIZE}};
+    VkWriteDescriptorSet write{
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set,
+        .descriptorCount = 2, .descriptorType = BUFFER, .pBufferInfo = both};
+    vkUpdateDescriptorSets(dev.handle, 1, &write, 0, nullptr);
+    VkPipelineLayout layout = vkx::make_layout(dev, {set_layout}, 4);
+    VkShaderModule shader =
+        vkx::make_shader(dev, vkx::compile(FILL, shaderc_compute_shader));
+    VkPipeline fill = vkx::make_compute(dev, shader, layout);
+    name(VK_OBJECT_TYPE_PIPELINE, fill, "채우기 파이프라인");
+    name(VK_OBJECT_TYPE_SHADER_MODULE, shader, "채우기 셰이더");
+
+    VkCommandBuffer cmd = vkx::begin(cmds);
+    label(cmd, "프레임 7");
+    label(cmd, "올리기");
+    std::puts("1. 64바이트 버퍼에서 128바이트를 복사하라고 기록");
+    VkBufferCopy region{.size = 128};
+    vkCmdCopyBuffer(cmd, source.handle, copy.handle, 1, &region);
+    VKX_EXT(vkCmdEndDebugUtilsLabelEXT)(cmd);
+    label(cmd, "채우기");
+    std::puts("2. 칸이 둘뿐인 배열의 5번을 쓰는 디스패치를 기록");
+    const uint32_t index = 5;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fill);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1,
+                            &set, 0, nullptr);
+    vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_ALL, 0, 4, &index);
+    vkCmdDispatch(cmd, 1, 1, 1);
+    VKX_EXT(vkCmdEndDebugUtilsLabelEXT)(cmd);
+    VKX_EXT(vkCmdEndDebugUtilsLabelEXT)(cmd);
+    std::puts("3. 제출하고 끝나기를 기다림");
+    vkx::submit_and_wait(dev, cmds);
+    std::puts("4. 끝");
+
+    vkDestroyPipeline(dev.handle, fill, nullptr);
+    vkDestroyShaderModule(dev.handle, shader, nullptr);
+    vkDestroyPipelineLayout(dev.handle, layout, nullptr);
+    vkDestroyDescriptorPool(dev.handle, pool, nullptr);
+    vkDestroyDescriptorSetLayout(dev.handle, set_layout, nullptr);
+    vkx::destroy(dev, source);
+    vkx::destroy(dev, copy);
+    vkx::destroy(dev, cmds);
+    vkx::destroy(dev);
+    VKX_EXT(vkDestroyDebugUtilsMessengerEXT)(instance, messenger, nullptr);
+    vkDestroyInstance(instance, nullptr);
+}
+```
+
+```text
+1. 64바이트 버퍼에서 128바이트를 복사하라고 기록
+[VUID-vkCmdCopyBuffer-size-00115]
+  객체: 프레임 커맨드
+  객체: 사본
+  구간: 프레임 7 > 올리기
+  내용: pRegions[0].size (128) is greater than the source buffer size (64)
+        minus srcOffset (0).
+  규칙: The size member of each element of pRegions must be less than or equal
+        to the size of srcBuffer minus srcOffset
+[VUID-vkCmdCopyBuffer-size-00116]
+  객체: 프레임 커맨드
+  객체: 사본
+  구간: 프레임 7 > 올리기
+  내용: pRegions[0].size (128) is greater than the destination buffer size
+        (64) minus dstOffset (0).
+  규칙: The size member of each element of pRegions must be less than or equal
+        to the size of dstBuffer minus dstOffset
+2. 칸이 둘뿐인 배열의 5번을 쓰는 디스패치를 기록
+3. 제출하고 끝나기를 기다림
+[UNASSIGNED-Descriptor index out of bounds]
+  내용: (set = 0, binding = 0) Index of 5 used to index descriptor array of
+        length 2. Command buffer (프레임 커맨드). Compute Dispatch Index
+        0. Pipeline (채우기 파이프라인). Shader Module (채우기
+        셰이더). Shader Instruction Index = 46. Stage = Compute. Global
+        invocation ID (x, y, z) = (0, 0, 0 ) Unable to find SPIR-V OpLine for
+        source information. Build shader with debug info to get source
+        information.
+4. 끝
+```
+
+- **규칙 이름부터**: `pMessageIdName`이 어긴 규칙의 이름(VUID)입니다. 명세에서 이 이름을 찾으면 앞뒤 규칙까지 읽을 수 있고, 메시지가 쏟아질 때는 이름별로 세어 종류부터 줄입니다. 글에서 "내용"에는 실제 값(128과 64)이, "규칙"에는 명세의 문장이 들어 있습니다
+- **객체와 구간**: 객체에 이름을 붙여 두면 핸들 숫자 대신 "사본"이 나옵니다. 커맨드 버퍼에 `vkCmdBeginDebugUtilsLabelEXT`로 꼬리표를 달아 두면 어느 구간을 기록하다 생긴 일인지도 `pCmdBufLabels`에 담겨 옵니다
+- **기록할 때 잡히는 것**: 복사 크기는 그 호출 안에서 잡혔습니다. 콜백이 잘못한 호출이 돌아오기 전에 같은 스레드에서 불리므로, 콜백에 중단점을 걸면 호출 스택이 잘못한 줄을 가리킵니다
+- **GPU가 돌아야 아는 것**: 배열의 몇 번을 쓸지는 셰이더가 돌아야 정해지므로 기록할 때는 조용했습니다. GPU 지원 검증이 셰이더에 끼워 넣은 검사 코드가 제출 뒤에 알려 주었고, 번호(5)와 배열 길이(2), 몇 번째 디스패치의 어느 파이프라인인지가 나옵니다([「바인드리스」](#/read/cpp-vulkan/desc-bindless)). 이 메시지는 다른 스레드에서 왔으므로 호출 스택이 아니라 글 속의 이름으로 찾습니다. 셰이더를 디버그 정보와 함께 컴파일하면(glslang의 `-g`) 파일 이름과 줄 번호도 나옵니다
+
+## 검사를 고르고 메시지를 줄이기
+
+검사는 묶음으로 켜고 끕니다. 기본 검사에 더해 동기화 검증([「파이프라인 배리어」](#/read/cpp-vulkan/vsync-barriers)), GPU 지원 검증, 모범 사례 검사가 있는데, 제출할 때의 동기화 검사와 셰이더에 끼우는 검사는 눈에 띄게 느리므로 의심이 갈 때 켭니다. 설정하는 길은 SDK의 Vulkan Configurator, 인스턴스를 만들 때 넘기는 `VK_EXT_layer_settings`(이 예제가 쓴 `VkValidationFeaturesEXT`를 잇는 새 방식), `vk_layer_settings.txt` 파일, 환경 변수입니다. 같은 설정이 여러 곳에 있으면 환경 변수, 파일, 프로그램의 순서로 이깁니다.
+
+메시지가 많으면 `VK_KHRONOS_VALIDATION_DUPLICATE_MESSAGE_LIMIT`으로 같은 메시지의 횟수를 묶고, 이미 아는 것은 `VK_KHRONOS_VALIDATION_MESSAGE_ID_FILTER`에 규칙 이름을 적어 끕니다. 모범 사례 검사는 규칙 위반이 아닌 것도 알려 줍니다. 이 프로그램에 켜면 64바이트 버퍼마다 작은 메모리를 따로 받지 말라는 성능 경고가 붙습니다([「메모리 할당과 VMA」](#/read/cpp-vulkan/buf-alloc)).
+
+<Note>
+레이어가 조용하다고 옳은 것은 아닙니다. 레이어는 검사를 만들어 둔 규칙만 보고, 판마다 빈 곳이 있습니다. 이 책이 쓴 1.3.275판은 컴퓨트 셰이더가 스토리지 버퍼에 쓴 것을 읽은 것으로 잘못 볼 때가 있었습니다. 최신판 레이어로 확인하고, 드라이버가 다른 장치에서도 돌려 봅니다.
+</Note>
+
+## 정리
+
+- 메시지는 규칙 이름, 얽힌 객체, 내용, 규칙 원문으로 이루어지고, 이름과 꼬리표를 붙여 두면 어디서 생긴 일인지가 함께 온다
+- 기록할 때 알 수 있는 잘못은 그 호출에서 잡히고, GPU가 돌아야 알 수 있는 잘못은 GPU 지원 검증을 켰을 때 제출 뒤에 온다
+- 무거운 검사는 필요할 때 켜고 메시지는 횟수와 이름으로 줄이되, 조용하다는 것만으로 옳다고 믿지 않는다
+
+## 참고 문서
+
+- [LunarG: Khronos Validation Layer(설정과 검사 묶음)](https://vulkan.lunarg.com/doc/view/1.4.350.1/mac/khronos_validation_layer.html)
+- [Vulkan-Utility-Libraries: Layer configuration(설정하는 길과 우선순위)](https://chromium.googlesource.com/external/github.com/KhronosGroup/Vulkan-Utility-Libraries/+/HEAD/docs/layer_configuration.md)

@@ -1,0 +1,137 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '오류를 던지고 받기, 표준 예외의 계보, 내 예외 타입, 받는 순서';
+
+C에서는 오류를 반환값으로 알렸습니다. 부르는 쪽이 매번 검사해야 하고, 잊으면 오류가 조용히 묻힙니다. 예외는 오류를 **던져서**, 그것을 처리할 줄 아는 곳까지 여러 함수를 건너뛰어 올려 보내는 장치입니다.
+
+## 던지고 받기
+
+```cpp
+#include <print>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+class SensorError : public std::runtime_error {
+public:
+    SensorError(const std::string& what, int code)
+        : std::runtime_error(what), code_(code) {}
+    int code() const { return code_; }
+
+private:
+    int code_;
+};
+
+double read_sensor(int channel)
+{
+    if (channel < 0)
+        throw std::invalid_argument("채널 번호가 음수");
+    if (channel > 3)
+        throw SensorError("응답 없음", 110);
+    return 20.0 + channel;
+}
+
+int main()
+{
+    for (int channel : {1, 7, -1}) {
+        try {
+            std::println("값 {}", read_sensor(channel));
+        } catch (const SensorError& e) {
+            std::println("센서 오류: {} (코드 {})", e.what(), e.code());
+        } catch (const std::exception& e) {
+            std::println("그 밖의 오류: {}", e.what());
+        }
+    }
+
+    std::vector<int> v{1, 2, 3};
+    try {
+        v.at(10) = 0;
+    } catch (const std::out_of_range&) {
+        std::println("범위 밖");
+    }
+}
+```
+
+```text
+값 21
+센서 오류: 응답 없음 (코드 110)
+그 밖의 오류: 채널 번호가 음수
+범위 밖
+```
+
+| 문법 | 하는 일 |
+| --- | --- |
+| `throw 객체;` | 함수를 그 자리에서 떠난다. 객체가 예외로 올라간다 |
+| `try { … }` | 이 안에서 올라온 예외를 아래의 `catch`들이 받는다 |
+| `catch (const 타입& e)` | 그 타입(또는 그 자식)의 예외를 받는다 |
+| `catch (...)` | 무엇이든 받는다. 무엇인지는 알 수 없다 |
+
+`throw`가 실행되면 `read_sensor`의 나머지는 건너뛰고, `println`도 불리지 않고, 곧장 맞는 `catch`로 갑니다. 그 사이에 있던 지역 객체들은 [소멸자가 불리며 정리됩니다](#/read/cpp-syntax/exc-unwind).
+
+## 표준 예외
+
+표준 라이브러리의 예외는 모두 `std::exception`의 자식이고, `what()`으로 설명 글자를 돌려줍니다.
+
+| 타입 | 헤더 | 던져지는 때 |
+| --- | --- | --- |
+| `std::exception` | `<exception>` | 모든 표준 예외의 부모 |
+| `std::logic_error` | `<stdexcept>` | 프로그램의 잘못. 부르기 전에 막을 수 있었던 것 |
+| ↳ `std::invalid_argument`, `std::out_of_range`, `std::length_error` | | `stoi("abc")`, `v.at(10)`, 너무 긴 `string` |
+| `std::runtime_error` | `<stdexcept>` | 실행해 봐야 아는 것 |
+| ↳ `std::system_error` | `<system_error>` | OS 호출 실패. `code()`에 `errno`가 든다 |
+| `std::bad_alloc` | `<new>` | `new`가 메모리를 얻지 못함 |
+| `std::bad_cast` | `<typeinfo>` | [참조 `dynamic_cast`](#/read/cpp-syntax/inh-rtti) 실패 |
+| `std::bad_optional_access`, `std::bad_variant_access` | | 빈 `optional`의 `.value()` 등 |
+
+내 예외는 `std::runtime_error`나 `std::logic_error`를 상속해 만듭니다. 그래야 `catch (const std::exception&)`에 함께 잡히고 `what()`이 동작합니다. 위의 `SensorError`처럼 오류 코드 같은 정보를 멤버로 얹습니다.
+
+## 받는 순서
+
+`catch`는 **위에서부터** 맞춰 보고 처음 맞는 것이 받습니다. 그래서 구체적인 타입을 위에, 부모 타입을 아래에 둡니다. 순서를 바꾸면 `SensorError`도 `std::exception` 쪽에서 먼저 잡혀 버립니다(GCC가 경고합니다).
+
+**`const` 참조로 받습니다.** 값으로 받으면 [잘려서](#/read/cpp-syntax/inh-slicing) 자식의 정보를 잃습니다.
+
+## 다시 던지기
+
+받았지만 여기서 다 처리할 수 없으면 `throw;`로 **같은 예외를 그대로** 다시 올려 보냅니다.
+
+```cpp nocheck
+try {
+    update_firmware();
+} catch (const std::exception& e) {
+    std::println(stderr, "업데이트 실패: {}", e.what());
+    restore_backup();
+    throw;              // 받은 예외를 그대로 위로. throw e; 는 잘린 복사본을 던진다
+}
+```
+
+## 아무도 받지 않으면
+
+맞는 `catch`가 끝내 없으면 `std::terminate`가 불리고 프로그램이 `abort`로 끝납니다.
+
+```text
+terminate called after throwing an instance of 'std::runtime_error'
+  what():  고장
+Aborted
+```
+
+이때는 지역 객체의 소멸자가 불리지 않을 수 있고(GCC와 Clang은 부르지 않습니다), 버퍼에 남아 있던 출력도 사라집니다. `main`의 가장 바깥에 `catch (const std::exception& e)`를 하나 두어 메시지를 찍고 0이 아닌 값으로 끝내는 것이 좋은 습관입니다.
+
+## 언제 던지나
+
+| 상황 | 알맞은 방법 |
+| --- | --- |
+| 생성자가 객체를 쓸 수 있는 상태로 만들지 못했다 | 예외. 생성자에는 반환값이 없다 |
+| 드물게 일어나고, 부른 곳이 바로 처리할 수 없다 | 예외 |
+| 자주 일어나고, 부른 곳이 바로 처리한다 (파싱 실패, 찾는 것이 없음) | [`std::optional`, `std::expected`](#/read/cpp-syntax/exc-without) |
+| 프로그램의 버그 (있을 수 없는 상태) | `assert`. 잡아서 계속할 일이 아니다 |
+
+<Note>
+무엇이든 던질 수 있습니다(`throw 42;`, `throw "문자열";`). 그렇게 하지 않습니다. 받는 쪽이 `catch (const std::exception&)`로 잡지 못하고 `what()`도 없습니다.
+</Note>
+
+## 정리
+
+- `throw`로 던지고 `try`/`catch`로 받는다. `const` 참조로, 구체적인 타입부터
+- 내 예외는 `std::runtime_error`를 상속한다. `what()`과 함께 필요한 정보를 싣는다
+- 받지 않은 예외는 프로그램을 끝낸다. `main`에 마지막 `catch`를 둔다

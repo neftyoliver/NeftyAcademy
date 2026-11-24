@@ -1,0 +1,136 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '실행 취소: 편집을 명령 객체로 만들어 되돌리기, 끌기 명령 합치기, 새 편집이 다시 하기를 버리는 이유';
+
+편집기에서 실행 취소가 없으면 아무도 마음 놓고 고치지 못합니다. 그리고 실행 취소는 나중에 붙이기가 가장 어려운 기능입니다. 장면을 바꾸는 코드가 여기저기 흩어진 뒤에는 무엇을 어떻게 되돌릴지 알 수 없기 때문입니다. 그래서 처음부터 **장면을 바꾸는 모든 일은 명령 객체를 통해서만** 한다는 규칙을 세웁니다.
+
+## 명령과 기록
+
+```cpp
+#include <memory>
+#include <print>
+#include <string>
+#include <vector>
+
+struct Scene { std::vector<std::string> names; std::vector<float> xs; };
+
+struct Command {
+    virtual void apply(Scene&) = 0;
+    virtual void revert(Scene&) = 0;
+    virtual std::string label() const = 0;
+    // 바로 앞 명령과 합칠 수 있으면 합치고 true
+    virtual bool merge(const Command&) { return false; }
+    virtual ~Command() = default;
+};
+
+struct SetX : Command {
+    int obj; float before, after;
+    SetX(int o, float b, float a) : obj(o), before(b), after(a) {}
+    void apply(Scene& s) override { s.xs[obj] = after; }
+    void revert(Scene& s) override { s.xs[obj] = before; }
+    std::string label() const override {
+        return std::format("x {} -> {}", before, after);
+    }
+    bool merge(const Command& c) override {      // 같은 물체를 연달아 끌면 하나로
+        auto o = dynamic_cast<const SetX*>(&c);
+        if (!o || o->obj != obj) return false;
+        after = o->after;
+        return true;
+    }
+};
+
+struct Create : Command {
+    std::string name; float x;
+    Create(std::string n, float x) : name(std::move(n)), x(x) {}
+    void apply(Scene& s) override { s.names.push_back(name); s.xs.push_back(x); }
+    void revert(Scene& s) override { s.names.pop_back(); s.xs.pop_back(); }
+    std::string label() const override { return "만들기 " + name; }
+};
+
+class History {
+    std::vector<std::unique_ptr<Command>> done, undone;
+public:
+    void run(Scene& s, std::unique_ptr<Command> c, bool mergeable = false) {
+        c->apply(s);
+        // 새 일을 하면 다시 하기 목록은 버린다
+        undone.clear();
+        if (mergeable && !done.empty() && done.back()->merge(*c)) return;
+        done.push_back(std::move(c));
+    }
+    void undo(Scene& s) {
+        if (done.empty()) return;
+        done.back()->revert(s);
+        undone.push_back(std::move(done.back())); done.pop_back();
+    }
+    void redo(Scene& s) {
+        if (undone.empty()) return;
+        undone.back()->apply(s);
+        done.push_back(std::move(undone.back())); undone.pop_back();
+    }
+    void show(const Scene& s) const {
+        std::print("  장면:");
+        for (std::size_t i = 0; i < s.names.size(); ++i)
+            std::print(" {}(x={})", s.names[i], s.xs[i]);
+        std::print("  | 기록:");
+        for (auto& c : done) std::print(" [{}]", c->label());
+        std::println("  | 다시 하기 {}개", undone.size());
+    }
+};
+
+int main() {
+    Scene s;
+    History h;
+    h.run(s, std::make_unique<Create>("상자", 0));
+    std::println("상자를 만들고 끌기 다섯 프레임");
+    for (int f = 1; f <= 5; ++f)                // 끄는 동안 매 프레임 명령이 생긴다
+        h.run(s, std::make_unique<SetX>(0, s.xs[0], float(f)), true);
+    h.show(s);
+    std::println("실행 취소");
+    h.undo(s); h.show(s);
+    std::println("실행 취소");
+    h.undo(s); h.show(s);
+    std::println("다시 하기");
+    h.redo(s); h.show(s);
+    std::println("실행 취소 후 새 물체 만들기");
+    h.undo(s);
+    h.run(s, std::make_unique<Create>("나무", 2));
+    h.show(s);
+}
+```
+
+```text
+상자를 만들고 끌기 다섯 프레임
+  장면: 상자(x=5)  | 기록: [만들기 상자] [x 0 -> 5]  | 다시 하기 0개
+실행 취소
+  장면: 상자(x=0)  | 기록: [만들기 상자]  | 다시 하기 1개
+실행 취소
+  장면:  | 기록:  | 다시 하기 2개
+다시 하기
+  장면: 상자(x=0)  | 기록: [만들기 상자]  | 다시 하기 1개
+실행 취소 후 새 물체 만들기
+  장면: 나무(x=2)  | 기록: [만들기 나무]  | 다시 하기 0개
+```
+
+## 명령 객체
+
+명령은 `apply`(하기)와 `revert`(되돌리기)를 한 쌍으로 갖습니다. `SetX`는 바꾸기 **전 값과 후 값**을 둘 다 들고 있어서 어느 방향으로든 갈 수 있습니다. 기록은 스택 두 개입니다. 한 일은 `done`에 쌓고, 실행 취소하면 꺼내 되돌린 뒤 `undone`으로 옮기고, 다시 하기는 그 반대입니다. 출력에서 실행 취소를 두 번 하니 상자를 옮긴 것, 만든 것이 차례로 사라졌고, 다시 하기로 상자가 돌아왔습니다.
+
+[「직렬화와 에디터 연동」](#/read/cpp-game-engine/scr-editor)의 속성 창도 값을 직접 쓰지 않고 이런 명령을 만들어 기록에 넣습니다. 리플렉션이 있으면 "어느 객체의 어느 필드를 무엇에서 무엇으로" 하나의 범용 명령으로 모든 속성 변경을 표현할 수 있습니다.
+
+## 끌기는 하나로 합친다
+
+기즈모로 상자를 끄는 동안 매 프레임 x가 바뀌었습니다. 다섯 프레임이면 명령이 다섯 개인데, 실행 취소 한 번에 한 프레임만 되돌아가면 쓸 수가 없습니다. 그래서 `merge`로 같은 물체에 대한 연속된 `SetX`를 앞의 명령에 합칩니다. 앞 명령의 전 값(0)은 그대로 두고 후 값만 5로 바꾸니, 기록에는 `[x 0 -> 5]` 하나만 남았습니다. 실제로는 마우스를 놓는 순간 합치기를 끝내서, 다음 끌기는 새 명령이 되게 합니다.
+
+## 새 편집은 다시 하기를 버린다
+
+마지막 장면은 실행 취소로 상자를 없앤 뒤 나무를 만든 경우입니다. 다시 하기 목록에 있던 "상자 만들기"가 버려졌습니다. 다시 하기 명령들은 "그 시점의 장면"을 전제로 만들어졌는데, 나무를 만들어 장면이 갈라진 뒤에는 그 전제가 깨지기 때문입니다. 예를 들어 `Create::revert`는 마지막 물체를 지우므로, 상자 만들기를 다시 한 뒤 되돌리면 상자 대신 엉뚱한 물체가 지워질 수 있습니다. 갈라진 역사를 모두 남기는 편집기도 있지만, 대부분은 이렇게 한 줄기만 유지합니다.
+
+<Note>
+예제의 `Create`는 "마지막 물체"를 지우는 식이라 명령의 순서에 기대고 있습니다. 실제 엔진에서는 명령이 물체를 배열 위치나 포인터가 아니라 [「저장과 불러오기」](#/read/cpp-game-engine/scene-serialize)의 GUID로 가리키게 해서, 순서가 꼬여도 정확한 물체를 찾게 합니다. 지운 물체를 되살리는 명령은 지울 때 그 물체를 직렬화해 두었다가 그대로 복원합니다. 여러 명령을 한 단위로 묶는 트랜잭션(예: 프리팹 풀기)도 명령 목록을 담은 명령 하나로 만듭니다.
+</Note>
+
+## 정리
+
+- 장면을 바꾸는 모든 편집을 하기와 되돌리기를 가진 명령 객체로 만들고, 두 스택으로 실행 취소와 다시 하기를 한다
+- 끌기처럼 매 프레임 생기는 명령은 앞 명령에 합쳐 실행 취소 한 번에 통째로 되돌아가게 한다
+- 새 편집을 하면 다시 하기 목록을 버리고, 명령은 위치가 아닌 GUID로 물체를 가리킨다

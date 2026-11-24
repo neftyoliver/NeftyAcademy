@@ -1,0 +1,99 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'QtConcurrent와 스레드 풀: run, mapped·filtered·mappedReduced, QFuture와 then, QFutureWatcher';
+export const terms = ['QtConcurrent', 'QFuture', 'QFutureWatcher', 'QThreadPool'];
+
+[「QThread와 워커 객체」](#/read/cpp-qt/qthr-worker)는 오래 사는 작업 스레드에 잘 맞지만, "이 함수를 백그라운드에서 한 번 돌려 줘"나 "이 이미지 천 장의 썸네일을 코어를 다 써서 만들어 줘" 같은 일에는 너무 거창합니다. **QtConcurrent**는 Qt의 전역 **스레드 풀**에 일을 던지고, 결과를 `QFuture`로 돌려받는 고수준 API입니다. 스레드를 직접 만들고 끝내는 일이 없습니다.
+
+## 소수 세기
+
+```cpp qt=Concurrent
+#include <QCoreApplication>
+#include <QFutureWatcher>
+#include <QThreadPool>
+#include <QtConcurrent>
+#include <cstdio>
+
+bool isPrime(int n) {
+    if (n < 2) return false;
+    for (int d = 2; d * d <= n; ++d) if (n % d == 0) return false;
+    return true;
+}
+
+int main(int argc, char** argv) {
+    QCoreApplication app(argc, argv);
+    std::printf("스레드 풀 크기는 기본으로 CPU 코어 수: %s\n",
+                QThreadPool::globalInstance()->maxThreadCount() ==
+                        QThread::idealThreadCount() ? "같다" : "다르다");
+
+    // 1) 함수 하나를 풀에서 돌리고 미래(QFuture)로 결과를 받는다
+    QFuture<int> f = QtConcurrent::run([] {
+        int count = 0;
+        for (int n = 0; n < 200'000; ++n) count += isPrime(n);
+        return count;
+    });
+    // result()는 끝날 때까지 기다린다
+    std::printf("run: 20만 미만 소수 %d개\n", f.result());
+
+    // 2) 목록 전체에 같은 일: mapped(바꾸기), filtered(고르기),
+    //    mappedReduced(바꿔서 모으기)
+    QList<int> nums;
+    for (int i = 1; i <= 20; ++i) nums << i;
+    auto square = [](int x) { return x * x; };
+    QList<int> squares = QtConcurrent::blockingMapped(nums, square);
+    QList<int> primes = QtConcurrent::blockingFiltered(nums, isPrime);
+    int sum = QtConcurrent::blockingMappedReduced(
+        nums, square, [](int& acc, int v) { acc += v; });
+    std::printf("제곱 앞 다섯 %d %d %d %d %d, 소수 %lld개, 제곱의 합 %d\n",
+                squares[0], squares[1], squares[2], squares[3], squares[4],
+                (long long)primes.size(), sum);
+
+    // 3) 기다리지 않고 끝나면 알림 받기: then(Qt 6) 또는 QFutureWatcher
+    QFutureWatcher<QString> watcher;
+    QObject::connect(&watcher, &QFutureWatcher<QString>::finished, &app, [&] {
+        std::printf("watcher: %s (메인 스레드에서 받음: %s)\n",
+                    qPrintable(watcher.result()),
+                    QThread::currentThread() == app.thread() ? "예" : "아니오");
+        app.quit();
+    });
+    QFuture<QString> chained =
+        QtConcurrent::run([] { return 6 * 7; })
+            .then([](int v) { return QString("답은 %1").arg(v); });
+    watcher.setFuture(chained);
+    return app.exec();
+}
+```
+
+```text
+스레드 풀 크기는 기본으로 CPU 코어 수: 같다
+run: 20만 미만 소수 17984개
+제곱 앞 다섯 1 4 9 16 25, 소수 8개, 제곱의 합 2870
+watcher: 답은 42 (메인 스레드에서 받음: 예)
+```
+
+## 함수 하나: run
+
+`QtConcurrent::run(함수)`는 함수를 풀의 놀고 있는 스레드에서 실행하고, 곧바로 `QFuture<결과>`를 돌려줍니다. `result()`를 부르면 결과가 나올 때까지 기다립니다. 예제는 결과를 바로 원해서 기다렸지만, GUI 스레드에서 `result()`로 기다리면 결국 창이 얼어붙으므로 실제로는 아래의 `then`이나 `QFutureWatcher`를 씁니다.
+
+## 목록 전체: mapped, filtered, reduced
+
+- `mapped`는 목록의 각 항목에 함수를 적용해 새 목록을 만듭니다(1~20의 제곱)
+- `filtered`는 함수가 참을 돌려주는 항목만 남깁니다(1~20 중 소수 8개)
+- `mappedReduced`는 바꾼 결과를 하나로 모읍니다(제곱의 합 2870). 모으는 함수는 Qt가 한 번에 하나씩만 부르므로 잠금이 필요 없습니다
+
+항목들은 여러 스레드에 나뉘어 동시에 처리되지만, `mapped`의 결과 순서는 원래 목록 순서와 같습니다. `blocking`이 붙은 판은 끝날 때까지 기다리고, 붙지 않은 판은 `QFuture`를 돌려줍니다. 이 함수들은 서로 독립적인 항목에 쓰는 것이므로, 함수 안에서 공유 데이터를 고치면 안 됩니다.
+
+## 끝나면 알려 줘
+
+- **then**(Qt 6): `QFuture`에 이어서 할 일을 붙입니다. 6×7을 계산하고, 이어서 그것을 "답은 42"라는 글로 바꾸는 사슬을 만들었습니다. 이어지는 함수가 어느 스레드에서 돌지는 인자로 정할 수 있고, 기본은 앞 일을 끝낸 스레드입니다
+- **QFutureWatcher**: `QFuture`를 지켜보다가 끝나면 `finished` 시그널을 냅니다. 지켜보는 객체가 메인 스레드에 살기 때문에 슬롯도 메인에서 실행되어, 결과를 바로 위젯에 넣을 수 있습니다. 진행률(`progressValueChanged`)과 취소(`cancel()`)도 이것으로 다룹니다
+
+<Note>
+전역 풀(`QThreadPool::globalInstance()`)의 크기는 기본으로 CPU 코어 수와 같습니다. 그 풀에서 파일 읽기나 네트워크 대기처럼 **막히는 일**을 오래 하면 계산 작업이 들어갈 자리가 없어집니다. 막히는 일은 별도의 `QThreadPool` 객체를 만들어 `QtConcurrent::run(&pool, ...)`으로 보내거나, Qt의 비동기 입출력 API(네트워크는 원래 막히지 않음)를 쓰세요.
+</Note>
+
+## 정리
+
+- QtConcurrent는 전역 스레드 풀에 일을 던지고 QFuture로 결과를 받으며, 스레드를 직접 관리하지 않는다
+- run은 함수 하나를, mapped·filtered·mappedReduced는 목록 전체를 여러 코어로 처리한다
+- GUI에서는 result()로 기다리지 말고 then이나 QFutureWatcher의 finished 시그널로 결과를 받는다

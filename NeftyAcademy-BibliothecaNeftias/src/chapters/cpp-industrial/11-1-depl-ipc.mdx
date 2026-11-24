@@ -1,0 +1,208 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '산업용 PC: 사무용 PC와 다른 점, 운영 체제 고르기, 켤 때 환경 확인과 systemd 단위, 정전과 SSD 수명';
+
+이 책의 HMI, 비전 검사, 데이터 수집 프로그램은 결국 공장의 어느 상자 안에서 돕니다. 그 상자가 대개 **산업용 PC**(IPC)입니다. 속은 PC와 같지만, 먼지와 진동과 열이 있는 제어반 안에서 몇 년 동안 꺼지지 않고 돌도록 만들어졌습니다.
+
+## 사무용 PC와 다른 점
+
+| 항목 | 산업용 PC | 이유 |
+| --- | --- | --- |
+| 냉각 | 팬 없이 케이스로 열을 뺀다 | 먼지와 팬 고장이 없다 |
+| 전원 | 24V 직류, 넓은 입력 범위 | 제어반의 전원을 그대로 쓴다 |
+| 설치 | DIN 레일, 패널, 랙 | 제어반 안에 들어간다 |
+| 저장 | 산업용 SSD, 정전 보호 | 정전과 잦은 쓰기를 견딘다 |
+| 포트 | 이더넷 여러 개, 직렬 포트, 절연 I/O | 필드버스와 사무망을 나눈다 |
+| 공급 | 같은 모델을 오래 공급 | 예비품과 인증을 유지한다 |
+| 감시 | 하드웨어 워치독 | 운영 체제가 얼어도 다시 켠다 |
+
+모델이 바뀌면 같은 프로그램이라도 타이밍을 다시 시험해야 하기 때문에, 장비 회사는 몇 년 뒤에도 같은 PC를 살 수 있는지를 성능만큼 따집니다.
+
+<Note>
+실시간 제어용 IPC는 BIOS에서 깊은 절전 상태(C-state), 하이퍼스레딩, 터보를 끄거나 제한해 지연의 흔들림을 줄이기도 합니다. 펌웨어가 운영 체제 몰래 CPU를 잠깐 가져가는 시스템 관리 인터럽트(SMI)처럼 커널로는 막을 수 없는 지연도 있어서, 고를 모델에서 `cyclictest`와 `hwlatdetect`로 재 본 뒤에 정합니다([「측정」](#/read/cpp-industrial/rt-measure)).
+</Note>
+
+## 운영 체제
+
+Windows를 쓴다면 기능은 바뀌지 않고 보안 업데이트만 10년 동안 받는 Windows IoT Enterprise LTSC를 씁니다. Windows 11 IoT Enterprise LTSC 2024의 지원은 2034년 10월까지입니다. Linux를 쓴다면 Debian이나 Ubuntu LTS 같은 장기 지원판, 또는 Yocto로 필요한 것만 담아 만든 이미지를 쓰고, 마감이 빠듯한 제어에는 [「PREEMPT_RT」](#/read/cpp-industrial/rt-preempt) 커널을 씁니다. Windows 옆에서 일부 CPU 코어를 실시간 커널에 따로 내주는 제품(실시간 확장, 하이퍼바이저)도 있습니다. 어느 쪽이든 장비마다 손으로 설치하지 않고, 시험을 마친 이미지를 통째로 올립니다([「업데이트」](#/read/cpp-industrial/depl-update)).
+
+## 켤 때 확인하기
+
+설치한 날 잘 돌던 장비도 몇 달 뒤에는 달라집니다. 누가 운영 체제를 업데이트하다 실시간 커널이 일반 커널로 바뀌기도 하고, BIOS 설정이 초기화되기도 하고, 케이블이 빠지기도 합니다. 그래서 제어 프로그램을 띄우기 전에 환경을 확인하는 작은 프로그램을 둡니다. 실패하면 제어를 시작하지 않을 것(실시간 커널, CPU 격리, 필드버스 포트)과, 경고만 하고 시작할 것(클럭 정책, 온도)을 나눕니다. Linux는 이런 상태를 `/proc`와 `/sys`의 파일로 보여 주므로, 확인은 파일 몇 개를 읽는 일입니다. 아래 프로그램은 인자로 루트 경로를 받으면 그 아래를 읽고, 인자가 없으면 임시 디렉터리에 가짜 장비를 만들어 연습합니다.
+
+```cpp
+#include <algorithm>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <string>
+#include <system_error>
+
+namespace fs = std::filesystem;
+
+std::string read_line(const fs::path& p) {             // 파일이 없으면 ""
+    std::ifstream f(p);
+    std::string s;
+    std::getline(f, s);
+    return s;
+}
+
+bool in_cpu_list(const std::string& list, int cpu) {   // "0,2-3" 꼴
+    size_t i = 0;
+    while (i < list.size()) {
+        size_t end = std::min(list.find(',', i), list.size());
+        std::string part = list.substr(i, end - i);
+        size_t dash = part.find('-');
+        int lo = std::stoi(part);
+        int hi = dash == std::string::npos ? lo : std::stoi(part.substr(dash + 1));
+        if (lo <= cpu && cpu <= hi) return true;
+        i = end + 1;
+    }
+    return false;
+}
+
+struct Config { int control_cpu; std::string fieldbus; int temp_limit; };
+
+int self_check(const fs::path& root, const Config& c) {
+    int fails = 0, warns = 0;
+    auto report = [&](bool hard, bool ok, const std::string& what,
+                      const std::string& detail) {
+        std::printf("  [%s] %s: %s\n", ok ? "통과" : hard ? "실패" : "경고",
+                    what.c_str(), detail.c_str());
+        if (!ok) ++(hard ? fails : warns);
+    };
+    std::string ver = read_line(root / "proc/sys/kernel/version");
+    report(true, ver.find("PREEMPT_RT") != std::string::npos, "실시간 커널", ver);
+
+    std::string cpu = std::to_string(c.control_cpu);
+    std::string iso = read_line(root / "sys/devices/system/cpu/isolated");
+    report(true, in_cpu_list(iso, c.control_cpu), "CPU " + cpu + " 격리",
+           "isolated=" + iso);
+
+    fs::path nic = root / "sys/class/net" / c.fieldbus;
+    std::string state = read_line(nic / "operstate");
+    std::string link = state == "up" ? "up " + read_line(nic / "speed") + "Mb/s"
+                     : state.empty() ? "포트 없음" : state;
+    report(true, state == "up", "필드버스 " + c.fieldbus, link);
+
+    std::string gov = read_line(root / "sys/devices/system/cpu" / ("cpu" + cpu) /
+                                "cpufreq/scaling_governor");
+    report(false, gov == "performance", "클럭 정책",
+           gov.empty() ? "정보 없음" : gov);
+
+    int hottest = -1;
+    std::error_code ec;
+    for (const auto& z : fs::directory_iterator(root / "sys/class/thermal", ec)) {
+        std::string t = read_line(z.path() / "temp");      // 밀리 도
+        if (!t.empty()) hottest = std::max(hottest, std::stoi(t) / 1000);
+    }
+    report(false, hottest >= 0 && hottest < c.temp_limit, "온도",
+           hottest < 0 ? "센서 없음" : "최고 " + std::to_string(hottest) + "도");
+
+    if (fails)
+        std::printf("=> 제어를 시작하지 않음 (실패 %d, 경고 %d)\n", fails, warns);
+    else
+        std::printf("=> 제어 시작 (경고 %d)\n", warns);
+    return fails ? 1 : 0;
+}
+
+void put(const fs::path& p, const std::string& text) {
+    fs::create_directories(p.parent_path());
+    std::ofstream(p) << text << '\n';
+}
+
+int main(int argc, char** argv) {
+    Config cfg{3, "enp2s0", 80};
+    if (argc > 1) return self_check(argv[1], cfg);      // 실제 장비에서는 "/"
+
+    fs::path r = fs::temp_directory_path() / "ipc-fixture";   // 연습용 가짜 장비
+    fs::remove_all(r);
+    put(r / "proc/sys/kernel/version",
+        "#1 SMP PREEMPT_RT Tue Mar 3 09:12:44 UTC 2026");
+    put(r / "sys/devices/system/cpu/isolated", "2-3");
+    put(r / "sys/devices/system/cpu/cpu3/cpufreq/scaling_governor", "powersave");
+    put(r / "sys/class/net/enp2s0/operstate", "up");
+    put(r / "sys/class/net/enp2s0/speed", "100");
+    put(r / "sys/class/thermal/thermal_zone0/temp", "48000");
+    put(r / "sys/class/thermal/thermal_zone1/temp", "61500");
+    std::printf("점검 1: 설치한 날\n");
+    self_check(r, cfg);
+
+    put(r / "proc/sys/kernel/version",
+        "#1 SMP PREEMPT_DYNAMIC Fri Jul 10 11:02:31 UTC 2026");
+    put(r / "sys/class/net/enp2s0/operstate", "down");
+    std::printf("점검 2: 업데이트로 일반 커널이 깔리고 케이블이 빠진 뒤\n");
+    self_check(r, cfg);
+    fs::remove_all(r);
+}
+```
+
+```text
+점검 1: 설치한 날
+  [통과] 실시간 커널: #1 SMP PREEMPT_RT Tue Mar 3 09:12:44 UTC 2026
+  [통과] CPU 3 격리: isolated=2-3
+  [통과] 필드버스 enp2s0: up 100Mb/s
+  [경고] 클럭 정책: powersave
+  [통과] 온도: 최고 61도
+=> 제어 시작 (경고 1)
+점검 2: 업데이트로 일반 커널이 깔리고 케이블이 빠진 뒤
+  [실패] 실시간 커널: #1 SMP PREEMPT_DYNAMIC Fri Jul 10 11:02:31 UTC 2026
+  [통과] CPU 3 격리: isolated=2-3
+  [실패] 필드버스 enp2s0: down
+  [경고] 클럭 정책: powersave
+  [통과] 온도: 최고 61도
+=> 제어를 시작하지 않음 (실패 2, 경고 1)
+```
+
+- **읽는 곳**: `/proc/sys/kernel/version`은 `uname -v`와 같은 커널 빌드 정보, `cpu/isolated`는 `isolcpus`로 떼어 둔 CPU, `operstate`와 `speed`는 링크 상태와 속도, `scaling_governor`는 클럭 정책, `thermal_zone*/temp`는 밀리 도 단위 온도입니다
+- **실패와 경고**: 일반 커널에서 모션을 돌리면 가끔 마감을 놓치는 장비가 되므로 아예 시작하지 않습니다. 절전형 클럭 정책은 [「지연과 지터」](#/read/cpp-industrial/rt-jitter)를 조금 늘릴 뿐이라 알람으로 알립니다
+- **루트를 인자로**: 경로를 받으니 가짜 장비로 시험할 수 있습니다. 이 책을 만든 가상 기계의 `/`에 돌리면 이렇게 나옵니다
+
+```text nocheck
+$ ./selfcheck /; echo "종료 코드 $?"
+  [실패] 실시간 커널: #1 SMP PREEMPT_DYNAMIC @0
+  [실패] CPU 3 격리: isolated=
+  [실패] 필드버스 enp2s0: 포트 없음
+  [경고] 클럭 정책: 정보 없음
+  [경고] 온도: 센서 없음
+=> 제어를 시작하지 않음 (실패 3, 경고 2)
+
+종료 코드 1
+```
+
+이 확인을 systemd 단위의 `ExecStartPre=`에 두면, 종료 코드가 0이 아닐 때 서비스가 시작되지 않습니다. 같은 단위에서 제어 프로그램을 root가 아닌 사용자로 돌리면서 필요한 것만 허락합니다.
+
+```ini
+[Unit]
+Description=Line 3 cell controller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=line3
+ExecStartPre=/opt/line3/bin/selfcheck /
+ExecStart=/opt/line3/bin/controller
+Restart=on-failure
+RestartSec=2
+WatchdogSec=2
+CPUAffinity=3
+LimitRTPRIO=90
+LimitMEMLOCK=infinity
+AmbientCapabilities=CAP_NET_RAW
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`CPUAffinity=3`은 격리한 CPU 3에 묶고, `LimitRTPRIO=`와 `LimitMEMLOCK=`은 root가 아니어도 SCHED_FIFO와 `mlockall`을 쓸 수 있게 합니다([「메모리 잠금과 할당 금지」](#/read/cpp-industrial/rt-memory)). `AmbientCapabilities=CAP_NET_RAW`는 [「EtherCAT」](#/read/cpp-industrial/fb-ethercat) 마스터처럼 이더넷 프레임을 직접 보내는 프로그램에 그 권한 하나만 줍니다. `Type=notify`와 `WatchdogSec=`은 [「워치독」](#/read/cpp-industrial/rel-watchdog)에서 본 대로 준비와 살아 있음을 알리게 합니다.
+
+## 정전과 디스크
+
+공장의 전원은 예고 없이 끊깁니다. 제어반에 24V 무정전 전원 장치(UPS)를 두면 정전을 접점 신호로 알려 주므로, 남은 시간 안에 출력을 안전 상태로 두고 정상 종료합니다. 파일은 [「오류에서 돌아오기」](#/read/cpp-industrial/rel-recovery)의 원자적 저장으로 쓰고, 루트 파일 시스템은 읽기 전용으로 두고 바뀌는 데이터만 따로 쓰는 파티션에 두면 정전에 운영 체제가 망가질 일이 줄어듭니다. SSD는 쓸 수 있는 총량(TBW)이 정해져 있으므로 로그와 이력의 하루 쓰기량으로 수명을 계산해 보고, SMART로 닳은 정도를 감시합니다([「로그와 진단」](#/read/cpp-industrial/rel-diagnostics)).
+
+## 정리
+
+- 산업용 PC는 팬 없는 냉각, 24V 전원, 산업용 SSD, 여러 이더넷 포트, 장기 공급, 하드웨어 워치독으로 제어반 안에서 몇 년을 돌도록 만든 PC다
+- 운영 체제는 10년 지원의 Windows IoT Enterprise LTSC나 장기 지원 Linux를 쓰고, 마감이 빠듯한 제어에는 PREEMPT_RT를 쓰며, 시험한 이미지를 통째로 올린다
+- 켤 때 커널, CPU 격리, 포트, 온도를 확인해 실패하면 제어를 시작하지 않고, systemd 단위로 CPU와 권한을 정하며, 정전과 SSD 수명에 대비한다

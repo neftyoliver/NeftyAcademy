@@ -1,0 +1,152 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'RP1이 맡는 일, 5에서 그대로인 것과 달라지는 것, 4의 배선을 5로 옮길 때 바뀌는 줄, PIO, 5V 이야기';
+export const terms = ['ttyAMA0', 'PIOLib'];
+
+4까지는 GPIO와 I2C, SPI, UART의 회로가 SoC 안에 있었습니다. 5는 그것들을 RP1이라는 칩으로 옮겼습니다. 헤더의 핀 자리와 3.3V 논리는 그대로인데, 핀 뒤에 있는 칩이 바뀐 것입니다. 4용으로 쓰인 글과 코드를 5에서 따라 할 때 생기는 문제의 대부분이 여기서 나옵니다.
+
+## RP1이 맡는 일
+
+- **입출력을 맡은 칩**: 라즈베리파이가 직접 만든 12mm 사각의 칩입니다. 5와 CM5, 그리고 5를 바탕으로 한 키보드형에 들어 있습니다. PC의 메인보드에서 사우스브리지라고 부르던 자리입니다
+- **SoC와는 PCIe로**: BCM2712와 PCIe 2.0 네 레인으로 이어져 있습니다. 리눅스가 보기에 RP1은 PCIe 장치 하나이고, 그 안의 주변 장치들이 메모리에 펼쳐져 보입니다
+- **헤더의 모든 것**: GPIO 28개와 그 핀으로 나오는 I2C, SPI, UART, PWM, I2S를 RP1이 만듭니다
+- **헤더 밖의 것도**: 이더넷, USB 3.0 둘과 USB 2.0 둘, 카메라와 디스플레이 단자 둘도 RP1의 일입니다([「USB와 전력 예산」](#/read/sbc-start/per-usb), [「카메라와 디스플레이 단자」](#/read/sbc-start/per-csi-dsi))
+
+## 그대로인 것
+
+- **핀의 자리와 번호**: GPIO 17은 5에서도 핀 11이고 3.3V 논리입니다([「핀 배치와 번호 붙이는 세 가지 방식」](#/read/sbc-start/hdr-pinout))
+- **커널을 거치는 코드**: `/dev/gpiochip0`, `/dev/i2c-1`, `/dev/spidev0.0`처럼 커널이 내주는 장치 파일로 쓴 프로그램은 고치지 않아도 돕니다. 이 서가의 책들이 커널의 인터페이스로 코드를 쓰는 까닭이기도 합니다
+- **켜는 법**: `config.txt`의 `dtparam`과 `dtoverlay`로 켭니다
+
+## 달라지는 것
+
+| 무엇 | 4와 Zero 2 W | 5 |
+| --- | --- | --- |
+| 헤더의 GPIO 칩 | `pinctrl-bcm2711` 같은 SoC의 것 | `pinctrl-rp1` |
+| GPIO 14와 15의 UART | 미니 UART, `/dev/serial0` | PL011, `/dev/ttyAMA0` |
+| GPIO 18과 19의 PWM 채널 | 0과 1 | 2와 3 |
+| 더 내는 버스의 오버레이 | `uart3`, `i2c3` 같은 이름 | 끝에 `-pi5`, 핀도 다르다 |
+| 드라이브 강도 | 4는 기본 4mA, 최대 8mA | 2, 4, 8, 12mA 가운데 기본 4mA |
+
+- **칩을 직접 만지던 라이브러리**: 커널을 거치지 않고 SoC의 레지스터에 바로 쓰던 라이브러리는 그 레지스터가 사라졌으므로 5에서 돌지 않습니다. 라즈베리파이의 백서는 RPi.GPIO와 pigpio가 5를 지원하지 않는다고 적고, WiringPi는 5에 맞춰 고쳐졌다고 적습니다
+- **UART가 단순해졌다**: 4와 Zero 2 W에서는 좋은 UART를 블루투스가 쓰고 헤더에는 미니 UART가 나와서, `disable-bt`나 `miniuart-bt`로 둘을 바꾸는 글이 많습니다. 5의 UART는 모두 PL011이고 블루투스는 전용 UART를 씁니다. 그런 글의 그 단계는 5에서 필요 없습니다
+- **`/dev/serial0`의 뜻**: 5에서 이 이름은 HDMI 단자 사이의 3핀 단자를 가리킵니다. GPIO 14와 15의 UART를 쓰는 프로그램은 `/dev/ttyAMA0`을 엽니다
+- **옛 커널의 칩 번호**: 2024년 7월 앞의 커널에서는 헤더의 칩이 `gpiochip4`였습니다
+
+## 4의 배선을 5로 옮기기
+
+핀의 기능은 칩이 정하므로, 같은 핀에 같은 버스를 내려 해도 5에서는 오버레이의 이름과 버스 번호가 달라집니다. 아래 예제는 선이 꽂힌 자리를 받아서 두 보드의 `config.txt`에 적을 줄을 찾습니다.
+
+```c
+// 4에서 쓰던 배선을 5로 옮길 때 config.txt의 줄이 어떻게 바뀌는지 찾는다
+#include <stdio.h>
+#include <string.h>
+
+struct wire { const char* kind; int a, b; }; // 버스의 종류와 선을 꽂은 GPIO 둘
+struct entry { struct wire at; const char* line; };
+
+// 오버레이마다의 핀. 펌웨어 저장소의 overlays README에서 옮겼다
+static const struct entry pi4[] = {
+    {{"UART", 14, 15}, "enable_uart=1"},
+    {{"UART", 0, 1}, "dtoverlay=uart2"},
+    {{"UART", 4, 5}, "dtoverlay=uart3"},
+    {{"UART", 8, 9}, "dtoverlay=uart4"},
+    {{"UART", 12, 13}, "dtoverlay=uart5"},
+    {{"I2C", 4, 5}, "dtoverlay=i2c3"},
+    {{"I2C", 6, 7}, "dtoverlay=i2c4,pins_6_7"},
+    {{"I2C", 12, 13}, "dtoverlay=i2c5"},
+    {{"I2C", 22, 23}, "dtoverlay=i2c6"},
+};
+static const struct entry pi5[] = {
+    {{"UART", 14, 15}, "dtoverlay=uart0-pi5"},
+    {{"UART", 0, 1}, "dtoverlay=uart1-pi5"},
+    {{"UART", 4, 5}, "dtoverlay=uart2-pi5"},
+    {{"UART", 8, 9}, "dtoverlay=uart3-pi5"},
+    {{"UART", 12, 13}, "dtoverlay=uart4-pi5"},
+    {{"I2C", 4, 5}, "dtoverlay=i2c2-pi5"},
+    {{"I2C", 6, 7}, "dtoverlay=i2c3-pi5"},
+    {{"I2C", 12, 13}, "dtoverlay=i2c2-pi5,pins_12_13"},
+    {{"I2C", 14, 15}, "dtoverlay=i2c3-pi5,pins_14_15"},
+    {{"I2C", 22, 23}, "dtoverlay=i2c3-pi5,pins_22_23"},
+};
+
+static const char* find(const struct entry* table, size_t n, struct wire w) {
+    for (size_t i = 0; i < n; ++i) {
+        const struct wire* t = &table[i].at;
+        if (strcmp(t->kind, w.kind) == 0 && t->a == w.a && t->b == w.b)
+            return table[i].line;
+    }
+    return "-";                              // 그 핀에는 이 버스가 없다
+}
+
+int main(void) {
+    const struct wire wired[] = {            // 선이 이미 꽂혀 있는 자리들
+        {"UART", 14, 15}, {"UART", 4, 5}, {"UART", 12, 13}, {"I2C", 4, 5},
+        {"I2C", 6, 7},    {"I2C", 22, 23}, {"I2C", 14, 15},
+    };
+    printf("배선             4에 적는 줄              5에 적는 줄\n");
+    for (size_t i = 0; i < sizeof wired / sizeof wired[0]; ++i) {
+        struct wire w = wired[i];
+        printf("%-4s GPIO %2d,%2d  %-23s  %s\n", w.kind, w.a, w.b,
+               find(pi4, sizeof pi4 / sizeof pi4[0], w),
+               find(pi5, sizeof pi5 / sizeof pi5[0], w));
+    }
+
+    // PWM은 줄이 아니라 채널 번호가 바뀐다: {GPIO, 4의 채널, 5의 채널}
+    const int pwm[][3] = {{12, 0, 0}, {13, 1, 1}, {18, 0, 2}, {19, 1, 3}};
+    printf("\nPWM 핀   4의 채널  5의 채널\n");
+    for (size_t i = 0; i < sizeof pwm / sizeof pwm[0]; ++i)
+        printf("GPIO %d  %d         %d\n", pwm[i][0], pwm[i][1], pwm[i][2]);
+}
+```
+
+```text
+배선             4에 적는 줄              5에 적는 줄
+UART GPIO 14,15  enable_uart=1            dtoverlay=uart0-pi5
+UART GPIO  4, 5  dtoverlay=uart3          dtoverlay=uart2-pi5
+UART GPIO 12,13  dtoverlay=uart5          dtoverlay=uart4-pi5
+I2C  GPIO  4, 5  dtoverlay=i2c3           dtoverlay=i2c2-pi5
+I2C  GPIO  6, 7  dtoverlay=i2c4,pins_6_7  dtoverlay=i2c3-pi5
+I2C  GPIO 22,23  dtoverlay=i2c6           dtoverlay=i2c3-pi5,pins_22_23
+I2C  GPIO 14,15  -                        dtoverlay=i2c3-pi5,pins_14_15
+
+PWM 핀   4의 채널  5의 채널
+GPIO 12  0         0
+GPIO 13  1         1
+GPIO 18  0         2
+GPIO 19  1         3
+```
+
+- **선은 그대로 둔다**: 표에 나온 자리들은 두 보드에서 같은 핀이 같은 신호(TX, SDA)를 맡습니다. 바뀌는 것은 `config.txt`의 줄입니다
+- **버스 번호가 바뀐다**: GPIO 4와 5의 UART는 4에서 3번, 5에서 2번입니다. 장치 파일의 이름도 따라 바뀌므로 프로그램에 이름을 박아 두지 않고 설정으로 받습니다
+- **5에만 있는 자리**: 줄표(-)는 그 보드의 그 핀에 그 버스가 없다는 뜻입니다. 5는 GPIO 14와 15에도 I2C를 낼 수 있습니다
+- **PWM은 채널 번호**: 같은 GPIO 18이라도 4에서는 0번 채널, 5에서는 2번 채널입니다. `/sys/class/pwm`에서 여는 번호가 달라집니다
+
+## PIO
+
+- **신호를 만들어 주는 작은 기계**: RP1에는 Pico의 것과 거의 같은 PIO 블록이 하나 있습니다. 상태 기계가 넷이고 명령을 32개까지 담습니다. 박자가 까다로운 신호를 리눅스 대신 칩이 만들어 줍니다
+- **오버레이로 쓰는 길**: `dtoverlay=pwm-pio,gpio=7`은 헤더의 아무 핀에나 PWM을 냅니다. 넷까지 됩니다. `dtoverlay=ws2812-pio,gpio=4,num_leds=60`은 색이 바뀌는 LED 띠를 몹니다
+- **직접 프로그램하는 길**: PIOLib이라는 라이브러리가 2024년 12월에 나왔습니다. 호출 하나가 RP1의 펌웨어에 편지를 보내는 식이라 10마이크로초 넘게 걸립니다. 상태 기계를 차려 놓고 데이터를 흘려보내는 일에는 맞고, 프로그램과 상태 기계가 촘촘히 주고받아야 하는 일에는 맞지 않습니다
+
+## 5V 이야기
+
+RP1의 자료가 처음 공개됐을 때 그 핀이 5V를 견딘다는 문장이 널리 옮겨졌습니다. 이 쪽을 쓰며 본 2023년 11월 판의 GPIO 절에는 그 문장이 없고, 칩의 전원이 꺼져 있을 때 3.63V 아래에서는 핀으로 전류가 거의 흐르지 않는다는 말만 있습니다. 공식 문서는 지금도 GPIO가 5V를 견디지 못한다고 적습니다. 5에서도 [「3.3V 논리와 전류 한계」](#/read/sbc-start/hdr-voltage)의 규칙을 그대로 지킵니다.
+
+<Note>
+예제의 표는 펌웨어 저장소의 overlays README와 RP1의 기능 표에서 옮긴 것이고, 줄을 찾는 일만 합니다. 5에서 켜 보지는 못했습니다. 장치 파일의 번호는 `ls /dev/ttyAMA* /dev/i2c-*`로, PWM의 채널은 `ls /sys/class/pwm/pwmchip*`로 확인하고 씁니다.
+</Note>
+
+## 정리
+
+- 5의 헤더는 RP1이라는 칩이 맡는다. 핀의 자리와 3.3V 논리는 4와 같고, 커널의 장치 파일로 쓴 코드는 그대로 돈다
+- 달라지는 것은 버스를 더 내는 오버레이의 이름과 번호, PWM의 채널, 헤더 UART의 장치 이름이다
+- 칩의 레지스터를 직접 만지는 옛 라이브러리와 5V를 견딘다는 말은 5에서 믿지 않는다
+
+## 참고 문서
+
+- [Raspberry Pi 문서: I/O controllers(RP1이 맡는 장치들, PCIe로 이어진 구조)](https://www.raspberrypi.com/documentation/computers/io-controllers.html)
+- [Raspberry Pi RP1 Peripherals(핀마다의 기능 표, 버스의 수, 패드의 설정, 전원이 꺼졌을 때의 핀)](https://www.scs.stanford.edu/~zyedidia/docs/rpi/rp1-peripherals.pdf)
+- [Raspberry Pi 백서: A history of GPIO usage on Raspberry Pi devices(5에서 도는 라이브러리와 돌지 않는 라이브러리)](https://pip-assets.raspberrypi.com/categories/685-app-notes-guides-whitepapers/documents/RP-006553-WP-2-A%20history%20of%20GPIO%20usage%20on%20Raspberry%20Pi%20devices,%20and%20current%20best%20practices.pdf)
+- [Raspberry Pi 문서: Configuration(Configure UARTs: 보드마다의 주 UART, 5의 UART들)](https://www.raspberrypi.com/documentation/computers/configuration.html)
+- [Raspberry Pi 블로그: PIOLib(RP1의 PIO를 여는 방법, pwm-pio, 호출에 걸리는 시간)](https://www.raspberrypi.com/news/piolib-a-userspace-library-for-pio-control/)
+- [Raspberry Pi 펌웨어 저장소: overlays/README(-pi5 오버레이의 핀, pwm-pio, ws2812-pio)](https://raw.githubusercontent.com/raspberrypi/firmware/master/boot/overlays/README)

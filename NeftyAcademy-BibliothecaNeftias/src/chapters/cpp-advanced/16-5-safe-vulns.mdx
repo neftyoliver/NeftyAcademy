@@ -1,0 +1,156 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '메모리 안전 버그 일곱 가지를 재현해 기본 빌드, -fhardened, 새니타이저가 어디서 멈추는지 본다';
+
+Microsoft는 2019년에 자사 제품에서 해마다 CVE가 붙는 취약점의 70%쯤이 메모리 안전 문제라고 밝혔습니다. Chromium도 심각한 보안 버그의 70%쯤이 그렇고 그 절반이 해제한 뒤에 쓰는 버그라고 했습니다. 2025년의 CWE 상위 25에는 범위 밖 쓰기가 5위, 해제 후 사용이 7위, 범위 밖 읽기가 8위에 있습니다. 이 책이 타입으로 막아 온 것이 이 목록입니다. 일곱 가지를 작은 프로그램으로 만들어 방어를 한 겹씩 올리며 돌려 봤습니다.
+
+## 일곱 가지
+
+| 번호 | 유형 | 재현한 코드 |
+| --- | --- | --- |
+| 1 | 스택에서 범위 밖 쓰기 | 8바이트 배열에 `strcpy`로 30글자를 쓴다 |
+| 2 | 힙에서 범위 밖 쓰기 | 네 칸짜리 배열의 8번 칸에 쓴다. 옆 객체의 값이 바뀐다 |
+| 3 | 힙에서 범위 밖 읽기 | 세 글자 메시지를, 상대가 말한 길이 40만큼 `memcpy`한다 |
+| 4 | 해제한 뒤에 쓰기 | `delete`한 세션을 옛 포인터로 읽는다. 그 자리에 새 세션이 와 있다 |
+| 5 | 정수가 감긴 크기 | 32비트의 `count * 16`이 0이 되어 버퍼가 작게 잡힌다 |
+| 6 | 초기화하지 않은 값 | 채우지 않은 지역 배열을 그대로 내보낸다 |
+| 7 | 타입 혼동 | `Label`을 가리키는 포인터를 `static_cast`로 `Circle`이라고 읽는다 |
+
+2번을 `vector`로 쓴 것이 아래입니다. 인자 없이 돌리면 옳은 프로그램이고, `8`을 주면 버그가 됩니다.
+
+```cpp
+#include <cstdio>
+#include <cstdlib>
+#include <vector>
+
+[[gnu::noinline]] void set(std::vector<int>& samples, std::size_t index, int value)
+{
+    samples[index] = value;                         // 번호를 믿는다
+}
+
+int main(int argc, char** argv)
+{
+    const std::size_t index = argc > 1 ? std::strtoul(argv[1], nullptr, 10) : 0;
+    std::vector<int> samples(4);
+    std::vector<int> limit(4, 100);
+    set(samples, index, 7);
+    std::printf("limit=%d\n", limit[0]);
+}
+```
+
+```text
+limit=100
+```
+
+4번과 6번은 이렇게 생겼습니다.
+
+```cpp nocheck
+#include <cstdio>
+#include <cstring>
+struct Session {
+    char user[16];
+    bool admin;
+};
+[[gnu::noinline]] Session* open(const char* user, bool admin)
+{
+    Session* s = new Session{};
+    std::strcpy(s->user, user);
+    s->admin = admin;
+    return s;
+}
+int main()
+{
+    Session* guest = open("guest", false);
+    delete guest;                                           // 세션이 끝났다
+    Session* root = open("root", true);                     // 같은 크기의 새 객체
+    // 옛 포인터로 읽는다
+    std::printf("user=%s admin=%d\n", guest->user, guest->admin);
+    delete root;
+}
+```
+
+```cpp nocheck
+#include <cstdio>
+#include <cstring>
+[[gnu::noinline]] bool check_password(const char* typed)
+{
+    char password[32];
+    std::strcpy(password, "hunter2-hunter2");
+    return std::strcmp(password, typed) == 0;
+}
+[[gnu::noinline]] void send_reply(bool ok)
+{
+    // 채우지 않은 채로 보낸다
+    char reply[32];
+    if (ok) std::strcpy(reply, "welcome");
+    for (char c : reply) std::putchar(c >= 32 && c < 127 ? c : '.');
+    std::putchar('\n');
+}
+int main(int argc, char** argv)
+{
+    send_reply(check_password(argc > 1 ? argv[1] : "guess"));
+}
+```
+
+```text nocheck
+$ ./heap_read 40         # 3번
+hi!.....................!.......password
+$ ./use_after_free       # 4번
+user=root admin=1
+$ ./uninitialized        # 6번
+.........Q..LV..hunter2-hunter2.
+```
+
+읽은 적 없는 비밀번호가 응답에 실려 나가고, 손님의 포인터가 관리자를 가리킵니다. 셋 다 종료 코드는 0입니다. 6번은 두 컴파일러가 `-Wall -Wextra`에서 조용했습니다. 4번은 GCC가 `-O2`에서 `-Wuse-after-free`로 경고했지만, `delete`를 다른 함수로 옮기자 조용해졌습니다. 실제 코드에서 지우는 곳과 쓰는 곳은 대개 떨어져 있습니다.
+
+## 돌려 본 결과
+
+"기본"은 Ubuntu 24.04의 `g++-14 -O2`입니다.
+
+| 유형 | 기본 | `-fhardened` | ASan과 UBSan |
+| --- | --- | --- | --- |
+| 1 | 멈춘다 | 멈춘다 | `stack-buffer-overflow` |
+| 2 | `limit=7`. 종료 코드 0 | 같다 | **같다** |
+| 2를 `vector`로 | `limit=7` | **단언으로 멈춘다** | `limit=7` |
+| 3 | 옆에 있던 비밀번호가 나온다 | 같다 | `heap-buffer-overflow` |
+| 4 | `user=root admin=1` | 같다 | `heap-use-after-free` |
+| 5 | 조용히 끝난다 | 같다 | 쓰는 순간 멈춘다 |
+| 6 | 앞 함수가 남긴 비밀번호가 나온다 | **0만 나온다** | 조용하다 |
+| 7 | 쓰레기 값을 찍는다 | 같다 | `does not point to an object of type 'Circle'` |
+
+- **일곱 가운데 여섯이 기본 빌드에서 종료 코드 0으로 끝났습니다.** 죽지도 않고 틀린 값이나 남의 값을 내놓습니다. 4번은 손님의 포인터로 관리자의 세션을 읽었습니다.
+- **기본 빌드는 이미 방어를 켜고 있습니다.** 이 배포판의 `g++`은 `_FORTIFY_SOURCE=3`, 스택 보호, PIE, CET가 기본입니다. `clang++` 20은 PIE뿐이었습니다. 1번을 멈춘 것은 `strcpy`의 길이를 본 FORTIFY입니다. 그것을 끄자 함수가 돌아갈 때 스택 보호가 `stack smashing detected`로 멈췄고, 둘 다 끄자 세그먼트 오류였습니다.
+- **ASan도 다 보지 못합니다.** 1번은 FORTIFY를 끄고(`-U_FORTIFY_SOURCE`) 빌드해야 ASan의 보고가 나왔습니다. 켜 두면 FORTIFY가 먼저 멈춥니다. 2번은 [독을 건너뛰어 옆 객체의 한가운데에](#/read/cpp-advanced/tool-sanitizers) 썼습니다. 그것을 잡은 것은 `vector`와 [라이브러리의 단언](#/read/cpp-advanced/safe-hardening)입니다. 6번은 Clang의 MSan만 `use-of-uninitialized-value`로 잡았습니다.
+- **`-fhardened`가 기본에 더한 것은 둘입니다.** 라이브러리의 단언과 지역 변수를 0으로 채우기입니다. 3, 4, 5, 7번에는 어느 플래그도 닿지 않습니다.
+
+## 방어의 값
+
+| 방어 | 잰 것 | 끔 → 켬 |
+| --- | --- | --- |
+| 스택 보호 | 16바이트 배열을 가진 함수 한 번 | 0.97 → 1.20 ns |
+| 지역 변수 0 채우기 | 같은 함수 | 1.20 → 1.32 ns |
+| 지역 변수 0 채우기 | 4 KB 버퍼를 가진 함수 | 3.0 → 26 ns |
+
+대부분의 함수에서는 재기 어려운 값입니다. 큰 지역 버퍼를 조금만 쓰는 함수만 다릅니다. 호출마다 4 KB를 지우게 됩니다. 그런 변수에 `[[gnu::uninitialized]]`를 붙이자 3.0 ns로 돌아왔습니다. [C++26 초안](#/read/cpp-syntax/ver-26)의 `[[indeterminate]]`가 같은 뜻입니다.
+
+## 구조로 없앤다
+
+플래그는 버그가 일어난 뒤에 멈추게 합니다. 타입은 버그가 생길 자리를 없애거나, 검사할 자리를 만들어 줍니다.
+
+| 유형 | 타입으로 쓰면 | 본 곳 |
+| --- | --- | --- |
+| 1, 2, 3 | 길이를 아는 `string`, `vector`, `span`으로 주고받는다. 위의 표처럼 단언이 볼 자리가 생긴다 | [`span`](#/read/cpp-stl/seq-span) |
+| 4 | 소유는 `unique_ptr`가 하고 빌린 것에는 [수명을 적는다](#/read/cpp-advanced/safe-profiles) | [소유권 설계](#/read/cpp-advanced/res-ownership) |
+| 5 | 곱하기 전에 확인한다. `__builtin_mul_overflow`가 감긴 것을 알려 줬다 | [`mul_sat`](#/read/cpp-syntax/ver-26) |
+| 6 | 선언할 때 초기화한다 | [수명](#/read/cpp-syntax/ubc-lifetime) |
+| 7 | `variant`로 담거나 `dynamic_cast`로 묻는다 | [견주기](#/read/cpp-advanced/te-compare) |
+
+<Note>
+C에서 온 유형 가운데 C++의 타입이 이미 없앤 것도 있습니다. `printf(user_text)`의 형식 문자열 공격이 그렇습니다. `std::format(user_text, value)`는 형식이 상수가 아니어서 컴파일되지 않았습니다. 스레드 사이의 경합은 [TSan](#/read/cpp-advanced/tool-ci)의 몫입니다.
+</Note>
+
+## 정리
+
+- 메모리 안전 버그 일곱 가운데 여섯은 기본 빌드에서 조용히 틀린 값을 내놓았다. 죽는 버그보다 죽지 않는 버그가 위험하다
+- FORTIFY와 스택 보호는 1번만, `-fhardened`는 라이브러리 타입으로 쓴 범위 오류와 초기화만, ASan은 멀리 건너뛴 쓰기를 빼고 잡았다. 한 겹으로 다 막는 방어는 없다
+- 방어의 값은 대부분 재기 어렵고 큰 지역 버퍼의 0 채우기만 눈에 띄었다. 플래그는 멈추게 하고, 길이와 소유를 아는 타입은 버그의 자리를 없앤다

@@ -1,0 +1,124 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '사라질 때 불리는 함수, 순서, 자원을 객체의 수명에 묶기';
+
+생성자가 "만들어질 때 반드시 불리는 함수"라면 소멸자는 **사라질 때 반드시 불리는 함수**입니다. C++에서 자원 관리가 C와 가장 크게 달라지는 지점입니다.
+
+## 언제 불리나
+
+```cpp
+#include <print>
+
+struct Trace {
+    const char* name;
+    ~Trace() { std::println("~{}", name); }
+};
+
+int main()
+{
+    Trace a{"a"};
+    {
+        Trace b{"b"};
+    }                   // b가 여기서 사라진다
+    Trace c{"c"};
+    std::println("끝");
+}                       // c, a 순서로 사라진다
+```
+
+```text
+~b
+끝
+~c
+~a
+```
+
+소멸자는 `~타입()`으로 쓰고 인자도 반환값도 없습니다. 지역 변수는 자기가 속한 중괄호가 끝날 때, **만들어진 순서의 반대로** 사라집니다. 나중에 만든 것이 먼저 만든 것에 기댈 수 있기 때문입니다.
+
+| 객체 | 소멸자가 불리는 때 |
+| --- | --- |
+| 지역 변수 | 범위를 벗어날 때. `return`, `break`, 예외로 나가도 |
+| 멤버 | 그것을 가진 객체가 사라질 때. 선언의 반대 순서로 |
+| 컨테이너의 원소 | 컨테이너가 사라지거나 원소를 지울 때 |
+| `unique_ptr`가 가진 객체 | `unique_ptr`가 사라질 때 |
+| 임시 객체 | 그 문장(전체 식)이 끝날 때 |
+| 전역 변수 | `main`이 끝난 뒤 |
+
+## RAII
+
+자원을 **생성자에서 얻고 소멸자에서 돌려주면**, 자원의 수명이 객체의 수명에 묶입니다. 이 방식에 RAII(Resource Acquisition Is Initialization)라는 이름이 붙어 있습니다.
+
+```cpp
+#include <cstdio>
+#include <print>
+
+class File {
+public:
+    File(const char* path, const char* mode) : handle_(std::fopen(path, mode)) {}
+    ~File()
+    {
+        if (handle_) {
+            std::fclose(handle_);
+            std::println("닫음");
+        }
+    }
+    File(const File&) = delete;             // 복사하면 두 번 닫게 된다
+    File& operator=(const File&) = delete;
+
+    bool ok() const { return handle_ != nullptr; }
+    void write(const char* text) { std::fputs(text, handle_); }
+
+private:
+    std::FILE* handle_;
+};
+
+bool save(const char* path, int value)
+{
+    File f(path, "w");
+    if (!f.ok())
+        return false;           // 여기서 나가도
+    if (value < 0)
+        return false;           // 여기서 나가도 소멸자가 닫는다
+    f.write("ok\n");
+    return true;
+}
+
+int main()
+{
+    std::println("{}", save("/tmp/raii-demo.txt", -1));
+    std::println("{}", save("/tmp/raii-demo.txt", 1));
+}
+```
+
+```text
+닫음
+false
+닫음
+true
+```
+
+`save`에는 `fclose`가 없습니다. 나가는 길이 몇 개든 `f`의 소멸자가 닫습니다. C였다면 `return`마다 `fclose`를 적거나 `goto cleanup`으로 모았을 것입니다.
+
+| C | C++ |
+| --- | --- |
+| `malloc` … `free` | `std::vector`, `std::unique_ptr` |
+| `fopen` … `fclose` | `std::fstream`, 또는 위와 같은 래퍼 |
+| `pthread_mutex_lock` … `unlock` | `std::lock_guard` |
+| `open` … `close` | 직접 만든 RAII 클래스 |
+
+메모리뿐 아니라 파일, 잠금, 소켓, GPIO 줄처럼 "얻었으면 돌려줘야 하는 것"이면 무엇이든 이렇게 감쌉니다.
+
+## 소멸자를 직접 쓸 일은 드물다
+
+멤버가 `std::string`, `std::vector`, `std::unique_ptr`처럼 스스로 정리하는 타입이면 소멸자를 적을 필요가 없습니다. 컴파일러가 멤버들의 소멸자를 차례로 불러 줍니다. 소멸자를 손으로 쓰는 것은 위의 `File`처럼 **날 자원을 직접 쥔 클래스**뿐이고, 그런 클래스는 작게 만들어 다른 클래스의 멤버로 씁니다.
+
+소멸자를 직접 썼다면 복사도 살펴야 합니다. 위에서 `= delete`로 복사를 막은 까닭이 그것입니다. 복사본이 같은 `handle_`을 들고 있다가 둘 다 `fclose`를 부르게 됩니다([「복사 생성과 복사 대입」](#/read/cpp-syntax/sm-copy)).
+
+<Note kind="warn">
+소멸자에서는 예외를 던지지 않습니다. 소멸자는 다른 예외 때문에 스택이 풀리는 도중에도 불리는데, 그때 예외가 하나 더 나오면 프로그램이 바로 끝납니다. 닫다가 실패할 수 있는 자원은 `close()` 같은 멤버 함수를 따로 두어 오류를 확인하게 하고, 소멸자는 "안 닫혔으면 조용히 닫는" 마지막 보루로 둡니다.
+</Note>
+
+## 정리
+
+- 소멸자는 객체가 사라질 때 반드시 불린다. 지역 변수는 만든 순서의 반대로
+- 자원을 생성자에서 얻고 소멸자에서 돌려주면(RAII) 어느 길로 나가도 새지 않는다
+- 날 자원을 쥔 작은 클래스에만 소멸자를 쓰고, 나머지는 그런 멤버들에 맡긴다

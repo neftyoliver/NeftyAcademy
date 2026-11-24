@@ -1,0 +1,107 @@
+import { Figure, Note } from 'paragoniahex';
+import { Scope } from '../../components/Scope';
+import { pwm, sine } from './data/sc-measure';
+
+export const summary = 'Vpp와 최대·최소, 평균과 RMS가 뜻하는 것, 주기와 주파수와 듀티, 주기가 잘린 화면의 평균';
+export const terms = [];
+
+파형에서 꺼내는 숫자는 몇 가지로 정해져 있습니다. 봉우리에서 골까지의 높이, 평균, RMS, 주기, 듀티입니다. 장비가 자동으로 읽어 주기도 하지만, 무엇을 뜻하는 숫자인지 알아야 틀린 값을 알아봅니다.
+
+## 높이를 말하는 숫자들
+
+<Figure caption="1.65V 둘레로 1V씩 오르내리는 1kHz 사인파. 센서나 증폭기의 출력에서 흔한 모양이다">
+  <Scope tdiv={5e-4} dt={1e-5} traces={[{ name: 'CH1 센서 출력', data: sine, vdiv: 0.5, pos: -3 }]} cursorsV={[0.65, 2.65]} />
+</Figure>
+
+| 이름 | 뜻 | 위 화면에서 |
+| --- | --- | --- |
+| 최대, 최소 | 가장 높은 전압과 가장 낮은 전압 | 2.65V, 0.65V |
+| Vpp | 최대에서 최소를 뺀 것(peak to peak) | 2.00V |
+| 진폭 | 가운데에서 봉우리까지. 사인파에서는 Vpp의 반 | 1.00V |
+| 평균 | 한 주기 동안의 전압을 고르게 편 값 | 1.65V |
+
+- **평균은 멀티미터의 직류 전압이다**: 멀티미터를 직류 전압에 놓고 이 신호를 재면 1.65V쯤이 나옵니다. 떨림은 보이지 않습니다
+- **Vpp만으로는 위치를 모른다**: 0.65V에서 2.65V까지인지, -1V에서 1V까지인지는 Vpp가 같습니다. 3.3V로 도는 핀에 넣어도 되는 신호인지는 최대와 최소를 봐야 압니다
+
+## RMS
+
+RMS는 같은 저항에서 같은 열을 내는 직류 전압입니다. 전압을 제곱해 평균을 내고 제곱근을 씌웁니다.
+
+```python
+import math
+
+n = 1000                            # 한 주기를 1000점으로
+sine = [1.65 + 1.0 * math.sin(2 * math.pi * i / n) for i in range(n)]
+pwm = [3.3 if i < n // 4 else 0.0 for i in range(n)]    # 듀티 25%
+
+def report(name, wave):
+    mean = sum(wave) / len(wave)
+    rms = math.sqrt(sum(v * v for v in wave) / len(wave))
+    ac_rms = math.sqrt(sum((v - mean) ** 2 for v in wave) / len(wave))
+    print(f"{name}: 평균 {mean:.3f}V, RMS {rms:.3f}V, 평균을 뺀 RMS {ac_rms:.3f}V")
+
+report("사인", sine)
+report("네모", pwm)
+print(f"사인의 진폭 ÷ √2 = {1.0 / math.sqrt(2):.3f}V")
+print(f"네모의 3.3V × √0.25 = {3.3 * math.sqrt(0.25):.3f}V")
+```
+
+```text
+사인: 평균 1.650V, RMS 1.795V, 평균을 뺀 RMS 0.707V
+네모: 평균 0.825V, RMS 1.650V, 평균을 뺀 RMS 1.429V
+사인의 진폭 ÷ √2 = 0.707V
+네모의 3.3V × √0.25 = 1.650V
+```
+
+- **RMS는 둘이다**: 직류까지 넣은 RMS와, 평균을 빼고 떨림만 본 RMS가 있습니다. 장비의 측정 목록에 둘이 따로 있고 이름은 장비마다 다릅니다. 어느 쪽인지 보고 고릅니다
+- **√2로 나누는 것은 사인파뿐이다**: 진폭을 √2로 나누면 RMS라는 공식은 평균이 0인 사인파에서만 맞습니다. 네모파의 RMS는 듀티의 제곱근에 높이를 곱한 값입니다
+- **멀티미터의 교류 전압과 견줄 때**: 싼 멀티미터는 사인파라고 치고 값을 셈합니다. 네모파나 PWM을 재면 오실로스코프의 RMS와 다르게 나옵니다
+
+## 시간을 말하는 숫자들
+
+<Figure caption="1kHz, 듀티 25%인 PWM. 세로 커서 둘이 한 주기를 잡고 있다">
+  <Scope tdiv={5e-4} dt={1e-5} traces={[{ name: 'CH1 PWM', data: pwm, vdiv: 1, pos: -2 }]} cursorsT={[1e-3, 2e-3]} />
+</Figure>
+
+- **주기와 주파수**: 같은 모양이 돌아오는 데 걸리는 시간이 주기이고, 그 역수가 주파수입니다. 위에서는 2칸, 1ms, 1kHz입니다
+- **듀티**: 한 주기 가운데 HIGH인 시간의 몫입니다. 0.5칸 켜지고 1.5칸 꺼지므로 25%입니다
+- **평균은 듀티를 따른다**: 0V와 3.3V를 오가는 PWM의 평균은 3.3V에 듀티를 곱한 0.825V입니다. LED의 밝기나 필터를 거친 전압이 이 값을 따릅니다
+- **오르내리는 시간**: 변이 10%에서 90%까지 올라가는 시간을 상승 시간이라고 합니다. 이 그림의 변은 곧게 그렸지만, 진짜 신호에서는 재야 할 값입니다([「대역폭과 상승 시간」](#/read/scope/lm-bandwidth))
+
+## 주기가 잘리면 평균이 틀린다
+
+평균과 RMS는 주기의 정수 배를 놓고 셈해야 맞습니다. 화면에 2.3주기가 걸쳐 있을 때 화면 전체로 평균을 내면 이렇게 됩니다.
+
+```python
+import math
+
+dt, f = 1e-5, 1000
+whole = [1.65 + math.sin(2 * math.pi * f * i * dt) for i in range(200)]   # 2주기
+cut = [1.65 + math.sin(2 * math.pi * f * i * dt) for i in range(230)]     # 2.3주기
+print(f"2주기의 평균 {sum(whole) / len(whole):.3f}V")
+print(f"2.3주기의 평균 {sum(cut) / len(cut):.3f}V")
+```
+
+```text
+2주기의 평균 1.650V
+2.3주기의 평균 1.738V
+```
+
+- **남는 조각이 값을 끈다**: 끝의 0.3주기는 봉우리 쪽 조각이라 평균을 0.09V 끌어올렸습니다
+- **주기 단위의 측정을 고른다**: 장비에는 화면 전체로 셈하는 측정과, 온전한 주기만 골라 셈하는 측정이 따로 있는 것이 많습니다. 되풀이되는 신호에는 주기 단위의 것을 씁니다
+- **주기를 많이 담으면 덜 틀린다**: 화면에 수십 주기를 담으면 남는 조각의 몫이 작아집니다. 그 대신 한 주기의 모양은 보이지 않습니다
+
+<Note>
+이 쪽의 화면과 숫자는 수식으로 만든 파형을 그리고 셈한 것입니다. 측정 항목의 이름(평균, 주기 평균, RMS, AC RMS 같은 것)과 셈하는 구간은 장비마다 다르므로, 가진 장비의 설명서에서 각 항목이 무엇을 놓고 셈하는지 한 번 확인합니다. 멀티미터가 교류 전압을 셈하는 방법도 제품마다 다릅니다.
+</Note>
+
+## 정리
+
+- 높이는 최대, 최소, Vpp, 평균으로 말한다. 평균은 멀티미터의 직류 전압과 같은 값이다
+- RMS는 같은 열을 내는 직류 전압이다. 직류를 넣은 것과 뺀 것이 있고, √2로 나누는 공식은 사인파에만 맞는다
+- 평균과 RMS는 온전한 주기를 놓고 셈해야 맞다. 화면에 주기가 잘려 있으면 값이 끌려간다
+
+## 참고 문서
+
+- [Tektronix: XYZs of Oscilloscopes(파형의 측정: 주파수와 주기, 전압, 디지털 장비의 자동 측정)](https://www.ece.ucdavis.edu/~spencer/195/datasheets/XYZ.pdf)
+- [Tektronix: Oscilloscope Fundamentals, Capturing Your Signal(눈금으로 읽기, 커서, 자동 측정)](https://res.cloudinary.com/iwh/image/upload/q_auto,g_center/assets/1/26/Oscilloscope_Fundamentals_Capturing_Your_Signal_-_Application_Note.pdf)

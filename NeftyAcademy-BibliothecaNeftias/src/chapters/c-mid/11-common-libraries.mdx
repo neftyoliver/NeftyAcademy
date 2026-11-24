@@ -1,0 +1,146 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'C로 일할 때 자주 만나는 라이브러리 지도, zlib 압축과 SQLite 데이터베이스를 직접 써 보기';
+
+C 표준 라이브러리는 작습니다. [「C 표준 라이브러리 전체 훑기」](#/read/c-mid/libc-tour)에서 본 것 밖의 일, 곧 압축, 데이터베이스, 네트워크, 암호, 그래픽은 바깥 라이브러리를 씁니다. 다행히 C는 거의 모든 언어가 불러 쓸 수 있는 공용어라서, 오래되고 단단한 라이브러리가 대부분 C로 되어 있습니다. 이 쪽은 그 지도를 펼치고, 두 개를 직접 써 봅니다.
+
+## 분야별 지도
+
+| 분야 | 대표 라이브러리 | 이 책에서 |
+| --- | --- | --- |
+| 압축 | zlib, zstd, liblzma | 이 쪽 |
+| 내장 데이터베이스 | SQLite | 이 쪽 |
+| 네트워크·HTTP | libcurl, libuv | [「HTTP」](#/read/c-mid/http) |
+| 암호·TLS | OpenSSL, mbedTLS | [「TLS로 암호화하기」](#/read/c-mid/iot-tls) |
+| JSON | cJSON, jansson | [「JSON 다루기」](#/read/c-mid/iot-json) |
+| 그래픽·창·소리 | SDL, GLFW, raylib | C++ 책들 |
+| 머리 파일 하나짜리 | stb 모음(이미지 읽기 등) | [「헤더만 있는 라이브러리」](#/read/c-mid/lib-header-only) |
+
+고를 때 볼 것은 세 가지입니다. 라이선스(zlib·SQLite처럼 거의 제약이 없는 것부터 GPL까지), 누가 얼마나 오래 고쳐 왔는지, 그리고 내가 쓰는 운영체제의 패키지로 쉽게 구할 수 있는지입니다.
+
+## zlib: 압축
+
+zlib은 PNG 그림, zip·gzip 파일, HTTP 압축 속에 들어 있는 압축 라이브러리입니다. `compress2`로 줄이고 `uncompress`로 되살립니다. 마지막 인자 9는 가장 세게 줄이라는 뜻입니다(0~9).
+
+```c flags=-lz
+#include <stdio.h>
+#include <string.h>
+#include <zlib.h>
+
+int main(void)
+{
+    char text[2000];
+    text[0] = '\0';
+    for (int i = 0; i < 40; i++)
+        strcat(text, "고양이는 꼬리로 말한다. ");
+    uLong len = (uLong)strlen(text) + 1;
+
+    unsigned char packed[2000];
+    uLongf plen = sizeof packed;
+    if (compress2(packed, &plen, (const Bytef *)text, len, 9) != Z_OK)
+        return 1;
+
+    char back[2000];
+    uLongf blen = sizeof back;
+    if (uncompress((Bytef *)back, &blen, packed, plen) != Z_OK)
+        return 1;
+
+    printf("머리 파일 %s, 실제로 불러온 것 %s\n", ZLIB_VERSION,
+           zlibVersion());
+    printf("원래 %lu바이트 -> 압축 %lu바이트\n", len, plen);
+    printf("되살린 글이 같은가: %d\n", blen == len && !memcmp(back, text, len));
+    printf("CRC-32 %08lx\n", crc32(0L, (const Bytef *)text, (uInt)len));
+    return 0;
+}
+```
+
+```text
+머리 파일 1.3, 실제로 불러온 것 1.3.1.zlib-ng
+원래 1361바이트 -> 압축 60바이트
+되살린 글이 같은가: 1
+CRC-32 ab74d39b
+```
+
+- 같은 문장을 40번 되풀이한 글이라 1361바이트가 60바이트로 줄었습니다. 압축은 되풀이를 찾아 "앞의 것을 다시"로 바꾸는 일이라, 되풀이가 많을수록 잘 줄어듭니다
+- `crc32`는 파일이 깨지지 않았는지 보는 검사값입니다. Python의 `zlib.crc32`로 같은 글을 계산해도 `ab74d39b`가 나왔고, 압축 결과도 60바이트로 같았습니다
+- 첫 줄이 재미있습니다. 컴파일할 때 읽은 머리 파일은 우분투의 zlib 1.3인데, 실행할 때 불러온 것은 `/usr/local/lib`에 깔린 **zlib-ng**(zlib과 똑같이 쓸 수 있게 만든 더 빠른 구현)였습니다. 이 검사용 컴퓨터에 누가 따로 깔아 둔 것이고, `ldd`로 보면 `/usr/local/lib/libz.so.1`을 가리킵니다
+
+<Note>
+이것이 [「동적 라이브러리」](#/read/c-mid/lib-dynamic)에서 본 동적 연결의 양면입니다. 같은 이름(`libz.so.1`)과 같은 함수 모양만 지키면 실행할 때 다른 구현으로 갈아 끼울 수 있습니다. 좋게 보면 프로그램을 다시 빌드하지 않고 빨라지는 것이고, 나쁘게 보면 내가 시험한 것과 다른 코드가 돌 수 있다는 것입니다. 그래서 버전을 따질 때는 머리 파일의 상수(`ZLIB_VERSION`)가 아니라 실행 중에 묻는 함수(`zlibVersion()`)를 봅니다.
+</Note>
+
+## SQLite: 파일 하나짜리 데이터베이스
+
+SQLite는 서버 없이 프로그램 안에서 도는 SQL 데이터베이스입니다. 데이터베이스 전체가 파일 하나이고, 휴대폰 앱, 웹 브라우저, 여러 운영체제가 설정과 기록을 담는 데 씁니다. 아래는 파일 대신 메모리(`":memory:"`)에 만들어 봅니다.
+
+```c flags=-lsqlite3
+#include <stdio.h>
+#include <sqlite3.h>
+
+int main(void)
+{
+    sqlite3 *db;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK)
+        return 1;
+    sqlite3_exec(db, "CREATE TABLE cat(name TEXT, kg REAL)",
+                 nullptr, nullptr, nullptr);
+
+    // 물음표 자리에 값을 끼워 넣는 준비된 문장
+    sqlite3_stmt *ins;
+    sqlite3_prepare_v2(db, "INSERT INTO cat VALUES(?, ?)", -1, &ins,
+                       nullptr);
+    const char *names[] = {"미네르바", "슈뢰딩거", "나비"};
+    const double kgs[] = {4.2, 3.1, 5.0};
+    for (int i = 0; i < 3; i++) {
+        sqlite3_bind_text(ins, 1, names[i], -1, SQLITE_STATIC);
+        sqlite3_bind_double(ins, 2, kgs[i]);
+        sqlite3_step(ins);
+        sqlite3_reset(ins);
+    }
+    sqlite3_finalize(ins);
+
+    sqlite3_stmt *q;
+    sqlite3_prepare_v2(db,
+        "SELECT name, kg FROM cat WHERE kg > 4 ORDER BY kg DESC",
+        -1, &q, nullptr);
+    while (sqlite3_step(q) == SQLITE_ROW)
+        printf("%s %.1fkg\n", (const char *)sqlite3_column_text(q, 0),
+               sqlite3_column_double(q, 1));
+    sqlite3_finalize(q);
+
+    printf("SQLite %s\n", sqlite3_libversion());
+    sqlite3_close(db);
+    return 0;
+}
+```
+
+```text
+나비 5.0kg
+미네르바 4.2kg
+SQLite 3.45.1
+```
+
+- 흐름은 준비(prepare), 값 끼우기(bind), 한 걸음씩 실행(step), 정리(finalize)의 **네 단계**입니다. `SELECT`는 `sqlite3_step`이 `SQLITE_ROW`를 줄 때마다 한 줄씩 읽습니다
+- 값은 SQL 글에 직접 이어 붙이지 않고 `?` 자리에 `sqlite3_bind_*`로 끼웁니다. 사용자가 넣은 글에 따옴표나 SQL이 섞여 있어도 그냥 값으로만 다뤄지므로, **SQL 주입** 공격을 막는 기본 습관입니다
+- 짧게 줄이려고 이 예제는 몇몇 반환값을 확인하지 않았습니다. 실제 코드에서는 `sqlite3_prepare_v2`와 `sqlite3_step`의 결과를 모두 확인하고, 실패하면 `sqlite3_errmsg(db)`로 까닭을 봅니다
+
+## 찾고 연결하기: pkg-config
+
+라이브러리마다 필요한 컴파일러 옵션이 다릅니다. 많은 라이브러리가 **pkg-config** 설명 파일(`.pc`)을 함께 깔아 두므로, 그것에 물어보면 됩니다.
+
+```text nocheck
+$ pkg-config --modversion zlib sqlite3
+1.3
+3.45.1
+$ pkg-config --cflags --libs zlib sqlite3
+-lz -lsqlite3
+$ gcc app.c $(pkg-config --cflags --libs zlib sqlite3) -o app
+```
+
+여기서는 두 라이브러리의 머리 파일이 기본 위치(`/usr/include`)에 있어 `--cflags`가 빈칸이었습니다. CMake에서는 `find_package(ZLIB)`, `find_package(SQLite3)`처럼 찾습니다([「CMake와 Ninja」](#/read/c-mid/build-cmake)). 우분투에서는 실행용 패키지(`zlib1g`)와 개발용 패키지(`zlib1g-dev`, 머리 파일과 `.so` 연결 고리)가 나뉘어 있어서, 빌드하려면 `-dev` 쪽을 깔아야 합니다. 같은 패키지 목록을 보니 cJSON은 실행용(`libcjson1`)만 있어 pkg-config가 찾지 못했습니다.
+
+## 정리
+
+- 압축, 데이터베이스, 네트워크, 암호처럼 표준 밖의 일은 오래 다듬어진 C 라이브러리를 골라 쓰며, 라이선스와 관리 상태를 먼저 본다
+- zlib은 `compress2`·`uncompress`로, SQLite는 준비·끼우기·실행·정리의 흐름으로 쓰고, SQL 값은 반드시 `?` 자리에 끼운다
+- 동적 연결된 라이브러리는 실행할 때 다른 구현으로 바뀔 수 있으므로 버전은 실행 중에 묻고, 빌드 옵션은 pkg-config에 묻는다

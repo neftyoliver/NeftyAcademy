@@ -1,0 +1,204 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '아직 승인되지 않은 다음 판. 지금 쓸 수 있는 것, 리플렉션과 계약, 2026년 11월의 상황';
+
+C++26은 리플렉션, 계약, `std::execution`이 들어가는 큰 판입니다. 그런데 이 글을 쓰는 지금 **아직 표준이 아닙니다.** 무엇이 정해졌고 무엇이 흔들리는지부터 봅니다.
+
+## 지금의 상황
+
+2026년 11월 20일 기준입니다.
+
+| 때 | 일어난 일 |
+| --- | --- |
+| 2025년&nbsp;2월 | 위원회(WG21)가 계약(Contracts)을 초안에 넣었다 |
+| 2025년&nbsp;6월 | 리플렉션이 초안에 들어갔다 |
+| 2025년&nbsp;11월 | "트리비얼 재배치" 기능이 초안에서 **빠졌다.** 계약을 빼 달라는 요청은 받아들여지지 않았다 |
+| 2026년&nbsp;3월 | 위원회의 기술 작업이 끝났다. 초안을 각국 표준 기구의 최종 투표(DIS)에 부쳤다 |
+| 2026년&nbsp;10월 | 그 투표가 **부결되었다.** 찬성 13, 반대 9, 기권 12. 반대가 4분의 1을 넘으면 안 되는 조건을 채우지 못했다 |
+| 2026년&nbsp;11월 | 16일부터 21일까지 위원회가 브라질 부지오스에서 모여 다음 단계를 정하는 중이다 |
+
+C++ 표준이 이 단계에서 부결된 것은 처음입니다. 반대의 까닭은 **계약**으로 알려져 있습니다. 설계가 아직 준비되지 않았다는 쪽과, 여러 해에 걸쳐 거듭 표결로 승인된 것이라는 쪽이 맞서 있습니다. 거론되는 길은 계약을 빼고 다시 투표하기, 조금 고쳐 다시 투표하기, 계약을 별도 문서로 떼기 등이고, 다시 투표한다면 2027년으로 넘어갑니다. 이 글을 쓰는 시점에 회의의 결과는 공개되지 않았습니다.
+
+그래서 이 페이지의 내용은 <strong>"2026년 3월의 초안"</strong>이라고 읽어야 합니다. 계약은 빠지거나 바뀔 수 있고, 표준 라이브러리의 범위 검사(강화)가 계약 위에 쓰여 있어 함께 영향을 받을 수 있습니다. 나머지 기능은 다툼의 대상이 아닙니다.
+
+## 지금 쓸 수 있는 것
+
+초안의 작은 기능 몇은 이미 컴파일러에 들어와 있습니다. `-std=c++26`으로 켭니다. 아래는 이 책의 기준인 GCC 14에서 돌린 것입니다.
+
+```cpp std26
+#include <cstdint>
+#include <mutex>
+#include <numeric>
+#include <print>
+#include <string_view>
+#include <tuple>
+
+std::tuple<int, int, int> read_xyz() { return {1, 2, 3}; }
+
+constexpr std::string_view why = "이 코드는 int가 32비트라고 가정한다";
+static_assert(sizeof(int) == 4, why);       // 메시지 자리에 상수 문자열 객체
+
+int main()
+{
+    auto [x, _, _] = read_xyz();            // 쓰지 않는 자리에 _ 를 거듭 쓴다
+    std::mutex m;
+    std::lock_guard _(m);                   // 이름이 필요 없는 잠금
+    std::println("{}", x);
+
+    std::uint8_t level = 200;
+    std::uint8_t step = 100;
+    std::println("{}", std::add_sat(level, step));      // 넘치지 않고 끝에서 멈춘다
+    std::println("{}", std::saturate_cast<std::uint8_t>(-5));
+}
+```
+
+```text
+1
+255
+0
+```
+
+`std::add_sat`, `sub_sat`, `mul_sat`, `saturate_cast`(`<numeric>`)는 넘칠 때 감기지 않고 **최댓값이나 최솟값에서 멈추는** 산술입니다. 센서 값을 더하거나 PWM 듀티를 올릴 때 바로 쓸모가 있습니다.
+
+다음 둘은 GCC 14에는 없고 Clang 19에서 돌렸습니다(GCC는 15부터).
+
+```cpp std26
+#include <print>
+#include <string>
+
+template <typename... Ts>
+using First = Ts...[0];                     // 묶음의 0번째 타입
+
+template <typename... Args>
+auto last(Args... args)
+{
+    return args...[sizeof...(args) - 1];    // 묶음의 마지막 값
+}
+
+void connect(int pin) { std::println("pin {}", pin); }
+void connect(double) = delete("핀 번호는 정수로 준다");
+
+int main()
+{
+    First<int, double, std::string> a = 17;
+    connect(a);
+    std::println("{}", last(1, 2.5, "끝"));
+    // connect(17.0);   // error: call to deleted function 'connect': 핀 번호는 …
+}
+```
+
+```text
+pin 17
+끝
+```
+
+## 언어
+
+| 기능 | 한 줄 설명 | GCC / Clang |
+| --- | --- | --- |
+| `_` 자리 표시 이름 | 한 범위에서 여러 번 쓸 수 있는 "버리는 이름" | 14 / 18 |
+| `static_assert`의 메시지 | 컴파일할 때 만든 문자열을 줄 수 있다 | 14 / 17 |
+| 묶음 인덱스 `args...[i]` | [묶음](#/read/cpp-syntax/tpl-variadic)의 몇 번째를 바로 꺼낸다 | 15 / 19 |
+| `= delete("까닭")` | 지운 함수를 부르면 까닭이 오류에 나온다 | 15 / 19 |
+| `#embed` | 파일을 바이트 배열로 끼워 넣는다 ([C23](#/read/c-basic/ver-c23)과 같다) | 15 / ? |
+| 조건 안의 구조적 바인딩 | `if (auto [p, ec] = f())` | 15 / 21 |
+| 구조적 바인딩의 묶음 | `auto [first, ...rest] = tuple;` | 16 / 21 |
+| `constexpr` 예외 | 컴파일할 때의 계산 안에서 `throw`와 `catch` | 16 / 없음 |
+| 확장 문 `template for` | 튜플이나 묶음의 원소마다 본문을 찍어 낸다 | 16 / 일부 |
+| 초기화하지 않은 값 읽기 | 정의되지 않은 동작에서 "잘못된 동작"으로 | 16 / 없음 |
+| **계약** | `pre`, `post`, `contract_assert` | 16 / 없음 |
+| **리플렉션** | `^^`와 `[: :]` | 16 (`-freflection`) / 없음 |
+
+`?`는 확인하지 못한 것이고, "없음"은 2026년 11월의 Clang 지원 표에 아직 구현되지 않았다고 적힌 것입니다. GCC는 C++26 지원 전체를 실험적이라고 적고 있습니다.
+
+## 초기화하지 않은 값
+
+```cpp nocheck
+int count;              // 초기화하지 않았다
+use(count);             // C++23까지: 정의되지 않은 동작. C++26: 잘못된 동작
+```
+
+"잘못된 동작"(erroneous behavior)은 새로 생긴 등급입니다. 프로그램은 여전히 **틀렸습니다.** 다만 컴파일러가 "이런 일은 일어나지 않는다"고 가정해 주변 코드를 지워 버릴 수 없고, 변수에는 구현이 정한 어떤 값이 들어 있습니다. 새니타이저와 경고는 계속 이것을 잡아도 됩니다. 일부러 초기화를 건너뛰려면 `int buffer[4096] [[indeterminate]];`라고 적습니다.
+
+## 계약
+
+함수가 **불리기 전에 참이어야 하는 것**과 **돌려줄 때 참이어야 하는 것**을 선언에 적습니다.
+
+```cpp nocheck
+// post가 쓰는 값 매개변수는 const여야 한다
+int scale(const int value, int percent)
+    pre (percent >= 0 && percent <= 100)        // 사전 조건
+    post (result : result <= value)             // 사후 조건. result는 반환값의 이름
+{
+    contract_assert(value >= 0);                // 본문 안의 단언
+    return value * percent / 100;
+}
+```
+
+`assert` 매크로와 달리 언어의 일부이고, 조건이 **선언에** 있어서 부르는 쪽과 도구가 볼 수 있습니다. 어겼을 때 무슨 일이 일어날지는 코드가 아니라 **빌드할 때** 고릅니다. 무시하기, 알리고 계속하기, 알리고 끝내기, 바로 끝내기의 네 가지입니다.
+
+다툼이 이 대목에 있습니다. 같은 코드가 빌드 설정에 따라 검사를 하기도 하고 안 하기도 한다는 점, 안전을 위한 장치로 믿을 수 있는가 하는 점이 쟁점입니다. 위 문법은 2026년 3월 초안의 것이고, 이 책을 쓰는 환경(GCC 14, Clang 19)에서는 컴파일해 보지 못했습니다. 규칙과 평가 방식은 [「계약」](#/read/cpp-advanced/safe-contracts)에서 자세히 봅니다.
+
+## 리플렉션
+
+프로그램이 **자기 자신의 타입과 멤버를 컴파일할 때 들여다보는** 기능입니다. C++에 오랫동안 없던 것입니다.
+
+```cpp nocheck
+#include <meta>
+
+enum class Mode { off, blink, solid };
+
+template <typename E>
+constexpr std::string_view enum_name(E value)
+{
+    template for (constexpr auto e :
+                  std::define_static_array(std::meta::enumerators_of(^^E)))
+        if (value == [:e:])
+            return std::meta::identifier_of(e);
+    return "?";
+}
+
+static_assert(enum_name(Mode::blink) == "blink");
+```
+
+| 문법 | 뜻 |
+| --- | --- |
+| `^^E` | `E`를 가리키는 **값**(`std::meta::info`)을 얻는다 |
+| `std::meta::enumerators_of(…)`, `nonstatic_data_members_of(…)` 등 | 그 값에게 묻는 `consteval` 함수들 (`<meta>`) |
+| `[:e:]` | 그 값을 다시 코드로 되돌린다 (스플라이스) |
+| `template for` | 컴파일할 때의 목록을 돌며 본문을 찍어 낸다 |
+
+열거형의 이름 찍기, 구조체를 JSON으로 바꾸기, 명령줄 옵션 파서 만들기처럼 지금까지 매크로나 외부 코드 생성기로 하던 일이 언어 안에서 됩니다. [타입 특성](#/read/cpp-syntax/ct-assert)이 "예/아니요"만 답했다면 리플렉션은 목록을 줍니다. 이 예제도 초안의 문법을 옮긴 것이고 직접 컴파일해 보지 못했습니다. GCC 16에서 `-std=c++26 -freflection`으로 됩니다.
+
+## 라이브러리
+
+| 헤더·타입 | 하는 일 | GCC |
+| --- | --- | --- |
+| `<inplace_vector>` | 용량이 고정된 `vector`. [힙을 쓰지 않는다](#/read/cpp-syntax/tpl-nontype) | 16 |
+| `std::function_ref`, `std::copyable_function` | [호출 가능한 것을 빌려 보기, 담기](#/read/cpp-syntax/lam-function) | 16 |
+| `std::optional<T&>` | 참조를 담는 `optional`. "없을 수 있는 참조" | 16 |
+| `<simd>` | CPU의 벡터 명령(NEON, SSE)을 타입으로 | 16 |
+| `<debugging>` | `std::breakpoint()`, `std::is_debugger_present()` | 16 |
+| `std::indirect`, `std::polymorphic` | 힙에 두되 값처럼 복사되는 래퍼 | 16 |
+| 포화 산술 | `std::add_sat` 등 | 14 |
+| `<execution>`의 `std::execution` | 비동기 작업을 엮는 틀 (sender/receiver) | |
+| `<hive>` | 원소의 주소가 안정적이고 지우기가 싼 컨테이너 | |
+| `<linalg>` | BLAS 방식의 선형대수 | |
+| `<hazard_pointer>`, `<rcu>` | 잠금 없는 자료구조의 메모리 회수 | |
+| 강화된 표준 라이브러리 | `v[i]`, `*opt`, `span`의 범위를 표준이 검사하게 한다 | ([지금은 매크로로](#/read/cpp-syntax/ubc-tools)) |
+
+소형 기기 쪽에서 눈여겨볼 것은 `inplace_vector`, `function_ref`, 포화 산술, `simd`, 그리고 강화된 라이브러리입니다.
+
+## 빠진 것
+
+"트리비얼 재배치"(객체를 `memcpy`로 옮겨도 되는지를 타입에 표시하는 기능)는 2025년 2월에 초안에 들어갔다가 그해 11월에 **빠졌습니다.** 설계에 대한 이견이 풀리지 않아 다음 판으로 미뤘습니다. 초안에 들어간 기능도 마지막까지 바뀔 수 있다는 것을 보여 준 사례이고, 지금의 계약이 같은 갈림길에 있습니다.
+
+<Note kind="warn">
+교재와 블로그의 "C++26 기능" 목록은 대부분 2026년 3월의 초안을 기준으로 쓰였습니다. 실제 표준이 나오기 전까지는 **컴파일러의 문서**(GCC의 "C++ Standards Support", Clang의 "C++ Support")와 위원회의 소식을 함께 확인하세요. 제품 코드에서는 이미 여러 컴파일러에 들어온 작은 기능만 쓰는 것이 안전합니다.
+</Note>
+
+## 정리
+
+- C++26은 2026년 10월의 최종 투표에서 부결되었고, 이 글을 쓰는 시점에 다음 단계가 정해지지 않았다
+- 지금 쓸 수 있는 것: `_` 이름, 묶음 인덱스, `= delete("까닭")`, 포화 산술
+- 큰 것은 리플렉션과 계약. 계약은 빠지거나 바뀔 수 있다

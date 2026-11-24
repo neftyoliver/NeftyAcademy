@@ -1,0 +1,160 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '선택의 세 꼴(자리, ID, 마스크), 닻과 초점, 편집을 따라 자리 옮기기, 여러 커서, 선택이 사는 곳';
+export const terms = ['isReversed', 'PROP_SELECTION'];
+
+명령은 거의 모두 선택한 것에 작용합니다. 선택은 문서의 한 부분을 가리키는 값이고, 문서가 고쳐진 뒤에도 같은 것을 가리켜야 합니다. 무엇으로 가리키느냐는 문서의 종류를 따릅니다. 글에서는 자리, 도형에서는 ID, 그림에서는 픽셀마다의 정도입니다.
+
+```cpp
+// 선택 모델: 닻과 초점, 편집을 따라 옮겨 가는 자리, ID로 가리키는 물체
+#include <algorithm>
+#include <functional>
+#include <print>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+struct Sel {                                     // 닻에서 시작해 초점에서 끝난다
+    std::size_t anchor, focus;
+    std::size_t lo() const { return std::min(anchor, focus); }
+    std::size_t hi() const { return std::max(anchor, focus); }
+};
+
+struct Edit {                                    // pos부터 removed글자를 text로
+    std::size_t pos, removed;
+    std::string text;
+};
+
+// 편집 뒤에 자리 p가 가는 곳. after는 편집에 닿은 자리가 새 글 뒤에 설지를 정한다
+std::size_t moved(std::size_t p, const Edit& e, bool after) {
+    if (p < e.pos) return p;                                          // 앞: 그대로
+    if (p > e.pos + e.removed) return p - e.removed + e.text.size();  // 뒤: 밀린다
+    return after ? e.pos + e.text.size() : e.pos;                     // 닿았다
+}
+
+struct Doc {
+    std::string text;
+    std::vector<Sel> sels;                       // 커서가 여럿일 수 있다
+    std::size_t mark = 0;                        // 책갈피
+
+    void apply(const Edit& e) {                  // 글을 고치고 모든 자리를 옮긴다
+        text.replace(e.pos, e.removed, e.text);
+        for (Sel& s : sels) s = {moved(s.anchor, e, true), moved(s.focus, e, true)};
+        mark = moved(mark, e, false);
+    }
+    void type(const std::string& t) {            // 선택마다 그 자리를 t로 바꾼다
+        for (std::size_t i = 0; i < sels.size(); ++i)
+            apply({sels[i].lo(), sels[i].hi() - sels[i].lo(), t});
+    }
+    std::string show() const {                   // [선택] |커서 ^책갈피
+        std::vector<std::pair<std::size_t, char>> pins{{mark, '^'}};
+        for (const Sel& s : sels) {
+            if (s.lo() == s.hi()) pins.push_back({s.lo(), '|'});
+            else pins.push_back({s.lo(), '['}), pins.push_back({s.hi(), ']'});
+        }
+        std::ranges::sort(pins, std::greater{});  // 뒤에서부터 꽂는다
+        std::string out = text;
+        for (auto [p, c] : pins) out.insert(p, 1, c);
+        return out;
+    }
+};
+
+struct Shape {
+    int id;
+    std::string name;
+};
+
+int main() {
+    Doc doc{"let x = 1; let y = 2; let z = 3;", {{0, 3}, {11, 14}, {22, 25}}, 26};
+    std::println("{}", doc.show());
+
+    std::string naive = doc.text;                // 자리를 옮기지 않고 차례로 고치면
+    for (const Sel& s : doc.sels) naive.replace(s.lo(), s.hi() - s.lo(), "const");
+    std::println("{}   <- 자리를 안 옮김", naive);
+
+    doc.type("const");
+    std::println("{}", doc.show());
+    doc.sels = {{doc.mark, doc.mark}};           // 책갈피 자리에 커서를 놓고 친다
+    doc.type("big_");
+    std::println("{}", doc.show());
+
+    Sel back{6, 2};                              // 6에서 왼쪽으로 끌어 2까지 골랐다
+    Sel next{back.anchor, back.focus + 1};       // Shift+오른쪽: 초점만 움직인다
+    std::println("닻 6 초점 2에서 Shift+오른쪽: [{}, {})", next.lo(), next.hi());
+    std::println("양 끝만 적어 두었다면: [{}, {})", back.lo(), back.hi() + 1);
+
+    std::vector<Shape> shapes{{1, "네모"}, {2, "세모"}, {3, "별"}, {4, "원"}};
+    std::set<int> by_id{3, 4};                   // 별과 원을 골랐다
+    std::vector<std::size_t> by_index{2, 3};
+    shapes.erase(shapes.begin() + 1);            // 다른 명령이 세모를 지웠다
+    std::print("ID로 고른 것:");
+    for (const Shape& s : shapes)
+        if (by_id.contains(s.id)) std::print(" {}", s.name);
+    std::print("\n번호로 고른 것:");
+    for (std::size_t i : by_index)
+        std::print(" {}", i < shapes.size() ? shapes[i].name : "(없음)");
+    std::println("");
+
+    shapes.erase(shapes.begin() + 1);            // 고른 것 가운데 별을 지웠다
+    std::erase_if(by_id, [&](int id) {           // 없어진 ID는 선택에서도 뺀다
+        auto same = [id](const Shape& s) { return s.id == id; };
+        return std::ranges::none_of(shapes, same);
+    });
+    std::println("별을 지운 뒤 선택에 남은 ID: {}개", by_id.size());
+}
+```
+
+```text
+[let] x = 1; [let] y = 2; [let] ^z = 3;
+const x = 1constet y =const let z = 3;   <- 자리를 안 옮김
+const| x = 1; const| y = 2; const| ^z = 3;
+const x = 1; const y = 2; const ^big_|z = 3;
+닻 6 초점 2에서 Shift+오른쪽: [3, 6)
+양 끝만 적어 두었다면: [2, 7)
+ID로 고른 것: 별 원
+번호로 고른 것: 원 (없음)
+별을 지운 뒤 선택에 남은 ID: 1개
+```
+
+- **닻과 초점**: 선택은 양 끝이 아니라 고르기 시작한 곳(닻)과 커서가 있는 곳(초점)으로 적습니다. Shift와 화살표는 초점만 움직입니다. 오른쪽에서 왼쪽으로 고른 뒤 Shift+오른쪽을 누르면 선택이 [3, 6)으로 줄어야 하는데, 양 끝만 적어 두면 [2, 7)로 늘어납니다
+- **편집은 모든 자리를 옮긴다**: 글을 고칠 때마다 선택과 책갈피를 편집에 맞춰 옮깁니다. 옮기지 않으면 둘째 줄처럼 두 번째 편집부터 엉뚱한 곳을 고칩니다
+- **커서가 여럿**: 세 곳의 `let`을 한 번에 고쳤습니다. 하나를 고칠 때마다 뒤에 있는 선택이 밀린 만큼 옮겨졌기 때문입니다
+- **닿은 자리는 정책이다**: 딱 그 자리에 글이 들어올 때 자리가 새 글의 앞에 남을지 뒤로 갈지는 쓰임새가 정합니다. 커서는 친 글의 뒤에 서야 하고, 예제의 책갈피는 앞에 남았습니다
+- **물체는 ID로**: 번호로 고르면 다른 물체가 지워질 때 엉뚱한 것을 가리킵니다. ID는 차례가 바뀌어도 그대로이고, 고른 물체가 지워졌을 때만 선택에서 뺍니다
+
+## 실제 프로그램
+
+| 문서 | 선택의 값 | 편집을 견디는 법 |
+| --- | --- | --- |
+| 글 | 닻과 초점의 자리, 여러 쌍 | 편집마다 자리를 옮긴다 |
+| 도형, 레이어, 표의 행 | ID의 집합 | 지워진 ID를 뺀다 |
+| 픽셀 | 픽셀마다 0에서 255인 마스크 | 그림과 같은 연산으로 다룬다 |
+
+- **브라우저**: 웹 문서의 선택도 닻과 초점으로 되어 있습니다. 닻은 사용자가 고르기 시작한 곳이고, Shift를 누른 채 화살표를 누르면 닻은 그대로 있고 초점이 움직인다고 MDN이 설명합니다
+- **VS Code**: `Selection`은 `anchor`와 커서 자리인 `active`를 갖고, 닻이 뒤쪽 끝이면 `isReversed`가 참입니다. 편집기 하나가 선택을 여러 개 가지며 0번이 주 선택입니다
+- **Emacs**: 마커는 글이 들고 날 때 저절로 옮겨져 양옆의 글자 사이에 머뭅니다. 딱 그 자리에 글을 넣을 때 앞에 남을지 뒤로 갈지는 `set-marker-insertion-type`으로 정하고 기본은 앞에 남는 쪽입니다. 넣고 지울 때마다 모든 마커를 살피므로 마커가 많으면 느려진다고 설명서가 일러 줍니다
+- **GIMP**: 선택은 그림 전체를 덮는 회색조 채널입니다. 값은 0(고르지 않음)에서 255(다 고름)까지이고, 화면의 점선은 절반쯤 고른 곳을 잇는 등고선일 뿐입니다. 가장자리를 부드럽게 하는 일은 이 채널을 흐리는 일입니다
+
+## 선택이 사는 곳
+
+선택이 문서의 것인지 창의 것인지는 프로그램마다 다릅니다. VS Code에서 선택은 문서가 아니라 편집기에 딸려 있어서, 한 문서를 두 편집기로 열면 선택도 둘입니다. GIMP에서는 선택이 그림에 딸려 있어서, 선택이 비어 있지 않으면 `PROP_SELECTION`이 붙은 채널로 XCF 파일에까지 저장됩니다. 선택을 창에 두면 선택만 바꾼 것은 문서를 고친 것이 아니고, 문서에 두면 선택도 문서의 내용이어서 저장과 실행 취소가 선택까지 다뤄야 합니다. 어느 쪽이든 실행 취소는 글과 함께 선택도 그때의 것으로 되돌려야 사용자가 무엇이 되돌아갔는지 봅니다. 그래서 명령은 실행하기 전의 선택을 기억해 둡니다([「커맨드 패턴」](#/read/cpp-complex-app/cmd-pattern)).
+
+<Note>
+예제의 자리는 바이트 번호이고, 실제 편집기는 커서를 글자의 경계에만 세웁니다([「글의 자료 구조: 피스 테이블과 로프」](#/read/cpp-complex-app/doc-text)). 자리를 옮기는 일의 값도 예제와 다릅니다. 예제는 편집마다 모든 자리를 훑지만, 책갈피와 밑줄이 수만 개인 문서에서는 그럴 수 없어서 자리들을 트리에 담아 편집 지점 뒤의 것만 한꺼번에 밉니다.
+</Note>
+
+## 정리
+
+- 선택은 글에서는 닻과 초점의 자리, 물체에서는 ID의 집합, 그림에서는 픽셀마다의 마스크로 나타낸다
+- 글의 선택과 책갈피는 편집마다 자리를 옮겨야 하고, 편집에 딱 닿은 자리가 앞에 남을지 뒤로 갈지는 쓰임새가 정한다
+- 선택은 창마다 따로 두기도 하고 문서에 두기도 하며, 실행 취소는 문서와 함께 그때의 선택도 되돌린다
+
+## 참고 문서
+
+- [MDN: Selection.anchorNode(닻과 초점, Shift와 화살표)](https://developer.mozilla.org/docs/Web/API/Selection/anchorNode)
+- [VS Code API: Selection과 TextEditor(anchor, active, 여러 선택)](https://code.visualstudio.com/api/references/vscode-api)
+- [GNU Emacs Lisp 설명서: Overview of Markers(마커가 옮겨지는 방식과 값)](https://www.gnu.org/s/emacs/manual/html_node/elisp/Overview-of-Markers.html)
+- [GNU Emacs Lisp 설명서: Marker Insertion Types(넣은 글의 앞과 뒤)](https://www.gnu.org/s/emacs/manual/html_node/elisp/Marker-Insertion-Types.html)
+- [GIMP 설명서: The Quick Mask(선택은 0에서 255인 채널)](https://docs.gimp.org/en/gimp-image-window-quick-mask-button.html)
+- [GIMP 개발자 문서: XCF 파일 형식(선택을 채널로 저장)](https://developer.gimp.org/core/standards/xcf)

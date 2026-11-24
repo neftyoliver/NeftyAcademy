@@ -1,0 +1,192 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '스레드별 커맨드 풀: 바깥에서 동기화하는 객체, 스레드마다 풀과 보조 버퍼로 나눠 기록하기, 실행 차례';
+export const terms = [];
+
+벌칸의 함수는 대부분 여러 스레드가 함께 불러도 되지만, 명세가 바깥에서 동기화하라고 적은 객체는 한 번에 한 스레드만 써야 합니다. 커맨드 풀이 그렇고, 풀에서 받은 커맨드 버퍼에 기록하는 일도 그 풀을 쓰는 일입니다([「커맨드 버퍼」](#/read/cpp-vulkan/tri-commands)). 그래서 기록을 스레드 여럿에 나누려면 스레드마다 풀을 둡니다. 아래 프로그램은 스레드 넷이 저마다의 풀에서 받은 보조 커맨드 버퍼에 띠 하나씩을 기록하고, 주 스레드가 그것들을 한 렌더링 안에서 실행합니다.
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp,vkx_cmd.hpp,vkx_resource.hpp,vkx_pipeline.hpp,vkx_draw.hpp
+#include <thread>
+#include <vector>
+#include "vkx_cmd.hpp"
+#include "vkx_draw.hpp"
+#include "vkx_pipeline.hpp"
+
+const char* FS = R"(#version 450
+layout(push_constant) uniform Push { float shade; };
+layout(location = 0) out float value;
+void main() { value = shade; })";
+
+constexpr int WORKERS = 4;
+constexpr VkExtent2D SIZE{16, 2};
+constexpr VkFormat FORMAT = VK_FORMAT_R8_UNORM;
+
+// 스레드마다 하나씩 갖는 것. 풀과 거기서 받은 버퍼는 그 스레드만 건드린다
+struct Worker {
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;   // 보조 커맨드 버퍼
+};
+
+// 일꾼 스레드가 하는 일: 자기 띠(가로 7픽셀)를 자기 밝기로 칠하는 명령을 기록한다
+void record(const Worker& w, int index, VkPipeline pipeline,
+            VkPipelineLayout layout) {
+    // 보조 버퍼는 어떤 렌더링 안에서 실행될지만 미리 알고(첨부물 포맷),
+    // 뷰포트·시저·파이프라인은 주 버퍼에서 물려받지 않으므로 스스로 정한다
+    VkCommandBufferInheritanceRenderingInfo rendering{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_RENDERING_INFO,
+        .colorAttachmentCount = 1, .pColorAttachmentFormats = &FORMAT,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
+    VkCommandBufferInheritanceInfo inherit{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO,
+        .pNext = &rendering};
+    VkCommandBufferBeginInfo bi{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT |
+                 VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        .pInheritanceInfo = &inherit};
+    vkx::check(vkBeginCommandBuffer(w.cmd, &bi), "보조 버퍼 기록 시작");
+    VkViewport viewport{0, 0, float(SIZE.width), float(SIZE.height), 0, 1};
+    VkRect2D band{{index * 3, 0}, {7, SIZE.height}};
+    vkCmdSetViewport(w.cmd, 0, 1, &viewport);
+    vkCmdSetScissor(w.cmd, 0, 1, &band);
+    vkCmdBindPipeline(w.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    float shade = float(index + 1) / 5.0f;
+    vkCmdPushConstants(w.cmd, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 4, &shade);
+    vkCmdDraw(w.cmd, 3, 1, 0, 0);
+    vkx::check(vkEndCommandBuffer(w.cmd), "보조 버퍼 기록 끝");
+}
+
+int main() {
+    vkx::Instance inst = vkx::make_instance();
+    vkx::Device dev = vkx::make_device(inst.handle);
+    vkx::Commands main_cmds = vkx::make_commands(dev);
+    vkx::Image target = vkx::make_image(
+        dev, SIZE, FORMAT,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    vkx::Buffer pixels = vkx::make_buffer(dev, SIZE.width * SIZE.height,
+                                          VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+    VkPushConstantRange range{VK_SHADER_STAGE_FRAGMENT_BIT, 0, 4};
+    VkPipelineLayoutCreateInfo lci{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .pushConstantRangeCount = 1, .pPushConstantRanges = &range};
+    VkPipelineLayout layout;
+    vkx::check(vkCreatePipelineLayout(dev.handle, &lci, nullptr, &layout),
+               "레이아웃");
+    auto vs = vkx::make_shader(
+        dev, vkx::compile(vkx::FULLSCREEN_VS, shaderc_vertex_shader));
+    auto fs = vkx::make_shader(dev, vkx::compile(FS, shaderc_fragment_shader));
+    VkPipeline pipeline = vkx::make_pipeline(
+        dev, {.vertex = vs, .fragment = fs, .layout = layout, .color = FORMAT});
+
+    Worker workers[WORKERS];
+    for (Worker& w : workers) {   // 풀은 스레드 수만큼 만든다
+        VkCommandPoolCreateInfo pci{
+            .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            .queueFamilyIndex = dev.family};
+        vkx::check(vkCreateCommandPool(dev.handle, &pci, nullptr, &w.pool), "풀");
+        VkCommandBufferAllocateInfo ai{
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .commandPool = w.pool, .level = VK_COMMAND_BUFFER_LEVEL_SECONDARY,
+            .commandBufferCount = 1};
+        vkx::check(vkAllocateCommandBuffers(dev.handle, &ai, &w.cmd), "보조 버퍼");
+    }
+
+    for (bool reversed : {false, true}) {
+        for (Worker& w : workers)   // 한 프레임의 처음: 풀째로 되돌린다
+            vkx::check(vkResetCommandPool(dev.handle, w.pool, 0), "풀 되돌리기");
+        {
+            std::vector<std::jthread> threads;   // 블록을 나가면 모두 끝나 있다
+            for (int i = 0; i < WORKERS; ++i)
+                threads.emplace_back(record, std::cref(workers[i]), i, pipeline,
+                                     layout);
+        }
+        // 실행 차례는 기록이 끝난 차례가 아니라 여기 늘어놓은 차례다
+        VkCommandBuffer order[WORKERS];
+        for (int i = 0; i < WORKERS; ++i)
+            order[i] = workers[reversed ? WORKERS - 1 - i : i].cmd;
+
+        VkCommandBuffer cmd = vkx::begin(main_cmds);
+        vkx::transition(cmd, target, VK_IMAGE_LAYOUT_UNDEFINED,
+                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        VkRenderingAttachmentInfo color{
+            .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .imageView = target.view,
+            .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+        VkRenderingInfo info{
+            .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+            // 이 렌더링의 내용은 보조 버퍼에 들어 있다
+            .flags = VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT,
+            .renderArea = {{0, 0}, SIZE}, .layerCount = 1,
+            .colorAttachmentCount = 1, .pColorAttachments = &color};
+        vkCmdBeginRendering(cmd, &info);
+        vkCmdExecuteCommands(cmd, WORKERS, order);
+        vkx::end_drawing(cmd, target, pixels);
+        vkx::submit_and_wait(dev, main_cmds);
+
+        std::printf("%s 차례로 실행: ", reversed ? "3, 2, 1, 0" : "0, 1, 2, 3");
+        const auto* px = static_cast<const unsigned char*>(pixels.mapped);
+        for (uint32_t x = 0; x < SIZE.width; ++x) std::printf("%d", px[x] / 51);
+        std::puts("");
+    }
+
+    for (Worker& w : workers) vkDestroyCommandPool(dev.handle, w.pool, nullptr);
+    vkDestroyPipeline(dev.handle, pipeline, nullptr);
+    vkDestroyPipelineLayout(dev.handle, layout, nullptr);
+    vkDestroyShaderModule(dev.handle, vs, nullptr);
+    vkDestroyShaderModule(dev.handle, fs, nullptr);
+    vkx::destroy(dev, pixels);
+    vkx::destroy(dev, target);
+    vkx::destroy(dev, main_cmds);
+    vkx::destroy(dev);
+    vkx::destroy(inst);
+}
+```
+
+```text
+0, 1, 2, 3 차례로 실행: 1112223334444444
+3, 2, 1, 0 차례로 실행: 1111111222333444
+```
+
+- **스레드마다 풀**: 기록은 풀의 메모리를 건드립니다. 일꾼들이 풀 하나에서 버퍼를 받게 바꾸면 검증 레이어가 UNASSIGNED-Threading-MultipleThreads-Write로 두 스레드가 같은 풀을 함께 썼다고 알립니다
+- **실행 차례**: `vkCmdExecuteCommands`는 배열에 적힌 차례대로 실행합니다. 띠가 겹치므로 차례를 뒤집으면 그림이 달라지지만, 어느 스레드가 먼저 끝났는지는 결과에 끼어들지 못합니다
+- **상태는 버퍼마다**: 보조 버퍼는 뷰포트와 파이프라인을 물려받지 않고, 실행하고 나면 주 버퍼의 상태도 정해지지 않은 것이 됩니다. 일꾼에서 `vkCmdSetViewport`를 빼면 VUID-vkCmdDraw-None-07831이 나고 lavapipe는 아무것도 그리지 않았습니다
+- **풀째 되돌리기**: 프레임의 처음에 `vkResetCommandPool`로 풀을 통째로 되돌리고 같은 버퍼에 다시 기록합니다. 버퍼를 하나씩 되돌리지 않으므로 풀에 `RESET_COMMAND_BUFFER`를 주지 않았습니다. 주 버퍼를 내면 거기서 실행되는 보조 버퍼도 함께 대기 상태가 되고, 그동안은 풀을 되돌릴 수 없습니다. 그래서 프레임을 겹치면 풀은 스레드 수 × 칸 수만큼 둡니다([「여러 프레임을 겹쳐 진행하기」](#/read/cpp-vulkan/vsync-frames))
+
+## 바깥에서 동기화하는 것
+
+| 객체 | 겹치면 안 되는 일 | 흔한 풀이 |
+| --- | --- | --- |
+| 커맨드 풀 | 그 풀의 버퍼에 기록하기, 버퍼 받기와 돌려주기, 풀 되돌리기 | 스레드마다 풀 |
+| 디스크립터 풀 | 세트 받기와 돌려주기, 풀 비우기 | 스레드마다 풀([「풀」](#/read/cpp-vulkan/desc-pool)) |
+| 큐 | 제출과 내보내기 | 한 스레드가 모아서 내거나 잠금 |
+
+버퍼, 이미지, 파이프라인을 만드는 호출은 같은 장치를 두고 여러 스레드에서 함께 불러도 됩니다. 그래서 흔한 짜임은 일꾼들이 기록만 하고, 한 스레드가 주 버퍼에 모아 제출하는 것입니다.
+
+## 얼마나 나눌까
+
+기록을 나누면 CPU 시간이 줄지만 보조 버퍼마다 상태를 처음부터 다시 묶어야 합니다. 그리기가 몇 개뿐인 버퍼를 잔뜩 만들면 오히려 느려지므로, 버퍼는 스레드 수만큼만 두고 그리기를 고르게 나눕니다. Khronos의 샘플은 그리기 약 1,800개를 스레드 8개의 버퍼 8개에 나눠 15%쯤 빨라졌다고 적습니다. 이런 비교는 검증 레이어를 끈 릴리스 빌드로 잽니다. 보조 버퍼는 모두 한 렌더링 안에서 실행되므로, 렌더 패스를 쪼개면 손해가 큰 타일 기반 GPU에도 맞습니다.
+
+보조 버퍼 대신 스레드마다 주 버퍼를 기록하고, 렌더링을 `VK_RENDERING_SUSPENDING_BIT`으로 멈췄다가 다음 버퍼에서 `VK_RENDERING_RESUMING_BIT`으로 잇는 방법도 있습니다. 멈춘 것과 잇는 것은 한 번의 제출에 함께 들어 있어야 합니다.
+
+<Note>
+검증 레이어의 스레드 검사는 두 호출이 실제로 겹친 순간에만 알립니다. 조용했다고 안전하다는 뜻이 아니므로, 어느 스레드가 어느 풀을 쓰는지는 일꾼 번호로 풀을 고르는 식의 구조로 지킵니다.
+</Note>
+
+## 정리
+
+- 커맨드 풀은 바깥에서 동기화해야 하므로 기록하는 스레드마다, 겹쳐 진행하는 프레임마다 따로 둔다
+- 일꾼들이 보조 버퍼에 나눠 기록하고 주 버퍼가 한 렌더링 안에서 실행하며, 실행 차례는 `vkCmdExecuteCommands`에 적은 차례다
+- 보조 버퍼는 상태를 물려받지 않으므로 저마다 묶어야 하고, 그 비용 때문에 버퍼는 스레드 수만큼만 고르게 나눈다
+
+## 참고 문서
+
+- [Vulkan Guide: Threading](https://docs.vulkan.org/guide/latest/threading.html)
+- [Vulkan Samples: Command buffer usage and multi-threaded recording](https://docs.vulkan.org/samples/latest/samples/performance/command_buffer_usage/README.html)
+- [Vulkan 명세: Command Buffers](https://docs.vulkan.org/spec/latest/chapters/cmdbuffers.html)
+- [vkCmdExecuteCommands 참조 쪽](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdExecuteCommands.html)
+- [VK_KHR_dynamic_rendering 제안서(멈췄다 잇기)](https://docs.vulkan.org/features/latest/features/proposals/VK_KHR_dynamic_rendering.html)

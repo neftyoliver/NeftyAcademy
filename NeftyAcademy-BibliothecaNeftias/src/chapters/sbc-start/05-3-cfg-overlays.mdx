@@ -1,0 +1,86 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '디바이스 트리와 오버레이와 파라미터, config.txt에 쓰는 법, 있는 것 찾기, 실행 중에 얹기, 안 될 때';
+export const terms = ['dtoverlay', 'dtparam', 'dtdebug'];
+
+USB에 꽂은 장치는 자기가 무엇인지 스스로 알립니다. 헤더의 핀에 선으로 이은 센서는 그러지 못합니다. 커널은 어느 핀에 무엇이 붙었는지 알 길이 없으므로 누군가 적어 줘야 합니다. 그 적어 둔 것이 디바이스 트리이고, 내가 붙인 것을 덧붙여 적는 방법이 오버레이입니다. `config.txt`의 `dtoverlay`와 `dtparam`으로 시작하는 줄이 이 일을 합니다.
+
+## 세 낱말
+
+| 낱말 | 무엇인가 | 어디에 있나 |
+| --- | --- | --- |
+| 디바이스 트리 | 보드의 하드웨어를 적은 서술 | 부트 파티션의 `.dtb` 파일. 보드마다 하나 |
+| 오버레이 | 그 서술에 덧붙이는 조각 | 부트 파티션의 `overlays/` 아래 `.dtbo` 파일 |
+| 파라미터 | 서술의 값을 조금 바꾸는 이름 | 트리와 오버레이가 저마다 내놓는다 |
+
+펌웨어는 켜질 때 보드에 맞는 `.dtb`를 고르고, `config.txt`에 적힌 오버레이와 파라미터를 차례로 입힌 뒤 커널에 넘깁니다. 커널은 그 서술을 보고 드라이버를 붙입니다.
+
+## config.txt에 쓰는 법
+
+```text
+dtparam=i2c_arm=on,i2c_arm_baudrate=400000
+dtparam=spi=on
+dtoverlay=w1-gpio,gpiopin=4
+```
+
+- **`dtparam=`**: 보드의 트리가 내놓는 파라미터를 바꿉니다. 첫 줄은 헤더의 I2C를 켜고 속도를 400kHz로 정합니다. 문서가 드는 바탕 파라미터는 소리(`audio`), I2C(`i2c_arm`), SPI(`spi`) 같은 것입니다
+- **`dtoverlay=`**: `overlays/` 아래에서 그 이름의 `.dtbo`를 찾아 얹습니다. 셋째 줄은 1-Wire 버스를 GPIO 4에 만듭니다. 오버레이에 줄 값은 같은 줄에 쉼표로 잇습니다
+- **줄여 쓰기**: `=on`은 빼도 되고 `i2c`는 `i2c_arm`의 다른 이름입니다. 옛 글의 `dtparam=i2c`는 `dtparam=i2c_arm=on`과 같습니다
+- **줄이 길어지면**: [「config.txt와 cmdline.txt」](#/read/sbc-start/cfg-config-txt)에서 본 한도는 98자이지만, 문서의 디바이스 트리 쪽은 80자 안쪽으로 쓰라고 적습니다. 길어지면 다음 줄에 `dtparam=`으로 이어 적습니다. 그 값은 바로 앞의 오버레이에 들어갑니다
+- **순서대로 입힌다**: 오버레이는 적힌 순서대로 적용됩니다. 오버레이 뒤에 적은 `dtparam`이 보드의 것이 아니라 그 오버레이의 것으로 읽히는 일을 막으려면, 사이에 값이 없는 `dtoverlay=` 한 줄을 넣어 오버레이의 범위를 끝냅니다
+
+## 있는 것 찾기
+
+```sh
+less /boot/firmware/overlays/README    # 오버레이마다의 설명과 받는 값
+dtoverlay -h w1-gpio                   # 한 오버레이의 설명만 본다
+dtoverlay -a                           # 모든 오버레이의 이름
+```
+
+README는 오버레이마다 이름(Name), 설명(Info), 쓰는 법(Load), 받는 값(Params)을 적어 둔 긴 글 파일입니다. 부품을 샀다면 먼저 여기서 그 칩의 이름을 찾아봅니다. 이미 오버레이가 있다면 드라이버를 쓸 필요 없이 한 줄만 적으면 됩니다.
+
+## 실행 중에 얹어 보기
+
+```sh
+sudo dtoverlay w1-gpio gpiopin=4    # 다시 켜지 않고 얹는다. 값은 빈칸으로 띄운다
+dtoverlay -l                        # 이렇게 얹은 것들을 본다
+sudo dtoverlay -r                   # 마지막에 얹은 것을 뗀다
+```
+
+- **시험용이다**: 되는지 먼저 보고, 되면 `config.txt`에 적어 둡니다. 이렇게 얹은 것은 다시 켜면 사라집니다
+- **다 되지는 않는다**: 문서는 I2C, SPI, 소리 같은 쪽은 실행 중의 변화에 반응하지만 그렇지 않은 것도 있다고 적습니다. 트리의 어떤 부분은 켜질 때에만 쓰입니다
+- **켜질 때 입힌 것은 떼지 못한다**: `config.txt`로 적용된 것은 이미 트리에 녹아 있어서 이 명령으로 뗄 수 없습니다
+
+## 적용됐는지 확인하기
+
+```sh
+ls /dev/i2c-* /dev/spidev*           # 버스를 켰다면 장치 파일이 생긴다
+cat /proc/device-tree/model          # 커널이 받은 트리의 맨 위. 보드 이름이 나온다
+sudo vclog --msg                     # 펌웨어가 트리를 입히며 남긴 경고와 오류
+```
+
+- **`/proc/device-tree`**: 커널이 받은 트리가 폴더와 파일로 그대로 보입니다. `dtc -I fs /proc/device-tree`로 통째로 읽기 좋게 뽑을 수 있습니다
+- **이름을 틀리면**: 없는 오버레이나 없는 파라미터를 적어도 보드는 켜집니다. 그 줄만 조용히 빠집니다. `vclog`에서 그 사실을 확인합니다. `config.txt`에 `dtdebug=1`을 적으면 더 자세히 남깁니다
+
+## 알아 둘 것
+
+- **HAT은 스스로 적는다**: 규격을 따르는 HAT에는 작은 메모리가 달려 있고 거기에 어떤 오버레이를 얹을지가 적혀 있습니다. 펌웨어가 켜질 때 그것을 읽어 알아서 얹습니다([「HAT과 확장 보드」](#/read/sbc-start/hdr-hats))
+- **보드에 따라 바뀌는 이름**: 같은 `disable-bt`라고 적어도 5에서는 5용으로 따로 만든 오버레이가 대신 올라갑니다. 반대로 `uart5`처럼 4의 칩에만 있는 것도 있습니다
+- **4용 글을 5에서 따라 할 때**: 5는 헤더의 핀을 RP1이라는 다른 칩이 맡고 있어서, 4에서 되던 오버레이가 그대로 되지 않는 일이 있습니다([「라즈베리파이 5의 RP1」](#/read/sbc-start/hdr-rp1)). README에서 그 오버레이가 5를 지원하는지 봅니다
+- **직접 쓰는 오버레이**: 오버레이가 없는 부품을 붙일 때에는 조각을 직접 써야 합니다. 그 문법은 이 서가의 「임베디드 리눅스 시스템」에서 다룹니다
+
+<Note>
+명령과 문법은 문서에서 옮겼고 보드에서 해 보지는 못했습니다. `w1-gpio`와 `gpiopin=4`는 1-Wire 온도 센서를 붙일 때 흔히 쓰는 줄로, 본보기로 골랐습니다. 받는 값의 이름은 오버레이마다 다르므로 README에서 확인하고 적습니다.
+</Note>
+
+## 정리
+
+- 헤더에 붙인 장치는 디바이스 트리에 적어 줘야 커널이 알고, 그 일을 `config.txt`의 `dtparam`과 `dtoverlay`가 한다
+- 무엇을 쓸 수 있는지는 `/boot/firmware/overlays/README`와 `dtoverlay -h`에서 찾는다
+- `sudo dtoverlay`로 먼저 얹어 보고, 되면 `config.txt`에 적는다. 안 되면 `sudo vclog --msg`를 본다
+
+## 참고 문서
+
+- [Raspberry Pi 문서: Configuration(Device Trees, overlays, and parameters: 정의, config.txt의 문법, dtoverlay 도구, HAT, 문제 풀기)](https://www.raspberrypi.com/documentation/computers/configuration.html)
+- [Raspberry Pi 펌웨어 저장소: overlays/README(오버레이마다의 설명과 받는 값)](https://raw.githubusercontent.com/raspberrypi/firmware/master/boot/overlays/README)
+- [Raspberry Pi 문서: config.txt(dtoverlay와 dtparam 줄, 줄 길이)](https://www.raspberrypi.com/documentation/computers/config_txt.html)

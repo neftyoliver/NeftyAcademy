@@ -1,0 +1,88 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'microSD에 적힌 기호 읽기, 용량 고르기, 꽂은 카드를 보드에서 확인하기, 5에 NVMe SSD를 다는 부품';
+export const terms = ['mmcblk0', 'nvme0n1', 'cmdq_en'];
+
+라즈베리파이는 저장 장치에서 OS를 읽어 켜지고, 프로그램도 기록도 거기에 둡니다. 문서는 읽고 쓰는 속도가 빠른 저장 장치일수록 성능이 좋아진다고 적습니다. 이 쪽은 microSD에 적힌 기호를 읽는 법, 용량을 고르는 법, 꽂은 카드를 보드에서 확인하는 법, 5에 NVMe SSD를 다는 데 필요한 부품을 봅니다. 저장 장치의 갈래는 [「사양 읽는 법: SoC, 램, 저장 장치, 전력」](#/read/sbc-start/brd-specs)의 표에 있습니다.
+
+## 카드에 적힌 기호
+
+| 기호 | 재는 것 | 보장하는 최소 |
+| --- | --- | --- |
+| C10 | 순차 쓰기 | 10MB/s |
+| U1, U3 | 순차 쓰기 | 10MB/s, 30MB/s |
+| V30 | 순차 쓰기 | 30MB/s (V 뒤의 숫자가 MB/s) |
+| A1 | 임의 읽기, 임의 쓰기 | 1,500 IOPS, 500 IOPS |
+| A2 | 임의 읽기, 임의 쓰기 | 4,000 IOPS, 2,000 IOPS |
+
+- **C, U, V는 영상을 위한 등급**: 순차 쓰기는 큰 파일 하나를 처음부터 끝까지 쓰는 일입니다. 카메라가 영상을 끊김 없이 받아 적을 수 있는지를 이 등급으로 봅니다
+- **A가 OS를 위한 등급**: 임의 읽기와 쓰기는 작은 조각을 여기저기서 읽고 쓰는 일이고, OS와 프로그램이 하는 일이 이쪽입니다. IOPS는 4KB 조각을 1초에 몇 번 읽거나 쓰는가입니다. 4,000 IOPS는 1초에 16MB이지만, V30의 30MB/s와 크기를 견줄 숫자는 아닙니다. 다른 일을 잰 숫자입니다
+- **A2는 보드가 도와야 나온다**: A2 카드는 명령 큐와 캐시라는 기능으로 그 성능을 내고, 보드가 그 기능을 쓸 줄 알아야 합니다. 공식 카드의 4KB 임의 읽기는 5에서 5,000 IOPS, 4에서 3,200 IOPS입니다. 5가 더 빠른 버스 방식(SDR104)과 명령 큐를 쓰기 때문입니다
+- **버스 방식**: 카드와 보드는 둘 다 아는 가장 빠른 방식으로 말합니다. 흔한 UHS-I 카드는 104MB/s가 상한입니다
+
+## 용량과 살 것
+
+- **문서가 적는 최소**: 데스크톱이 딸린 Raspberry Pi OS는 32GB 이상, 화면 없이 쓰는 Lite는 8GB 이상입니다
+- **상한은 2TB**: 그보다 큰 카드는 쓸 수 없습니다. 파티션 표(MBR)가 그 크기를 적지 못하기 때문입니다
+- **모르겠으면 공식 카드**: 문서의 권고입니다. 공식 카드는 C10, U3, V30, A2 등급이고 32GB, 64GB, 128GB가 있습니다. OS를 미리 써 둔 것도 팝니다
+- **기록을 쌓는다면 넉넉하게**: 센서 값을 계속 적는 프로젝트라면 한 단계 큰 것을 고릅니다. 카드가 닳는 이야기는 [「SD카드가 망가지는 이유」](#/read/sbc-start/care-sd)에서 봅니다
+
+## 꽂은 카드 확인하기
+
+```sh
+lsblk -d -o NAME,SIZE,MODEL             # mmcblk0 이 SD카드, nvme0n1 이 NVMe SSD
+cat /sys/block/mmcblk0/device/name      # 카드가 밝히는 제품 이름
+cat /sys/block/mmcblk0/device/date      # 만든 달
+cat /sys/block/mmcblk0/device/cmdq_en   # 1 이면 명령 큐가 켜져 있다
+```
+
+- **장치 이름**: 리눅스는 SD카드를 `mmcblk0`, NVMe SSD를 `nvme0n1`, USB에 꽂은 저장 장치를 `sda`라고 부릅니다. 파티션은 `mmcblk0p1`, `nvme0n1p1`, `sda1`처럼 뒤에 번호가 붙습니다
+- **카드가 스스로 밝히는 것**: 카드 안에는 제조사, 제품 이름, 일련번호, 만든 달을 적어 둔 자리가 있고, 커널이 이를 `/sys` 아래의 파일로 보여 줍니다. 적어 두면 문제가 생긴 카드를 가려내거나 같은 카드를 다시 살 때 씁니다
+- **속도 재기**: Raspberry Pi OS에는 카드를 A1 기준으로 시험하는 Raspberry Pi Diagnostics가 있습니다. `sudo apt install agnostics`로 깔면 메뉴의 Accessories에 생깁니다. 순차 쓰기 10MB/s, 임의 쓰기 500 IOPS, 임의 읽기 1,500 IOPS를 넘으면 합격입니다. 이 도구를 소개한 글은 순차 쓰기 속도가 카드를 쓸수록 떨어진다고 적습니다
+
+## 5에 NVMe SSD 달기
+
+SSD는 5의 PCIe 단자에 답니다. 단자에 바로 꽂히지는 않고, 단자를 M.2 슬롯으로 바꿔 주는 판이 사이에 들어갑니다.
+
+| 판 | 맞는 SSD | 식히는 장치와의 자리 |
+| --- | --- | --- |
+| M.2 HAT+ | 2230, 2242 | Active Cooler 위에 올라간다. 공식 케이스에는 뚜껑과 팬을 떼야 들어간다 |
+| M.2 HAT+ Compact | 2230 | 공식 케이스의 팬과 함께 들어간다. Active Cooler는 달 수 없다 |
+
+- **M key의 NVMe SSD**: 두 판 모두 M key 슬롯이 하나 있습니다. 이름의 숫자는 크기여서, 2230은 너비 22mm에 길이 30mm입니다. PC에 흔한 2280은 길어서 맞지 않습니다. 공식 SSD는 2230이고 256GB, 512GB, 1TB가 있습니다
+- **속도**: 5의 PCIe는 2.0 한 레인이라 500MB/s가 상한입니다. 공식 SSD 256GB의 4KB 임의 읽기는 40,000 IOPS, 임의 쓰기는 70,000 IOPS입니다. 공식 SD카드를 5에 꽂았을 때의 5,000과 2,000에 견주면 8배와 35배입니다
+- **전원**: 판은 SSD에 3A까지 줍니다. 이 전류도 보드의 전원에서 나오므로 [「전원: 5V 5A와 USB-PD」](#/read/sbc-start/prt-power)의 5A 전원을 씁니다
+- **부팅**: 부트로더가 2023년 12월 6일 것이거나 그보다 새것이어야 합니다. SD카드가 꽂혀 있지 않으면 5는 NVMe에서 부팅하고, 꽂혀 있으면 SD카드를 먼저 봅니다. 순서를 바꾸는 법은 [「부트로더 EEPROM과 부팅 순서」](#/read/sbc-start/cfg-eeprom)에 있습니다
+- **새 SSD는 보이지 않는다**: 파티션이 없는 새 SSD는 데스크톱에 나타나지 않습니다. [「Raspberry Pi Imager」](#/read/sbc-start/os-imager)로 OS를 쓰면 파티션까지 만들어집니다
+- **꽂고 뽑기 전에 전원을 뗀다**: 문서는 M.2 슬롯에 장치를 꽂거나 뽑기 전에 늘 전원을 떼라고 적습니다
+
+## 4와 Zero 2 W에서는
+
+- **4**: PCIe 단자가 없어서 SSD를 USB 3.0에 꽂습니다. 4는 USB에 꽂은 저장 장치에서도 부팅합니다
+- **전원이 달린 케이스나 허브**: 문서는 드라이브가 보드가 주는 것보다 많은 전류를 먹을 수 있다며 전원이 따로 달린 외장 케이스나 허브를 권합니다. 하드디스크라면 더 그렇습니다
+- **USB-SATA 어댑터**: 어댑터에 따라 UAS라는 방식에서 실패하는 것이 있습니다. 문서는 부팅에 쓰기 전에 리눅스에서 그 드라이브가 제대로 도는지 먼저 확인하라고 적습니다
+- **Zero 2 W**: USB 저장 장치에서도 부팅하지만 USB 단자가 하나뿐이어서 보통 microSD로 씁니다
+
+<Note>
+표의 숫자는 규격이 보장하는 최소이거나 제조사가 잰 값입니다. 같은 카드도 보드와 OS에 따라 다르게 나오므로, 속도가 중요한 프로젝트라면 내 보드에서 재 봅니다. 이 쪽의 명령은 보드에서 돌려 보지 못했습니다. `lsblk`의 옵션만 PC에서 확인했고, 나머지는 문서에서 옮겼습니다.
+</Note>
+
+## 정리
+
+- OS를 올릴 카드는 A 등급을 본다. A2의 성능은 보드가 명령 큐를 쓸 줄 알아야 나온다
+- 용량은 데스크톱이면 32GB 이상, Lite면 8GB 이상, 2TB 미만이다. 모르겠으면 공식 카드를 고른다
+- 5에 SSD를 달려면 M.2 HAT+와 2230이나 2242 크기의 NVMe SSD가 있어야 하고, 임의 읽기와 쓰기가 SD카드의 몇 배에서 몇십 배가 된다
+
+## 참고 문서
+
+- [Raspberry Pi 문서: Getting started(저장 장치의 최소 용량, 2TB 상한, 공식 카드 권고)](https://www.raspberrypi.com/documentation/computers/getting-started.html)
+- [Raspberry Pi SD Cards(등급, 버스 방식, 명령 큐, 4와 5에서의 IOPS)](https://www.raspberrypi.com/products/sd-cards/)
+- [Raspberry Pi 소식: SD cards and bumper(5에서 A2 카드와 명령 큐를 쓰게 된 일)](https://www.raspberrypi.com/news/sd-cards-and-bumper/)
+- [SD Association: The Evolution of SD Ratings(속도 등급과 UHS-I의 상한)](https://sdcard.org/?p=644)
+- [SD Association: Introducing the Newest Application Performance Class(A2의 IOPS, 명령 큐와 캐시)](https://sdcard.org/?p=1937)
+- [Kingston: microSD와 SD카드의 이름 읽기(U1과 U3, A1과 A2의 표)](https://www.kingston.com/en/blog/personal-storage/microsd-sd-memory-card-naming-conventions)
+- [Raspberry Pi 소식: SD Card Speed Test(Raspberry Pi Diagnostics와 A1 기준)](https://www.raspberrypi.com/news/sd-card-speed-test)
+- [리눅스 커널 문서: SD and MMC Block Device Attributes(name, date, cmdq_en 같은 sysfs 파일)](https://docs.kernel.org/7.3/driver-api/mmc/mmc-dev-attrs.html)
+- [Raspberry Pi 문서: M.2 HAT+(두 판의 차이, 부트로더 날짜, NVMe 부팅, 새 드라이브)](https://www.raspberrypi.com/documentation/accessories/m2-hat-plus.html)
+- [Raspberry Pi 문서: SSDs(공식 SSD의 크기와 IOPS)](https://www.raspberrypi.com/documentation/accessories/ssds.html)
+- [Raspberry Pi 문서: Raspberry Pi computer hardware(USB 저장 장치 부팅과 NVMe 부팅)](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html)

@@ -1,0 +1,220 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '특성이 만들어지는 원리, 내 타입을 표로 살펴보기, 라이브러리가 갈라지는 자리, 헷갈리는 특성들';
+export const terms = [
+  'type_traits', 'is_same', 'is_same_v', 'remove_reference_t', 'remove_cvref_t', 'decay_t',
+  'is_integral_v', 'is_trivially_copyable', 'is_trivially_copyable_v', 'true_type', 'false_type',
+  'is_convertible_v', 'is_constructible_v', 'is_nothrow_move_constructible',
+  'is_trivially_destructible_v', 'is_pointer_v', 'is_array_v', 'is_const_v', 'common_type_t',
+  'common_type', 'is_signed_v', 'is_standard_layout_v', 'is_aggregate_v',
+];
+
+[「static_assert와 타입 특성」](#/read/cpp-syntax/ct-assert)에서 `<type_traits>`의 특성을 표로 훑었습니다. 여기서는 특성이 어떻게 만들어져 있는지, 라이브러리가 어디에 쓰는지, 그리고 이름만 보고 짐작하면 틀리는 것들을 봅니다.
+
+## 특성은 어떻게 생겼나
+
+특성은 마법이 아니라 [특수화](#/read/cpp-syntax/tpl-special)로 만든 클래스 템플릿입니다. "기본은 거짓, 이런 꼴의 타입이면 참"을 적어 둔 것입니다.
+
+```cpp
+#include <print>
+#include <type_traits>
+
+// 묻는 특성: 기본은 거짓, 포인터 꼴일 때만 참
+template <typename T>
+struct is_pointer_like : std::false_type {};
+template <typename T>
+struct is_pointer_like<T*> : std::true_type {};
+
+template <typename T>
+inline constexpr bool is_pointer_like_v = is_pointer_like<T>::value;
+
+// 바꾸는 특성: 기본은 그대로, const 가 붙었으면 뗀 것
+template <typename T>
+struct strip_const {
+    using type = T;
+};
+template <typename T>
+struct strip_const<const T> {
+    using type = T;
+};
+
+template <typename T>
+using strip_const_t = typename strip_const<T>::type;
+
+int main()
+{
+    std::println("{} {}", is_pointer_like_v<int*>, is_pointer_like_v<int>);
+    std::println("{}", std::is_same_v<strip_const_t<const int>, int>);
+}
+```
+
+```text
+true false
+true
+```
+
+묻는 특성은 `::value`에 답을, 바꾸는 특성은 `::type`에 결과를 둡니다. 매번 그렇게 쓰기 번거로워서 `_v`와 `_t`가 붙은 짧은 이름이 함께 있습니다. `std::true_type`은 `value`가 `true`인 빈 클래스입니다. 표준의 특성 대부분이 이 꼴이고, `is_trivially_copyable`처럼 문법만으로는 알 수 없는 것만 컴파일러가 직접 답합니다.
+
+## 내 타입은 어떤 타입인가
+
+구조체를 조금 고쳤을 뿐인데 `memcpy`가 안 되는 타입이 되기도 합니다. 여러 꼴을 넣어 표로 봅니다.
+
+```cpp
+#include <array>
+#include <optional>
+#include <print>
+#include <string>
+#include <type_traits>
+#include <utility>
+
+struct Plain {
+    int x;
+    double y;
+};
+struct WithInit {
+    int x = 5;              // 멤버에 기본값을 줬다
+};
+struct Mixed {
+    int a;
+
+private:
+    int b = 0;              // 접근 지정이 섞였다
+};
+struct Base {
+    int a;
+};
+struct Derived : Base {
+    int b;                  // 부모와 자식 양쪽에 멤버가 있다
+};
+struct Virtual {
+    virtual ~Virtual() = default;
+    int a;
+};
+struct WithString {
+    int x;
+    std::string s;
+};
+
+template <typename T>
+void row(const char* name)
+{
+    std::println("{:14} {:6} {:6} {:6} {}", name, std::is_trivially_copyable_v<T>,
+                 std::is_standard_layout_v<T>, std::is_aggregate_v<T>,
+                 std::is_trivially_destructible_v<T>);
+}
+
+int main()
+{
+    std::println("{:14} {:6} {:6} {:6} {}", "", "복사", "배치", "집합체", "소멸");
+    row<Plain>("Plain");
+    row<WithInit>("WithInit");
+    row<Mixed>("Mixed");
+    row<Derived>("Derived");
+    row<Virtual>("Virtual");
+    row<WithString>("WithString");
+    row<std::array<int, 4>>("array<int, 4>");
+    row<std::pair<int, int>>("pair<int, int>");
+    row<std::optional<int>>("optional<int>");
+}
+```
+
+```text
+               복사   배치   집합체 소멸
+Plain          true   true   true   true
+WithInit       true   true   true   true
+Mixed          true   false  false  true
+Derived        true   false  true   true
+Virtual        false  false  false  false
+WithString     false  true   true   false
+array<int, 4>  true   true   true   true
+pair<int, int> false  true   false  true
+optional<int>  true   true   false  true
+```
+
+| 열 | 특성 | 참이어야 할 수 있는 일 |
+| --- | --- | --- |
+| 복사 | `is_trivially_copyable` | `memcpy`, [파일에 그대로 쓰기](#/read/cpp-stl/io-binary), `std::atomic<T>`, `std::bit_cast` |
+| 배치 | `is_standard_layout` | `offsetof`, C 구조체와 맞추기 |
+| 집합체 | `is_aggregate` | 생성자 없이 `{1, 2.0}`으로 채우기 |
+| 소멸 | `is_trivially_destructible` | 소멸자를 부르지 않고 메모리만 돌려줘도 된다 |
+
+- `Mixed`와 `Derived`는 **복사는 되지만 배치가 표준이 아닙니다.** 멤버의 접근 지정이 섞이거나 멤버가 부모와 자식에 나뉘어 있으면 컴파일러가 순서를 달리 놓아도 되기 때문입니다. C 쪽과 주고받는 구조체는 `public` 멤버만, 한 클래스에 둡니다
+- `std::pair<int, int>`가 **`memcpy`할 수 없는 타입**으로 나옵니다. libstdc++의 `pair`는 대입 연산자를 직접 정의하고 있어서입니다. 같은 일을 하는 `struct { int a; int b; }`는 됩니다. 바이트로 다룰 자료에는 `pair`와 `tuple` 대신 구조체를 씁니다
+- `std::optional<int>`는 됩니다. 속의 타입이 되면 자기도 되도록 만들어져 있습니다
+
+이런 가정은 머리로 기억하지 않고 [`static_assert`](#/read/cpp-syntax/ct-assert)로 구조체 바로 아래에 적어 둡니다.
+
+## 라이브러리가 갈라지는 자리
+
+| 자리 | 묻는 특성 | 갈라지는 것 |
+| --- | --- | --- |
+| `vector`가 자랄 때 | `is_nothrow_move_constructible` | [이동할지 복사할지](#/read/cpp-syntax/exc-noexcept) |
+| `std::copy`, `std::uninitialized_copy` | `is_trivially_copyable` | 원소마다 대입하는 대신 `memmove` 한 번 |
+| 컨테이너의 소멸자, `std::destroy` | `is_trivially_destructible` | 소멸자 루프를 통째로 건너뛴다 |
+| `std::atomic<T>`, `std::bit_cast` | `is_trivially_copyable` | 아니면 컴파일 오류 |
+| `optional<T>`, `variant<Ts...>` | 속 타입의 특성 | 자신의 복사와 소멸이 단순해지는가 |
+
+둘째 줄이 얼마나 값을 하는지 재어 봤습니다. `int` 하나짜리 구조체 5천만 개를 `std::copy`로 복사하는 데, 그대로 두었을 때와 복사 생성자를 손으로 써서 `memmove` 길을 막았을 때 모두 24ms였습니다(x86-64, GCC 14 `-O2`). 컴파일러가 원소별 루프도 같은 기계어로 바꿨기 때문입니다. 이 갈래가 차이를 만드는 것은 최적화를 낮게 켰을 때와, 컴파일러가 루프를 꿰뚫어 보지 못하는 복잡한 타입에서입니다. "특성으로 갈라지니 빠르다"는 말도 재 보고 믿습니다.
+
+## 있는지 묻기
+
+"이 타입에 `size()`가 있는가" 같은 물음은 표준 특성에 없습니다. C++17까지는 `std::void_t`로 만들었고, C++20부터는 [`requires` 식](#/read/cpp-syntax/con-requires)으로 씁니다.
+
+```cpp
+#include <print>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+// C++17: 식이 성립하면 뽑히는 특수화
+template <typename T, typename = void>
+struct has_size_old : std::false_type {};
+template <typename T>
+struct has_size_old<T, std::void_t<decltype(std::declval<const T&>().size())>>
+    : std::true_type {};
+
+// C++20: 같은 물음
+template <typename T>
+concept has_size = requires(const T& t) { t.size(); };
+
+int main()
+{
+    std::println("{} {}", has_size_old<std::vector<int>>::value,
+                 has_size_old<int>::value);
+    std::println("{} {}", has_size<std::string>, has_size<double>);
+}
+```
+
+```text
+true false
+true false
+```
+
+옛 코드에서 `void_t`나 `std::enable_if`가 보이면 "이 식이 성립하는 타입에만"이라고 읽으면 됩니다. 새로 쓰는 코드는 `requires`를 씁니다. 짧고, 틀렸을 때의 오류도 읽을 만합니다.
+
+## 헷갈리는 특성
+
+| 물음 | 답 | 까닭 |
+| --- | --- | --- |
+| `is_same_v<int, const int>` | `false` | 정확히 같아야 한다. 견주기 전에 `remove_cvref_t`로 벗긴다 |
+| `decay_t<int[3]>` | `int*` | 값으로 넘길 때처럼 배열은 포인터로 바꾼다. `remove_cvref_t`는 `int[3]` 그대로 |
+| `is_convertible_v<int, T>` (`explicit T(int)`) | `false` | 암시적 변환만 본다. `is_constructible_v<T, int>`는 `true` |
+| `is_integral_v<bool>`, `<char>` | `true` | 둘 다 정수 타입이다. 열거형은 `false` |
+| `is_signed_v<char>` | **플랫폼마다** | x86-64에서는 `true`, AArch64(라즈베리 파이)에서는 `false`였다 |
+| `is_array_v<std::array<int, 3>>` | `false` | `std::array`는 클래스다. 내장 배열만 `true` |
+| `is_const_v<const int&>` | `false` | 참조 자체는 `const`가 아니다. `remove_reference_t`를 먼저 |
+| `is_pointer_v<std::unique_ptr<int>>` | `false` | 내장 포인터만. `nullptr_t`도 `false` |
+| `common_type_t<int, unsigned>` | `unsigned` | [산술 변환](#/read/cpp-syntax/cast-implicit)의 규칙 그대로다 |
+
+`char`의 줄은 두 기계에서 직접 돌려 본 것입니다. `char`에 128 이상의 바이트를 담아 견주는 코드가 PC에서는 되고 파이에서는 안 되는(또는 그 반대인) 까닭이 여기에 있습니다. 바이트는 `unsigned char`나 `std::uint8_t`, `std::byte`로 다룹니다.
+
+<Note kind="warn">
+표준 특성을 내 타입에 대해 **특수화하면 안 됩니다.** `std::is_trivially_copyable<MyType>`을 `true`로 특수화하는 것은 정의되지 않은 동작입니다. 컴파일러에게 거짓말을 하는 셈입니다. 내 타입을 위해 특수화하라고 열어 둔 것은 따로 정해져 있습니다. [`std::hash`](#/read/cpp-stl/assoc-hash), `std::formatter`, `std::tuple_size`, [`std::is_error_code_enum`](#/read/cpp-stl/err-system), `std::common_type` 같은 것입니다. 그리고 `std::is_pod`는 C++20에서 폐기 예정이 됐습니다. "POD"라는 한 덩어리 대신 위 표의 특성을 필요한 것만 묻습니다.
+</Note>
+
+## 정리
+
+- 특성은 특수화로 만든 클래스 템플릿이다. 묻는 것은 `_v`, 타입을 바꾸는 것은 `_t`로 쓴다
+- 멤버의 접근 지정, 상속, 가상 함수, 멤버의 타입이 `memcpy`해도 되는지와 C와 배치가 맞는지를 바꾼다. 가정은 `static_assert`로 적어 둔다
+- 이름으로 짐작하지 않는다. `is_same`은 `const`까지 따지고, `char`의 부호는 플랫폼마다 다르며, `std::array`는 배열이 아니다

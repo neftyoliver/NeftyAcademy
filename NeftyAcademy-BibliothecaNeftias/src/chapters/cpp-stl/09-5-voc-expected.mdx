@@ -1,0 +1,216 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '오류 타입 설계하기, 오류를 위로 올리는 두 가지 꼴, 값이 없는 expected<void, E>, 예외와 만나는 경계';
+export const terms = ['std::expected', '~expected', 'std::unexpected', 'bad_expected_access'];
+
+[「예외 없이 오류 알리기: optional과 expected」](#/read/cpp-syntax/exc-without)에서 `std::expected<T, E>`를 쓰는 법과 `and_then`으로 잇는 법을 보았습니다. 실제 코드에서 이 타입을 쓰기 시작하면 곧 만나는 물음이 셋 있습니다. `E`를 무엇으로 할 것인가, 여러 층을 거쳐 오류를 어떻게 올릴 것인가, 예외를 던지는 코드와 어디서 만날 것인가입니다.
+
+## 오류 타입 설계하기
+
+| `E`로 쓰는 것 | 좋은 점 | 아쉬운 점 |
+| --- | --- | --- |
+| `enum class` | 가볍다. `switch`로 빠짐없이 다룬다 | 딸린 정보를 못 싣는다 |
+| 구조체 (종류와 딸린 정보) | 어디서, 무엇 때문에를 함께 올린다 | 타입이 모듈마다 달라진다 |
+| `std::error_code` | 운영체제의 오류와 한 타입으로 다룬다 | 딸린 정보를 못 싣는다 |
+| `std::string` | 쓰기 쉽다 | 프로그램이 오류의 종류를 가릴 수 없다 |
+
+`std::string`은 **사람에게 보일** 때만 쓸모가 있습니다. 부르는 쪽이 "다시 해 볼 오류인가"를 판단해야 하면 종류가 값이어야 합니다. 대개는 둘째, 종류를 `enum`으로 두고 필요한 정보를 곁들인 작은 구조체가 맞습니다. [`std::error_code`](#/read/cpp-stl/err-system)는 파일과 소켓처럼 운영체제의 오류를 그대로 올릴 때 씁니다.
+
+## 여러 층을 거쳐 올리기
+
+```cpp
+#include <charconv>
+#include <expected>
+#include <print>
+#include <string>
+#include <string_view>
+#include <system_error>
+
+enum class Reason { empty, no_equals, unknown_key, not_a_number, out_of_range };
+
+struct ParseError {
+    Reason reason;
+    std::size_t column;         // 줄의 몇 번째 글자에서 틀렸는가
+};
+
+struct Setting {
+    std::string key;
+    int value;
+};
+
+// 가장 아래층: 글을 수로
+std::expected<int, Reason> parse_number(std::string_view text)
+{
+    int value = 0;
+    const char* const last = text.data() + text.size();
+    const auto result = std::from_chars(text.data(), last, value);
+    if (result.ec != std::errc{} || result.ptr != last)
+        return std::unexpected(Reason::not_a_number);
+    return value;
+}
+
+// 가운데층: "열쇠=값" 한 줄을 Setting 으로
+std::expected<Setting, ParseError> parse_setting(std::string_view line)
+{
+    if (line.empty())
+        return std::unexpected(ParseError{Reason::empty, 0});
+    const auto eq = line.find('=');
+    if (eq == std::string_view::npos)
+        return std::unexpected(ParseError{Reason::no_equals, line.size()});
+    const std::string_view key = line.substr(0, eq);
+    if (key != "brightness" && key != "volume")
+        return std::unexpected(ParseError{Reason::unknown_key, 0});
+
+    const auto number = parse_number(line.substr(eq + 1));
+    // 아래층의 오류에 자리를 덧붙여 올린다
+    if (!number)
+        return std::unexpected(ParseError{number.error(), eq + 1});
+    if (*number < 0 || *number > 100)
+        return std::unexpected(ParseError{Reason::out_of_range, eq + 1});
+    return Setting{std::string(key), *number};
+}
+
+std::string_view name_of(Reason reason)
+{
+    switch (reason) {
+    case Reason::empty: return "빈 줄";
+    case Reason::no_equals: return "= 가 없다";
+    case Reason::unknown_key: return "모르는 열쇠";
+    case Reason::not_a_number: return "수가 아니다";
+    case Reason::out_of_range: return "0에서 100 사이가 아니다";
+    }
+    return "?";
+}
+
+int main()
+{
+    const std::string_view lines[] = {"volume=70", "volume=7o", "speed=3",
+                                      "brightness=250", "volume"};
+    for (std::string_view line : lines) {
+        if (const auto setting = parse_setting(line))
+            std::println("{:16} -> {} = {}", line, setting->key, setting->value);
+        else
+            std::println("{:16} -> {}번째 글자: {}", line, setting.error().column,
+                         name_of(setting.error().reason));
+    }
+}
+```
+
+```text
+volume=70        -> volume = 70
+volume=7o        -> 7번째 글자: 수가 아니다
+speed=3          -> 0번째 글자: 모르는 열쇠
+brightness=250   -> 11번째 글자: 0에서 100 사이가 아니다
+volume           -> 6번째 글자: = 가 없다
+```
+
+`if (!number) return std::unexpected(…);`이 예외의 "위로 올라간다"를 손으로 쓴 것입니다. 층마다 한 줄씩 들지만 그 값으로 두 가지를 얻습니다. 오류가 지나가는 길이 **코드에 보이고**, 층을 지날 때 그 층만 아는 정보(여기서는 글자의 자리)를 덧붙일 수 있습니다.
+
+같은 일을 이어 붙이는 꼴로도 씁니다.
+
+```cpp nocheck
+return parse_number(line.substr(eq + 1))
+    // 오류 타입을 맞춘다
+    .transform_error([eq](Reason r) { return ParseError{r, eq + 1}; })
+    // 다음 검사
+    .and_then(check_range)
+    // 성공하면 포장
+    .transform([key](int n) { return Setting{std::string(key), n}; });
+```
+
+단계가 곧게 이어질 때는 이쪽이 짧고, 가운데에서 분기가 많으면 `if`로 쓴 쪽이 읽기 쉽습니다. 섞어 써도 됩니다.
+
+## 값이 없는 expected
+
+성공했을 때 돌려줄 것이 없으면 `std::expected<void, E>`입니다. "됐다, 아니면 왜 안 됐다"입니다.
+
+```cpp
+#include <expected>
+#include <print>
+#include <string_view>
+
+enum class IoError { not_open, busy, timeout };
+
+std::expected<void, IoError> send(std::string_view text, bool port_open)
+{
+    if (!port_open)
+        return std::unexpected(IoError::not_open);
+    std::println("보냄: {}", text);
+    return {};                  // 성공
+}
+
+int main()
+{
+    if (const auto sent = send("AT+RST", true); !sent)
+        std::println("실패");
+
+    const auto failed = send("AT+RST", false);
+    std::println("성공했나 {}, 이유가 not_open 인가 {}", failed.has_value(),
+                 failed.error() == IoError::not_open);
+}
+```
+
+```text
+보냄: AT+RST
+성공했나 false, 이유가 not_open 인가 true
+```
+
+`bool`을 돌려주던 함수를 이것으로 바꾸면 "왜"를 함께 돌려줄 수 있습니다. 반환값을 무시하면 오류가 묻히므로, 이런 함수에는 [`[[nodiscard]]`](#/read/cpp-syntax/fn-attributes)를 붙입니다.
+
+## 예외와 만나는 경계
+
+`expected`를 쓰는 코드와 예외를 던지는 코드는 한 프로그램 안에서 만납니다. 만나는 자리를 정해 두고 거기서 바꿉니다.
+
+```cpp
+#include <expected>
+#include <print>
+#include <stdexcept>
+#include <string>
+
+// 예외를 던지는 남의 함수를 감싼다: 경계에서 expected 로 바꾼다
+std::expected<int, std::string> to_int(const std::string& text) noexcept
+{
+    try {
+        return std::stoi(text);
+    } catch (const std::exception& e) {
+        return std::unexpected(std::string("변환 실패: ") + e.what());
+    }
+}
+
+int main()
+{
+    std::println("{}", to_int("42").value_or(-1));
+    std::println("{}", to_int("abc").error());
+
+    // 거꾸로: value() 는 오류일 때 예외를 던진다
+    try {
+        const int n = to_int("abc").value();
+        std::println("{}", n);
+    } catch (const std::bad_expected_access<std::string>& e) {
+        std::println("예외로 바뀜: {}", e.error());
+    }
+}
+```
+
+```text
+42
+변환 실패: stoi
+예외로 바뀜: 변환 실패: stoi
+```
+
+| 방향 | 방법 |
+| --- | --- |
+| 예외 → `expected` | 경계 함수에서 `try`로 잡아 `std::unexpected`로 돌려준다 |
+| `expected` → 예외 | `.value()`. 오류면 `std::bad_expected_access<E>`를 던진다 |
+
+`-fno-exceptions`로 빌드하는 펌웨어라면 안쪽은 전부 `expected`이고, 예외를 던질 수 있는 표준 라이브러리 함수(`std::stoi`, `vector::at`, `new`)를 피하거나 감쌉니다. 그 반대로 예외를 쓰는 응용 프로그램이라면, 자주 실패하는 것이 정상인 곳(입력 해석, 통신)만 `expected`로 두고 맨 바깥에서 `.value()`로 바꿔도 됩니다. 어느 쪽을 기본으로 삼을지는 [「오류 전달 전략」](#/read/cpp-advanced/des-errors)에서 다시 다룹니다.
+
+<Note>
+`*result`와 `result->`는 [`optional`](#/read/cpp-stl/voc-optional)과 마찬가지로 검사하지 않습니다. 오류가 든 `expected`에 쓰면 정의되지 않은 동작입니다. 크기는 `T`와 `E` 가운데 큰 쪽에 표시 하나가 붙은 것이어서(`expected<int, std::errc>`는 8바이트), 오류 타입에 큰 문자열을 넣으면 성공한 값도 그만큼 커집니다.
+</Note>
+
+## 정리
+
+- 오류 타입은 종류를 `enum`으로, 필요한 정보를 곁들인 작은 구조체로 만든다. 글만 담으면 프로그램이 가릴 수 없다
+- 오류는 `if (!r) return std::unexpected(…)`로 층마다 올리며 그 층의 정보를 덧붙인다. 돌려줄 값이 없으면 `expected<void, E>`
+- 예외와는 경계 함수에서 만난다. 안으로는 `try`로 잡아 바꾸고, 밖으로는 `.value()`로 바꾼다

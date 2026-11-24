@@ -1,0 +1,141 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '사용자와 권한: 역할 기반 권한, 느린 해시로 암호 저장, 자동 로그아웃, 해시 사슬 감사 기록';
+
+HMI 앞에는 여러 사람이 섭니다. 작업자는 알람을 확인하고 시작·정지를 누르며, 정비 담당은 설정값을 조정하고, 엔지니어는 레시피와 한계값을 고칩니다. 누구나 무엇이든 바꿀 수 있는 HMI는 사고를 부르고, 사고 뒤에 누가 무엇을 바꿨는지도 알 수 없습니다. 그래서 HMI에는 **사용자, 역할, 권한, 감사 기록**이 들어갑니다.
+
+## 권한과 감사 기록
+
+역할마다 할 수 있는 일을 정하고, 암호를 안전하게 저장해 검사하고, 손대지 않으면 자동으로 로그아웃시키고, 모든 일을 고칠 수 없는 감사 기록으로 남겼습니다. 암호 해시와 SHA-256은 OpenSSL로 계산했습니다.
+
+```cpp pkg=openssl
+// 사용자와 권한: 역할별 권한, 느린 해시로 암호 검사, 자동 로그아웃, 감사 기록
+#include <openssl/evp.h>
+#include <openssl/rand.h>
+#include <cstdio>
+#include <map>
+#include <string>
+#include <vector>
+
+enum Role { Operator, Maintenance, Engineer };
+const char* roleName[] = {"작업자", "정비", "엔지니어"};
+// 이 일을 하려면 최소 어느 역할인가
+const std::map<std::string, Role> required = {
+    {"알람 확인", Operator},
+    {"설정값 변경", Maintenance},
+    {"레시피 편집", Engineer}};
+
+struct User { Role role; unsigned char salt[16]; unsigned char hash[32]; };
+
+void derive(const std::string& pw, const unsigned char* salt, unsigned char* out) {
+    // PBKDF2-HMAC-SHA256 60만 번: 일부러 느리게 해서 훔친 해시를 대입해 보기 어렵게
+    PKCS5_PBKDF2_HMAC(pw.data(), int(pw.size()), salt, 16, 600000, EVP_sha256(),
+                      32, out);
+}
+
+std::string sha256(const std::string& s) {
+    unsigned char d[32];
+    unsigned int n = 0;
+    EVP_Digest(s.data(), s.size(), d, &n, EVP_sha256(), nullptr);
+    char hex[65];
+    for (int i = 0; i < 32; ++i) std::snprintf(hex + 2 * i, 3, "%02x", d[i]);
+    return hex;
+}
+
+struct Record { std::string text, prevHash, hash; };
+std::vector<Record> audit;                       // 기록마다 앞 기록의 해시를 품는다
+void log(int minute, const std::string& who, const std::string& what) {
+    const std::string text = std::to_string(minute) + "분 " + who + ": " + what;
+    const std::string prev = audit.empty() ? "" : audit.back().hash;
+    audit.push_back({text, prev, sha256(prev + text)});
+}
+int verify() {                                   // 고쳐진 첫 기록의 번호, 없으면 -1
+    std::string prev;
+    for (size_t i = 0; i < audit.size(); ++i) {
+        const bool chainOk = audit[i].prevHash == prev;
+        if (!chainOk || audit[i].hash != sha256(prev + audit[i].text))
+            return int(i);
+        prev = audit[i].hash;
+    }
+    return -1;
+}
+
+int main() {
+    std::map<std::string, User> users;
+    auto addUser = [&](const std::string& name, Role role, const std::string& pw) {
+        User u{role, {}, {}};
+        RAND_bytes(u.salt, sizeof u.salt);       // 사용자마다 다른 소금
+        derive(pw, u.salt, u.hash);
+        users[name] = u;
+    };
+    addUser("kim", Operator, "correct horse battery");
+    addUser("lee", Engineer, "staple 42 violin");
+
+    std::string current;                         // 지금 로그인한 사람
+    int lastActive = 0;
+    auto login = [&](int minute, const std::string& name, const std::string& pw) {
+        unsigned char h[32];
+        derive(pw, users[name].salt, h);
+        // 시간 일정한 비교
+        const bool ok = CRYPTO_memcmp(h, users[name].hash, 32) == 0;
+        log(minute, name, ok ? "로그인" : "로그인 실패");
+        if (ok) { current = name; lastActive = minute; }
+    };
+    auto act = [&](int minute, const std::string& action) {
+        // 5분 동안 손대지 않음
+        if (!current.empty() && minute - lastActive >= 5) {
+            log(minute, current, "자동 로그아웃");
+            current.clear();
+        }
+        const bool ok =
+            !current.empty() && users[current].role >= required.at(action);
+        log(minute, current.empty() ? "(없음)" : current,
+            action + (ok ? " 허용" : " 거부"));
+        if (ok) lastActive = minute;
+    };
+
+    login(0, "kim", "correct horse battery");
+    act(1, "알람 확인");
+    act(2, "레시피 편집");
+    login(3, "lee", "wrong password");
+    login(4, "lee", "staple 42 violin");
+    act(5, "레시피 편집");
+    act(12, "설정값 변경");
+
+    for (const Record& r : audit) std::printf("%s\n", r.text.c_str());
+    std::printf("감사 기록 검증: %s\n", verify() < 0 ? "온전함" : "고쳐짐");
+    audit[2].text = "2분 kim: 레시피 편집 허용";   // 누군가 기록을 고쳤다
+    std::printf("고친 뒤 검증: %d번 기록부터 어긋남\n", verify());
+    std::printf("역할: kim=%s, lee=%s\n", roleName[users["kim"].role],
+                roleName[users["lee"].role]);
+}
+```
+
+```text
+0분 kim: 로그인
+1분 kim: 알람 확인 허용
+2분 kim: 레시피 편집 거부
+3분 lee: 로그인 실패
+4분 lee: 로그인
+5분 lee: 레시피 편집 허용
+12분 lee: 자동 로그아웃
+12분 (없음): 설정값 변경 거부
+감사 기록 검증: 온전함
+고친 뒤 검증: 2번 기록부터 어긋남
+역할: kim=작업자, lee=엔지니어
+```
+
+- **역할로 권한을**: 사람마다 권한을 일일이 주지 않고, 사람에게 역할을 주고 역할에 권한을 줍니다. 작업자 kim은 알람 확인은 되지만 레시피 편집은 거부되었습니다
+- **암호는 저장하지 않는다**: 저장하는 것은 사용자마다 다른 무작위 **소금**과, 소금과 암호로 계산한 해시뿐입니다. 해시는 PBKDF2를 60만 번 되풀이해 일부러 느리게 만들어, 해시 파일을 훔쳐도 암호를 대입해 찾기 어렵게 합니다(OWASP가 SHA-256 PBKDF2에 권하는 횟수입니다). 비교도 `CRYPTO_memcmp`처럼 걸리는 시간이 일정한 함수로 합니다
+- **자동 로그아웃**: lee가 레시피를 고친 뒤 자리를 떠나자 5분 뒤 자동으로 로그아웃되었고, 그 뒤의 설정값 변경은 거부되었습니다. 엔지니어 권한이 열린 채로 남은 화면은 누구나 쓸 수 있는 화면입니다
+- **고칠 수 없는 기록**: 각 기록은 앞 기록의 해시를 품고, 자기 내용과 함께 다시 해시합니다. 누군가 2번 기록의 "거부"를 "허용"으로 고치자 그 기록부터 사슬이 어긋났습니다. 고친 것을 막지는 못해도 고쳤다는 사실은 숨길 수 없습니다. 실제로는 마지막 해시를 다른 곳(서버, 한 번만 쓰는 저장 장치)에도 남겨 통째로 바꿔치기하는 것까지 막습니다
+
+<Note>
+제약, 의료 기기, 식품처럼 규제가 있는 산업에서는 미국 FDA의 21 CFR Part 11이나 유럽 GMP Annex 11이 전자 기록과 전자 서명에 대한 요구를 정합니다. 사용자마다 고유한 계정, 계정 공유 금지, 누가 언제 무엇을 왜 바꿨는지 남기는 감사 기록, 이름과 의미(검토, 승인)가 붙은 전자 서명 같은 것입니다. 장갑을 끼는 현장에서는 암호 대신 사원증(RFID)으로 로그인하게 하는 일도 많습니다.
+</Note>
+
+## 정리
+
+- 권한은 사람이 아니라 역할에 주고, 사람에게 역할을 주며, 화면은 손대지 않으면 자동으로 로그아웃한다
+- 암호는 저장하지 않고 사용자별 소금과 일부러 느린 해시(PBKDF2 등)만 저장하며, 비교는 시간이 일정한 함수로 한다
+- 감사 기록은 앞 기록의 해시를 품는 사슬로 만들어 고친 흔적이 드러나게 하고, 규제 산업은 전자 기록 규정을 따른다

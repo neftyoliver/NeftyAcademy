@@ -1,0 +1,159 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '화면 크기로 고르고 물체의 축으로 계산하는 핸들: 맞은편 닻, 비율과 가운데 옵션, 돌린 물체와 커서';
+export const terms = ['ItemIgnoresTransformations'];
+
+고른 물체의 둘레에 뜨는 작은 네모가 핸들입니다. 끌면 크기가 바뀌고, 모서리 바깥을 끌면 돌아갑니다. 핸들은 문서의 내용이 아니라 뷰가 덧그리는 것이지만, 끌 때의 계산은 문서에서 합니다. 좌표계가 셋 나옵니다. 핸들을 고르는 화면 좌표, 물체가 놓인 문서 좌표, 물체와 함께 돌아가는 물체의 축입니다. 이 쪽의 일은 값마다 어느 좌표계에서 다룰지를 정하는 것입니다.
+
+```cpp
+// 조작 핸들: 화면 크기로 고르고, 물체의 축으로 계산하고, 맞은편을 붙들어 둔다
+#include <algorithm>
+#include <cmath>
+#include <numbers>
+#include <optional>
+#include <print>
+
+constexpr double kPi = std::numbers::pi;
+struct Vec { double x, y; };
+Vec operator+(Vec a, Vec b) { return {a.x + b.x, a.y + b.y}; }
+Vec operator-(Vec a, Vec b) { return {a.x - b.x, a.y - b.y}; }
+Vec rotate(Vec v, double degrees) {
+    double c = std::cos(degrees * kPi / 180), s = std::sin(degrees * kPi / 180);
+    return {v.x * c - v.y * s, v.x * s + v.y * c};
+}
+
+struct Box { Vec center; double w, h, angle; };  // 문서 좌표. angle은 도
+struct Handle { int sx, sy; };               // (1, 1)은 오른쪽 아래, (0, -1)은 위
+
+Vec position(const Box& b, Handle h) {
+    return b.center + rotate({h.sx * b.w / 2, h.sy * b.h / 2}, b.angle);
+}
+
+std::optional<Handle> hit(const Box& b, double zoom, Vec doc, double radius = 6) {
+    std::optional<Handle> found;             // 화면 픽셀로 재서 가장 가까운 핸들을
+    for (int sy = -1; sy <= 1; ++sy)
+        for (int sx = -1; sx <= 1; ++sx) {
+            Vec d = position(b, {sx, sy}) - doc;
+            double pixels = std::hypot(d.x, d.y) * zoom;
+            if ((sx || sy) && pixels <= radius)
+                found = Handle{sx, sy}, radius = pixels;
+        }
+    return found;
+}
+
+const char* cursor(const Box& b, Handle h) {     // 핸들이 가운데에서 뻗은 방향으로
+    Vec d = position(b, h) - b.center;
+    static const char* shapes[] = {"가로", "\\ 대각", "세로", "/ 대각"};
+    return shapes[std::lround(std::atan2(d.y, d.x) * 4 / kPi) & 3];
+}
+
+struct Options { bool keep_ratio = false, from_center = false; };
+
+Box resize(const Box& b, Handle h, Vec pointer, Options o = {}) {
+    Vec anchor = o.from_center ? b.center : position(b, {-h.sx, -h.sy});
+    Vec local = rotate(pointer - anchor, -b.angle);  // 물체의 축으로 본 끌린 양
+    double grow = o.from_center ? 2 : 1;     // 아래: 맞은편을 넘어가면 1에서 멈춘다
+    double w = h.sx ? std::max(1.0, h.sx * local.x * grow) : b.w;
+    double t = h.sy ? std::max(1.0, h.sy * local.y * grow) : b.h;
+    if (o.keep_ratio && h.sx && h.sy) {
+        double k = std::max(w / b.w, t / b.h);
+        w = b.w * k, t = b.h * k;
+    }
+    Vec half = rotate({h.sx * w / 2, h.sy * t / 2}, b.angle);
+    return {o.from_center ? b.center : anchor + half, w, t, b.angle};
+}
+
+double turned(const Box& b, Vec from, Vec to, bool snap) {
+    auto angle = [&](Vec p) {
+        return std::atan2(p.y - b.center.y, p.x - b.center.x) * 180 / kPi;
+    };
+    double a = b.angle + angle(to) - angle(from);
+    return snap ? std::round(a / 15) * 15 : a;
+}
+
+void show(const char* what, const Box& b) {
+    Vec a = position(b, {-1, -1});
+    std::println(
+        "  {:<21} 중심 ({:.1f}, {:.1f})  {:.1f} x {:.1f}  왼쪽 위 ({:.1f}, {:.1f})",
+        what, b.center.x, b.center.y, b.w, b.h, a.x, a.y);
+}
+
+int main() {
+    Box box{{100, 100}, 80, 40, 0};
+    Handle corner{1, 1};
+    for (double zoom : {0.25, 1.0, 4.0}) {
+        std::print("배율 {:<4}:", zoom);
+        for (Vec p : {Vec{141, 121}, Vec{144, 123}, Vec{156, 136}})
+            std::print(" ({}, {}) {}", p.x, p.y,
+                       hit(box, zoom, p) ? "잡힘" : "놓침");
+        std::println("");
+    }
+    std::println("오른쪽 아래 핸들을 (170, 125)로");
+    show("그냥", resize(box, corner, {170, 125}));
+    show("비율 지키기", resize(box, corner, {170, 125}, {.keep_ratio = true}));
+    show("가운데에서", resize(box, corner, {170, 125}, {.from_center = true}));
+    show("맞은편 너머 (40, 60)", resize(box, corner, {40, 60}));
+    std::print("오른쪽 아래 핸들의 커서:");
+    for (double angle : {0, 30, 60, 90}) {
+        box.angle = angle;
+        std::print(" {}도 {}{}", angle, cursor(box, corner),
+                   angle < 90 ? "," : "\n");
+    }
+    box.angle = 30;
+    std::println("30도 돌린 상자");
+    show("끌기 전", box);
+    show("오른쪽 아래를 끌어", resize(box, corner, {170, 150}));
+    std::println("돌리기: 자유롭게 {:.1f}도, 15도 단위로 {:.0f}도",
+                 turned(box, {100, 60}, {126, 66}, false),
+                 turned(box, {100, 60}, {126, 66}, true));
+}
+```
+
+```text
+배율 0.25: (141, 121) 잡힘 (144, 123) 잡힘 (156, 136) 잡힘
+배율 1   : (141, 121) 잡힘 (144, 123) 잡힘 (156, 136) 놓침
+배율 4   : (141, 121) 잡힘 (144, 123) 놓침 (156, 136) 놓침
+오른쪽 아래 핸들을 (170, 125)로
+  그냥                  중심 (115.0, 102.5)  110.0 x 45.0  왼쪽 위 (60.0, 80.0)
+  비율 지키기           중심 (115.0, 107.5)  110.0 x 55.0  왼쪽 위 (60.0, 80.0)
+  가운데에서            중심 (100.0, 100.0)  140.0 x 50.0  왼쪽 위 (30.0, 75.0)
+  맞은편 너머 (40, 60)  중심 (60.5, 80.5)  1.0 x 1.0  왼쪽 위 (60.0, 80.0)
+오른쪽 아래 핸들의 커서: 0도 \ 대각, 30도 \ 대각, 60도 세로, 90도 / 대각
+30도 돌린 상자
+  끌기 전               중심 (100.0, 100.0)  80.0 x 40.0  왼쪽 위 (75.4, 62.7)
+  오른쪽 아래를 끌어    중심 (122.7, 106.3)  125.6 x 28.3  왼쪽 위 (75.4, 62.7)
+돌리기: 자유롭게 67.4도, 15도 단위로 60도
+```
+
+- **핸들의 크기는 화면 픽셀이다**: 핸들은 배율과 상관없이 같은 크기로 그리고 같은 반지름으로 잡습니다. 배율 0.25에서는 문서로 22칸 넘게 떨어진 (156, 136)도 잡히고, 배율 4에서는 1.5칸 안쪽이어야 잡힙니다. 확대할수록 정밀해지고 축소해도 놓치지 않습니다
+- **가까운 핸들이 이긴다**: 반지름 안에 핸들이 여럿이면 가장 가까운 것을 고릅니다. 판정의 차례는 핸들, 물체의 몸, 빈 곳입니다. 물체가 화면에서 작아지면 핸들끼리 겹치므로, 그때는 변의 가운데 핸들을 감추고 모서리만 남기는 식으로 줄입니다
+- **맞은편이 닻이다**: 끄는 핸들의 맞은편 점이 제자리에 있도록 크기와 중심을 함께 바꿉니다. 가운데에서 키운 줄을 빼면 모두 왼쪽 위가 (60, 80)입니다. 가운데에서 키울 때는 중심이 닻이 되어 양쪽으로 자랍니다
+- **옵션과 키는 따로 둔다**: 비율을 지킬 때는 두 축의 배율 가운데 큰 쪽에 맞췄습니다. 어느 키가 이 옵션을 켜는지는 프로그램마다 다릅니다. Krita에서는 Shift가, Inkscape에서는 Ctrl이 비율을 지킵니다. 계산하는 함수는 옵션만 받고, 키를 옵션으로 바꾸는 일은 도구가 맡습니다
+- **맞은편을 넘어가면**: 뒤집을지 멈출지를 정해야 합니다. 예제는 크기 1에서 멈춥니다. 뒤집으려면 문서 모델이 뒤집힌 물체를 나타낼 수 있어야 합니다
+- **돌린 물체는 물체의 축에서**: 끌린 양을 물체의 각도만큼 거꾸로 돌려서 너비와 높이로 나눕니다. 30도 돌린 상자에서도 맞은편 (75.4, 62.7)은 움직이지 않았습니다. 커서도 따라 돕니다. 같은 핸들의 커서가 0도에서는 대각선이고 60도에서는 세로입니다
+- **돌리기**: 중심에서 본 각도가 얼마나 달라졌는지를 더합니다. 15도 단위로 맞추는 옵션은 Inkscape와 GIMP에 모두 있습니다
+
+## 핸들 둘레의 일
+
+- **덧그림이다**: 핸들은 문서를 그린 뒤에 화면 좌표로 그립니다. 저장하지 않고 실행 취소에도 넣지 않습니다. 다시 그릴 영역을 잡을 때는 물체의 사각형에 핸들의 크기만큼을 더합니다([「무효화와 다시 그리기」](#/read/cpp-complex-app/rnd-invalidate)). Qt의 그래픽스 뷰에서는 항목에 `ItemIgnoresTransformations`를 켜면 뷰를 확대해도 항목의 크기가 그대로입니다([「그래픽스 뷰」](#/read/cpp-qt/paint-scene))
+- **끌기는 도구의 상태 기계가 맡는다**: 핸들은 어디를 눌렀는지를 정할 뿐입니다. 문턱, 미리 보기, 뗄 때의 명령 하나, Esc는 [「도구 상태 기계」](#/read/cpp-complex-app/tl-state)에서 본 그대로입니다
+- **누르기 전에 커서로 알린다**: 포인터 밑에 무엇이 있는지에 따라 커서를 바꿉니다. GIMP의 통합 변형 도구는 레이어 밖에서는 돌리기, 핸들 위에서는 그 핸들이 하는 일의 아이콘을 보입니다. Krita는 핸들의 바깥쪽을 끌면 돌립니다. Inkscape는 고른 물체를 한 번 더 누르면 핸들이 돌리기와 기울이기용으로 바뀝니다
+- **여러 물체**: 선택 전체를 감싸는 상자 하나에 핸들을 답니다. 끌어서 나온 것은 닻을 기준으로 한 배율이나 각도이고, 이것을 물체마다 적용해 한 단계로 묶습니다([「명령 묶기와 합치기」](#/read/cpp-complex-app/cmd-merge))
+- **숫자로도 같은 일을**: 속성 패널의 너비, 높이, 각도 칸은 핸들과 같은 명령을 부릅니다. 핸들로만 할 수 있는 일이 없어야 키보드만 쓰는 사람도 쓸 수 있습니다
+- **3차원에서는**: 화면의 점을 광선으로 바꾸는 단계가 하나 더 있을 뿐, 축을 따라 끄는 구조는 같습니다([「기즈모와 선택」](#/read/cpp-game-engine/ed-gizmo))
+
+<Note>
+이 코드의 버그는 거의 다 좌표계를 섞어서 생깁니다. 화면의 점과 문서의 점을 다른 타입으로 만들어 두면 컴파일러가 잡아 줍니다. 시험은 배율 1, 각도 0에서만 하면 다 통과합니다. 배율이 1이 아니고, 물체가 돌아가 있고, 뷰가 스크롤된 상태에서 맞은편이 제자리에 있는지를 확인합니다. 예제에서 30도 돌린 상자의 두 줄이 그런 검사입니다.
+</Note>
+
+## 정리
+
+- 핸들은 화면 픽셀로 그리고 고른다. 가까운 핸들이 이기고, 핸들이 물체보다 먼저다
+- 크기 바꾸기는 맞은편을 닻으로 두고 물체의 축에서 계산한다. 비율 지키기와 가운데에서 키우기는 계산의 옵션이고, 키는 그 옵션을 켤 뿐이다
+- 핸들은 덧그림이고 끌기는 도구의 상태 기계가 맡는다. 같은 변형을 숫자로도 할 수 있어야 한다
+
+## 참고 문서
+
+- [Inkscape 설명서: The Selector Tool(크기 핸들과 Ctrl, 한 번 더 눌러 돌리기와 기울이기, 15도 단위)](https://inkscape-manuals.readthedocs.io/en/1.1/selector-tool.html)
+- [Krita 설명서: Transform Tool(모서리와 변의 핸들, 핸들 바깥을 끌어 돌리기, Shift로 비율 지키기)](https://docs.krita.org/en/reference_manual/tools/transform.html)
+- [GIMP 설명서: Unified Transform(핸들의 종류, 자리에 따라 바뀌는 포인터, 제한과 축 옵션)](https://docs.gimp.org/en/gimp-tool-unified-transform.html)

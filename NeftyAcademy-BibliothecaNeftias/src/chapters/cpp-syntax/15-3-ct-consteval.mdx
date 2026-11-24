@@ -1,0 +1,140 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '반드시 컴파일할 때만 불리는 함수, 초기화가 미리 끝나는 변수, 네 키워드 견주기';
+export const terms = ['~consteval', '~constinit'];
+
+[`constexpr` 함수](#/read/cpp-syntax/ct-constexpr)는 컴파일할 때 계산될 **수도** 있습니다. C++20의 두 키워드는 그것을 **보장**으로 바꿉니다. `consteval`은 함수에, `constinit`은 변수에 붙습니다.
+
+## 예제
+
+```cpp
+#include <cstddef>
+#include <print>
+#include <string_view>
+
+constexpr unsigned fnv1a(std::string_view text)     // 컴파일할 때도, 실행 중에도
+{
+    unsigned h = 2166136261u;
+    for (char c : text)
+        h = (h ^ static_cast<unsigned char>(c)) * 16777619u;
+    return h;
+}
+
+consteval unsigned operator""_h(const char* text, std::size_t size)
+{
+    return fnv1a({text, size});                     // 컴파일할 때만
+}
+
+consteval int checked_pin(int pin)
+{
+    if (pin < 0 || pin > 27)
+        throw "BCM 핀 번호는 0부터 27까지";         // 여기에 닿으면 컴파일 오류
+    return pin;
+}
+
+constinit int press_count = 0;      // 프로그램이 시작하기 전에 초기화가 끝나 있다
+
+void handle(std::string_view command)
+{
+    switch (fnv1a(command)) {       // 실행 중에 계산한다
+    case "on"_h:                    // 컴파일할 때 계산된 상수
+        std::println("켠다");
+        break;
+    case "off"_h:
+        std::println("끈다");
+        break;
+    default:
+        std::println("모르는 명령: {}", command);
+    }
+}
+
+int main()
+{
+    constexpr int led = checked_pin(17);
+    // int bad = checked_pin(40);   // 컴파일 오류
+    std::println("{}", led);
+
+    handle("off");
+    handle("blink");
+
+    ++press_count;                  // constinit은 const가 아니다
+    std::println("{}", press_count);
+}
+```
+
+```text
+17
+끈다
+모르는 명령: blink
+1
+```
+
+## consteval
+
+`consteval` 함수는 **부르는 모든 곳에서** 컴파일할 때 계산되어야 합니다. 실행 중의 값을 넘기면 오류입니다. 함수 자체가 실행 파일에 들어가지 않습니다.
+
+```text
+error: call to consteval function 'checked_pin(40)' is not a constant expression
+error: expression '<throw-expression>' is not a constant expression
+```
+
+`checked_pin(40)`은 `throw`에 닿고, 컴파일할 때의 계산에서 `throw`는 "상수가 아님"이 되어 컴파일이 멈춥니다. 이것이 **컴파일할 때의 인자 검사**를 만드는 관용구입니다. [`std::format`의 서식 문자열 검사](#/read/cpp-syntax/tpl-variadic)가 바로 이 방법입니다. `std::format_string`의 생성자가 `consteval`이어서, 서식이 틀리면 생성자 안에서 오류가 납니다.
+
+| 쓰는 곳 | 예 |
+| --- | --- |
+| 값을 컴파일할 때 검사한다 | 핀 번호, 서식 문자열, 정규식 |
+| 실행 중에 계산되면 안 되는 것 | 문자열 해시, 단위 환산표 |
+| [사용자 정의 리터럴](#/read/cpp-syntax/types-literal) | `"on"_h`, `100_ms` |
+
+`"on"_h`는 `case` 라벨에 쓸 수 있는 정수 상수가 됩니다. C++에서 `switch`는 문자열을 받지 않지만, 이렇게 해시로 바꾸면 문자열로 갈라지는 `switch`를 쓸 수 있습니다. (서로 다른 문자열의 해시가 겹치면 `case`가 중복되어 컴파일 오류로 드러납니다.)
+
+## constinit
+
+`constinit`은 전역 변수와 `static`, `thread_local` 변수에 붙이고, "초기값이 **컴파일할 때** 정해진다"를 보장합니다. 아니면 컴파일 오류입니다.
+
+| | 초기화 시점 | 그 뒤에 고칠 수 있나 |
+| --- | --- | --- |
+| `int count = f();` | `f`가 `constexpr`이 아니면 `main` 전에 **실행되는 코드**로 | 그렇다 |
+| `constexpr int count = 0;` | 컴파일할 때 | 아니다 |
+| `constinit int count = 0;` | 컴파일할 때 | **그렇다** |
+
+`main` 전에 실행되는 초기화 코드는 다른 파일의 전역 변수와 순서가 엇갈릴 수 있습니다([「정적 초기화 순서 문제」](#/read/cpp-syntax/life-static-init)). `constinit` 변수는 실행 파일에 값이 **이미 박혀** 있으므로 그 문제에서 벗어납니다. 고칠 수 있는 전역 상태(카운터, 설정, 뮤텍스)가 정말 필요할 때 붙입니다.
+
+`constinit`은 소멸에 대해서는 아무것도 보장하지 않고, `const`도 아닙니다. 읽기 전용이면 그냥 `constexpr`을 씁니다.
+
+## 네 키워드
+
+| 키워드 | 붙는 곳 | 뜻 |
+| --- | --- | --- |
+| `const` | 변수 | 초기화한 뒤에는 고치지 않는다. 초기값은 실행 중에 정해져도 된다 |
+| `constexpr` | 변수 | `const`이고, 초기값이 컴파일할 때 정해진다 |
+| `constexpr` | 함수 | 컴파일할 때 계산될 수 있다. 실행 중에도 불린다 |
+| `consteval` | 함수 | 컴파일할 때**만** 불린다 |
+| `constinit` | 정적 변수 | 초기값이 컴파일할 때 정해진다. 그 뒤에는 고칠 수 있다 |
+
+## 지금 컴파일할 때인가
+
+`constexpr` 함수가 "컴파일할 때는 이 구현, 실행 중에는 저 구현"으로 갈라져야 할 때가 있습니다. C++23의 `if consteval`이 그것을 가릅니다.
+
+```cpp nocheck
+constexpr double root(double x)
+{
+    if consteval {
+        return newton_sqrt(x);      // 컴파일러가 계산할 수 있는 느린 구현
+    } else {
+        return std::sqrt(x);        // 하드웨어의 제곱근 명령
+    }
+}
+```
+
+C++20의 `std::is_constant_evaluated()`가 같은 일을 하지만, `if constexpr (std::is_constant_evaluated())`라고 쓰면 **늘 참**이 되는 함정이 있습니다. C++23이 되는 곳에서는 `if consteval`을 씁니다. 중괄호는 생략할 수 없습니다.
+
+<Note>
+`consteval` 함수가 다른 `consteval` 함수를 부르는 것은 됩니다. `constexpr` 함수가 `consteval` 함수를 **자기 인자로** 부르는 것은 안 됩니다. 인자는 실행 중의 값일 수 있기 때문입니다. C++23은 이 규칙을 조금 풀어서, `constexpr` 함수 **템플릿**과 람다는 그런 경우 저절로 `consteval`처럼 취급되게 했습니다.
+</Note>
+
+## 정리
+
+- `consteval` 함수는 컴파일할 때만 불린다. 안에서 `throw`에 닿으면 컴파일 오류가 되어 인자 검사에 쓴다
+- `constinit` 변수는 초기화가 컴파일할 때 끝난다. 고칠 수는 있다
+- `if consteval`로 컴파일할 때와 실행 중의 구현을 가른다

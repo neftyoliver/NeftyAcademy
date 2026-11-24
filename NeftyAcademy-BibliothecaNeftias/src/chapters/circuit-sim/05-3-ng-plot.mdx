@@ -1,0 +1,146 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '파형을 꺼내는 길: wrdata의 글, raw 파일, hardcopy의 그림 파일, plot의 그림 창. 파이썬으로 읽기';
+export const terms = ['wrdata', 'hardcopy'];
+
+`.meas`가 숫자 하나를 뽑는다면, 이 쪽은 파형을 통째로 꺼냅니다. 꺼낸 파형은 다른 프로그램으로 그리거나, 측정한 것과 견주거나, 더 셈하는 데 씁니다.
+
+## 글과 그림으로 내기
+
+```spice
+파형을 글과 그림으로 내기
+V1 in 0 PULSE(0 3.3 0 1u 1u 1 2)
+R1 in out 1k
+C1 out 0 1u
+.control
+tran 10u 5m
+set wr_singlescale
+set wr_vecnames
+wrdata rc.txt v(in) v(out)
+set hcopydevtype=svg
+hardcopy rc.svg v(in) v(out)
+quit
+.endc
+.end
+```
+
+```text
+$ ngspice -b export.cir
+The file "rc.svg" has the Scalable Vector Graphics format.
+```
+
+`rc.txt`의 처음 네 줄은 이렇습니다.
+
+```text nocheck
+ time            v(in)           v(out)
+ 0.00000000e+00  0.00000000e+00  0.00000000e+00
+ 1.00000000e-08  3.30000000e-02  3.29996700e-07
+ 1.08400056e-08  3.57720185e-02  3.60045093e-07
+```
+
+- **`wrdata 파일 벡터들`**: 빈칸으로 나눈 숫자의 표를 글 파일로 씁니다. 스프레드시트, gnuplot, 파이썬 어디서나 읽힙니다
+- **`set wr_vecnames`와 `set wr_singlescale`**: 앞의 것은 첫 줄에 이름을 적게 하고, 뒤의 것은 시간의 열을 한 번만 적게 합니다. 둘을 켜지 않으면 이름 없이 벡터마다 시간의 열이 따로 붙어 나옵니다
+- **`hardcopy 파일 벡터들`**: 그림을 파일로 씁니다. `set hcopydevtype=svg`를 먼저 적으면 SVG로, 적지 않으면 포스트스크립트로 나옵니다. 화면이 없는 컴퓨터에서도 됩니다
+- **그림의 모습**: 검은 바탕에 눈금이 있고, 가로가 시간, 세로가 전압인 그림입니다. 벡터마다 다른 색으로 그려지고 위쪽에 이름이 붙습니다
+- **점의 간격은 고르지 않다**: 둘째 줄과 셋째 줄의 시각이 10ns와 10.84ns입니다. ngspice가 스스로 정한 걸음 그대로 적히기 때문입니다([「과도 해석 (.tran)」](#/read/circuit-sim/an-tran))
+
+## 파이썬으로 읽기
+
+```python
+import subprocess
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+NETLIST = """RC 충전을 글로 내기
+V1 in 0 PULSE(0 3.3 0 1u 1u 1 2)
+R1 in out 1k
+C1 out 0 1u
+.control
+tran 10u 5m
+set wr_singlescale
+set wr_vecnames
+wrdata rc.txt v(in) v(out)
+quit
+.endc
+.end
+"""
+
+with TemporaryDirectory() as d:
+    Path(d, "rc.cir").write_text(
+        NETLIST, encoding="utf-8")
+    subprocess.run(
+        ["ngspice", "-b", "rc.cir"],
+        cwd=d, capture_output=True)
+    out = Path(d, "rc.txt")
+    text = out.read_text()
+
+lines = text.split("\n")
+names = lines[0].split()
+rows = [[float(x) for x in l.split()]
+        for l in lines[1:]]
+rows = [r for r in rows if r]
+t = [r[0] for r in rows]
+k = names.index("v(out)")
+vout = [r[k] for r in rows]
+print("열:", names)
+print("줄:", len(rows))
+
+# 2.086V를 지나는 시각을
+# 두 점 사이를 곧게 이어 구한다
+for i in range(1, len(rows)):
+    a, b = vout[i - 1], vout[i]
+    if a < 2.086 <= b:
+        f = (2.086 - a) / (b - a)
+        dt = t[i] - t[i - 1]
+        ts = t[i - 1] + f * dt
+        print("63%에 닿는 시각",
+              f"{ts * 1e3:.4f}ms")
+        break
+steps = [b - a
+         for a, b in zip(t, t[1:])]
+lo = min(steps) * 1e6
+hi = max(steps) * 1e6
+print("가장 작은 걸음", f"{lo:.3f}µs")
+print("가장 큰 걸음", f"{hi:.3f}µs")
+```
+
+```text
+열: ['time', 'v(in)', 'v(out)']
+줄: 519
+63%에 닿는 시각 1.0005ms
+가장 작은 걸음 0.001µs
+가장 큰 걸음 10.000µs
+```
+
+- **첫 줄이 이름이고 나머지가 숫자다**: 줄을 빈칸으로 나누면 끝입니다. 따로 깔 것이 없습니다
+- **`.meas`와 같은 값이 나온다**: 두 점 사이를 곧게 이어 구한 시각이 1.0005ms입니다. 앞 쪽들의 `t63`과 같습니다
+- **걸음이 만 배나 차이 난다**: 계단이 오르는 순간에는 1ns로 딛고, 느리게 변하는 곳에서는 10µs로 딛습니다. 점의 수로 평균을 내거나 주파수를 셈하려면 먼저 같은 간격으로 다시 뽑아야 합니다
+- **그림은 그리는 프로그램에 넘긴다**: 읽은 `t`와 `vout`을 matplotlib의 `plot`에 넘기면 그림이 됩니다. 이 책의 파형 그림들도 이렇게 ngspice가 낸 값을 읽어 만들었습니다
+
+## raw 파일
+
+- **`write 파일 벡터들`**: ngspice의 raw 형식으로 씁니다. 배치의 `-r 파일`이 내는 것과 같은 형식입니다
+- **머리말과 값으로 되어 있다**: 머리말에는 제목, 날짜, 해석의 이름, 벡터의 수와 점의 수, 벡터마다의 이름과 종류가 적힙니다. 값은 기본으로 이진수이고, `set filetype=ascii`를 먼저 적으면 글로 나옵니다
+- **다시 불러올 수 있다**: 대화형에서 `load 파일`로 읽어 들이면 그 벡터들로 다시 `print`와 `plot`을 할 수 있습니다. 오래 걸린 결과를 남겨 둘 때 씁니다
+
+## 그림 창
+
+- **`plot v(in) v(out)`**: 대화형에서 치면 그림 창이 뜹니다. 가장 빨리 파형을 보는 길입니다
+- **macOS에서는 X11이 있어야 한다**: Homebrew로 깐 ngspice는 그림 창을 X11로 띄웁니다. Homebrew는 그림 기능을 쓰려면 `brew install --cask xquartz`로 XQuartz를 깔라고 알려 줍니다
+- **`gnuplot 이름 벡터들`**: 값을 `이름.data`에, 그리는 법을 `이름.plt`에 쓰고 gnuplot을 부릅니다. gnuplot이 깔려 있지 않으면 두 파일만 남습니다
+- **그림 창 없이 지내는 길**: 위에서 본 `hardcopy`의 SVG와 `wrdata`의 글은 화면이 필요 없습니다. 원격으로 붙은 컴퓨터나 자동으로 도는 작업에서는 이 둘을 씁니다
+
+<Note>
+넷리스트와 파이썬 프로그램은 ngspice 42로 돌린 결과이고, `rc.txt`의 줄들, SVG와 포스트스크립트의 `hardcopy`, 글로 쓴 raw 파일의 머리말, `write`로 쓰고 `load`로 다시 불러오는 것, `gnuplot`이 남기는 두 파일도 직접 해 보고 확인했습니다. SVG 그림은 화면 없는 브라우저로 열어 눈으로 보았습니다. 제 환경에는 화면과 gnuplot이 없어서 `plot`의 그림 창과 gnuplot의 그림은 띄워 보지 못했습니다. XQuartz 이야기는 Homebrew의 안내에서 옮긴 것입니다.
+</Note>
+
+## 정리
+
+- `wrdata`는 파형을 글의 표로, `hardcopy`는 그림 파일로, `write`와 `-r`은 raw 파일로 낸다
+- 글로 낸 파형은 첫 줄의 이름과 빈칸으로 나눈 숫자뿐이라 어느 프로그램에서나 읽힌다. 점의 간격이 고르지 않다는 것만 기억한다
+- `plot`의 그림 창은 화면이 있어야 하고 macOS에서는 XQuartz가 필요하다. 화면이 없으면 SVG와 글 파일을 쓴다
+
+## 참고 문서
+
+- [ngspice: User's Manual(wrdata, write, hardcopy, plot, gnuplot, load 명령과 wr_singlescale, wr_vecnames, hcopydevtype, filetype 변수)](https://ngspice.sourceforge.io/docs/ngspice-html-manual/manual.xhtml)
+- [Homebrew Formulae: ngspice(그림 기능을 쓰려면 XQuartz를 깔라는 안내)](https://formulae.brew.sh/formula/ngspice)

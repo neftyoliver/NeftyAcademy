@@ -1,0 +1,232 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '같은 값도 놓인 순서에 따라 네 배가 든다. 빗나간 예측의 값, 없어지는 분기, [[likely]]의 효과를 잰다';
+
+[앞 페이지](#/read/cpp-advanced/perf-cache)에서 CPU는 다음에 읽을 메모리를 미리 가져왔습니다. 미리 하는 일이 하나 더 있습니다. `if`의 조건을 다 계산하기 전에 **어느 갈래로 갈지 짐작해서** 그쪽 명령을 먼저 실행합니다. 맞으면 기다린 시간이 없고, 틀리면 해 둔 일을 버리고 돌아옵니다. [타입이 섞이자 가상 호출이 세 배 느려진 것](#/read/cpp-advanced/te-compare)이 이 일이었습니다.
+
+## 순서만 바꿔서 재기
+
+128 이상인 원소를 세는 함수와 더하는 함수를, 값은 같고 놓인 순서만 다른 배열에 돌립니다.
+
+```cpp nosan flags=-O2
+#include <algorithm>
+#include <chrono>
+#include <print>
+#include <random>
+#include <utility>
+#include <vector>
+
+template <typename T>
+[[gnu::always_inline]] inline void hide(T& v) { asm volatile("" : "+r"(v)); }
+
+long recorded = 0;
+[[gnu::noinline]] void record(int value) { recorded += value; }
+
+// 갈래 안에서 함수를 부른다. 분기가 그대로 남는다
+[[gnu::noinline]] long count_big(const std::vector<int>& data, int limit)
+{
+    long count = 0;
+    for (int v : data) {
+        if (v >= limit) {
+            record(v);
+            ++count;
+        }
+    }
+    return count;
+}
+
+// 갈래 안에서 더하기만 한다
+[[gnu::noinline]] long sum_big(const std::vector<int>& data, int limit)
+{
+    long sum = 0;
+    for (int v : data)
+        if (v >= limit) sum += v;
+    return sum;
+}
+
+template <typename F>
+double ns_each(const std::vector<int>& data, F work)
+{
+    const std::size_t rounds = 100'000'000 / data.size();
+    long sink = 0;
+    const auto start = std::chrono::steady_clock::now();
+    for (std::size_t r = 0; r < rounds; ++r) {
+        int limit = 128;
+        hide(limit);                  // 바퀴마다 다시 계산하게 한다
+        sink += work(data, limit);
+    }
+    const auto end = std::chrono::steady_clock::now();
+    hide(sink);
+    return std::chrono::duration<double, std::nano>(end - start).count()
+           / static_cast<double>(rounds * data.size());
+}
+
+std::vector<int> random_values(std::size_t n)
+{
+    std::mt19937 rng(5);
+    std::vector<int> values(n);
+    for (int& v : values) v = static_cast<int>(rng() % 256);   // 절반이 128 이상
+    return values;
+}
+
+int main()
+{
+    const std::size_t n = 100'000;
+    const std::vector<int> shuffled = random_values(n);
+    std::vector<int> sorted = shuffled;
+    std::ranges::sort(sorted);
+    std::vector<int> pattern(n);       // 여덟 개짜리 무늬를 되풀이한다
+    const bool big[8] = {true, true, false, true, false, false, true, false};
+    for (std::size_t i = 0; i < n; ++i) pattern[i] = big[i % 8] ? 200 : 50;
+    const std::vector<int> few = random_values(1000);
+
+    const std::pair<const char*, const std::vector<int>*> cases[] = {
+        {"무작위 100,000개", &shuffled}, {"정렬된 100,000개", &sorted},
+        {"무늬 100,000개", &pattern}, {"무작위 1,000개", &few}};
+    for (auto [name, data] : cases)
+        std::println("{}: 세기 {:.2f} ns, 더하기 {:.2f} ns", name,
+                     ns_each(*data, count_big), ns_each(*data, sum_big));
+}
+```
+
+```text nocheck
+무작위 100,000개: 세기 3.64 ns, 더하기 0.52 ns
+정렬된 100,000개: 세기 0.94 ns, 더하기 0.52 ns
+무늬 100,000개: 세기 0.98 ns, 더하기 0.53 ns
+무작위 1,000개: 세기 1.02 ns, 더하기 0.51 ns
+```
+
+x86-64, GCC 14 `-O2`, 원소 하나에 든 값입니다. 세기부터 봅니다.
+
+- **무작위와 정렬됨은 같은 값들입니다.** 하는 일도 실행하는 명령의 수도 같은데, 순서만으로 네 배입니다.
+- **무늬도 맞힙니다.** CPU는 직전의 갈래 하나가 아니라 최근 갈래들이 이어진 모양을 기억합니다.
+- **짧은 무작위는 외워 버립니다.** 1,000개를 되풀이하자 정렬된 것과 같아졌습니다. 길이를 바꿔 재면 3,000개까지 0.9 ns 안팎, 10,000개에서 2.6 ns, 30,000개부터 3.6 ns입니다. [벤치마크](#/read/cpp-advanced/perf-measure)의 입력이 짧으면 실제보다 좋은 숫자가 나옵니다.
+
+## 빗나간 횟수 세기
+
+[cachegrind](#/read/cpp-advanced/perf-measure)에 `--branch-sim=yes`를 주면 분기 예측을 흉내 내어 빗나간 횟수를 셉니다. `count_big`만 200바퀴 돌리는 프로그램을 데이터만 바꿔 두 번 돌렸습니다.
+
+```text nocheck
+무작위    I refs: 198,497,786    Branches: 43,618,425    Mispredicts: 10,447,442
+정렬됨    I refs: 198,497,800    Branches: 43,618,430    Mispredicts:    412,843
+```
+
+명령의 수(`I refs`)와 분기의 수는 같고, 빗나간 횟수만 1,000만 번 다릅니다. `if`를 2,000만 번 지났으니 **둘에 한 번**, 동전 던지기입니다. 잰 시간의 차이 2.7 ns를 여기에 맞추면 **한 번 빗나갈 때 5~6 ns**입니다. 더하기 스무 번을 할 시간입니다. 정렬된 쪽에 남은 41만 번은 거의 다 배열을 정렬하는 코드의 것입니다.
+
+cachegrind의 예측기는 실제 CPU의 것이 아닌 모형입니다. 실제 횟수는 리눅스의 `perf stat`이 세는데, 이 환경에는 없어서 돌려 보지 못했습니다.
+
+## 컴파일러가 먼저 없앤다
+
+더하기는 순서와 상관없이 0.52 ns였습니다. `sum_big`에는 빗나갈 분기가 없기 때문입니다. `g++ -O2 -S`가 내놓은 줄 안쪽입니다.
+
+```text nocheck
+.L85:
+        movslq  (%rax), %rdx     # v를 읽는다
+        movq    %rdx, %rdi
+        addq    %rcx, %rdx       # 일단 더해 본다
+        cmpl    %edi, %esi
+        cmovle  %rdx, %rcx       # 조건이 맞을 때만 합계로 옮긴다
+        addq    $4, %rax
+        cmpq    %rax, %r8
+        jne     .L85             # 남은 분기는 줄의 끝을 보는 이것뿐이다
+```
+
+`cmov`는 조건에 따라 옮기거나 마는 명령입니다. 뛰지 않으니 짐작할 것이 없습니다. Clang 20은 여러 원소를 한꺼번에 비교하는 [SIMD](#/read/cpp-advanced/perf-simd) 명령으로 바꿉니다(0.23 ns). 그래서 "정렬하면 빨라진다"는 널리 알려진 예제는 두 컴파일러의 `-O2`에서 재현되지 않습니다. `count_big`에 분기가 남은 까닭은 갈래 안에서 인라인되지 않는 함수를 부르기 때문입니다.
+
+## 손으로 없애기
+
+값을 세 갈래로 나눠 세는 세 가지 방법입니다.
+
+```cpp
+#include <cstdint>
+#include <vector>
+
+struct Counts { long low = 0, mid = 0, high = 0; };
+
+Counts with_if(const std::vector<std::uint8_t>& data)
+{
+    Counts c;
+    for (std::uint8_t v : data) {
+        if (v < 85) ++c.low;
+        else if (v < 170) ++c.mid;
+        else ++c.high;
+    }
+    return c;
+}
+
+Counts with_index(const std::vector<std::uint8_t>& data)
+{
+    long counts[3] = {};
+    for (std::uint8_t v : data)
+        ++counts[(v >= 85) + (v >= 170)];   // 비교의 결과(0 또는 1)를 번호로 쓴다
+    return {counts[0], counts[1], counts[2]};
+}
+
+Counts with_sums(const std::vector<std::uint8_t>& data)
+{
+    long from_85 = 0, from_170 = 0;
+    for (std::uint8_t v : data) {
+        from_85 += (v >= 85);               // 비교의 결과를 그대로 더한다
+        from_170 += (v >= 170);
+    }
+    const long all = static_cast<long>(data.size());
+    return {all - from_85, from_85 - from_170, from_170};
+}
+```
+
+| 원소 하나에 | 무작위 | 정렬됨 | 0, 100, 200 되풀이 |
+| --- | --- | --- | --- |
+| `with_if` | 4.5 ns | 0.35 ns | 0.35 ns |
+| `with_index` | 0.83 ns | 1.9 ns | 0.80 ns |
+| `with_sums` | 0.65 ns | 0.65 ns | 0.65 ns |
+
+- **분기는 맞히면 가장 쌉니다.** `with_if`는 정렬된 데이터에서 0.35 ns로 셋 중 으뜸이고, 무작위에서는 꼴찌입니다.
+- **분기를 없애면 맞혔을 때의 이득도 없어집니다.** `with_index`는 정렬된 데이터에서 `with_if`보다 다섯 배 느립니다. 같은 칸에 연달아 더하면, 앞의 더하기가 메모리에 적은 값을 읽어야 다음 더하기를 시작할 수 있습니다. 칸이 번갈아 바뀌는 셋째 열에서는 0.80 ns입니다.
+- **`with_sums`는 순서를 타지 않습니다.** `-O3`에서는 SIMD로 바뀌어 0.30 ns가 됩니다.
+
+<Note kind="warn">
+라이브러리 함수라고 분기가 없는 것은 아닙니다. 무작위 값을 범위 안으로 자를 때 GCC 14.2 `-O2`에서 `std::clamp(v, lo, hi)`와 `std::min(std::max(v, lo), hi)`는 조건부 점프 둘로 컴파일되어 4.3 ns, 손으로 쓴 `if (v < lo) v = lo; else if (v > hi) v = hi;`는 `cmov` 둘로 0.43 ns였습니다. `-O3`에서는 0.47 ns와 0.29 ns로 좁혀졌고, Clang 20에서는 셋이 같았습니다. 컴파일러와 옵션에 따라 달라지므로 어셈블리를 보거나 재서 확인합니다.
+</Note>
+
+## `[[likely]]`와 `[[unlikely]]`
+
+[속성](#/read/cpp-syntax/fn-attributes) 페이지의 두 표시는 갈래에 "자주 간다", "드물게 간다"를 적습니다.
+
+```cpp
+#include <vector>
+
+long checked_sum(const std::vector<int>& data, std::vector<int>& bad)
+{
+    long sum = 0;
+    for (int v : data) {
+        if (v < 0) [[unlikely]] {
+            bad.push_back(v);     // 오류. 만 개에 하나쯤 온다
+        } else {
+            sum += v * 3 + 1;
+        }
+    }
+    return sum;
+}
+```
+
+| 오류 갈래에 붙인 것 | GCC 14 | Clang 20 |
+| --- | --- | --- |
+| 없음 | 0.32 ns | 0.34~0.39 ns |
+| `[[unlikely]]` | 0.32 ns | 0.35 ns |
+| 거꾸로 `[[likely]]` | 1.9 ns | 0.39 ns |
+
+- **옳게 붙여도 값은 그대로였습니다.** 어셈블리에서 오류 갈래가 함수 끝으로 옮겨졌을 뿐입니다. CPU의 예측기는 표시를 보지 않고 실행하면서 스스로 배웁니다.
+- **거꾸로 붙이자 GCC에서 여섯 배가 됐습니다.** 자주 간다고 들은 갈래에 레지스터를 내주고, 실제로 자주 가는 갈래의 `sum`은 스택에 두었습니다(`addq %rax, 8(%rsp)`). 예측은 여전히 맞는데 더할 때마다 메모리를 거칩니다.
+- **맞히기 어려운 분기는 고치지 못합니다.** 오류가 둘에 하나 꼴인 데이터에서는 무엇을 붙여도 GCC에서 3.3~3.8 ns였습니다.
+
+표시는 CPU가 아니라 **컴파일러가** 읽습니다. 오류 처리처럼 확실히 드문 길에만, 재 본 뒤에 붙입니다. 짐작 대신 실제 실행 기록으로 정하는 방법이 [다음 페이지](#/read/cpp-advanced/perf-inline)의 PGO입니다.
+
+<Note>
+가상 호출과 함수 포인터는 "어디로 뛸지"를 맞혀야 하는 분기입니다. 약은 같습니다. 타입이 섞인 객체 10,000개에서 7.2 ns이던 가상 호출이 [타입별로 모으자 2.3 ns](#/read/cpp-advanced/te-compare)가 됐습니다.
+</Note>
+
+## 정리
+
+- 예측이 한 번 빗나가면 5~6 ns다. 같은 값도 무작위로 놓이면 네 배가 들고, 짧은 입력은 CPU가 외워서 벤치마크를 속인다
+- 단순한 갈래는 컴파일러가 `cmov`나 SIMD로 없앤다. 손으로 없앤 코드는 예측이 잘 맞는 데이터에서 오히려 느릴 수 있다
+- `[[likely]]`는 컴파일러에게 주는 표시다. 옳게 붙여도 얻은 것이 없었고, 거꾸로 붙이면 여섯 배였다

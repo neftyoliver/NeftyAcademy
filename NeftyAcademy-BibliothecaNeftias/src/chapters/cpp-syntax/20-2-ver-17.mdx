@@ -1,0 +1,141 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '구조적 바인딩, if constexpr, optional과 variant, string_view, filesystem';
+
+C++17은 "어휘 타입"의 판입니다. `optional`, `variant`, `string_view`처럼 함수의 서명에 쓰는 기본 단어들이 표준에 들어왔고, 템플릿을 쓰는 일이 한결 수월해졌습니다. 지금도 많은 프로젝트가 기준으로 삼는 판입니다. GCC는 11부터 15까지 C++17이 기본값이었습니다.
+
+## 언어
+
+| 기능 | 한 줄 설명 | 본 곳 |
+| --- | --- | --- |
+| 구조적 바인딩 | `auto [key, value] = pair;` | [구조적 바인딩](#/read/cpp-syntax/types-binding) |
+| `if`, `switch` 안의 초기화 | `if (auto it = m.find(k); it != m.end())` | |
+| `if constexpr` | 컴파일할 때 갈라지는 `if` | [if constexpr](#/read/cpp-syntax/ct-if) |
+| 접기 식 | `(args + ...)` | [가변 인자](#/read/cpp-syntax/tpl-variadic) |
+| 클래스 템플릿 인자 추론 | `std::pair p{1, 2.5};` | [CTAD](#/read/cpp-syntax/tpl-deduction) |
+| `inline` 변수 | 헤더에 전역 상수를 정의한다 | [inline](#/read/cpp-syntax/fn-inline) |
+| 복사 생략의 보장 | 값으로 돌려줘도 복사가 없다 | [복사 생략](#/read/cpp-syntax/sm-elision) |
+| `[[nodiscard]]`, `[[maybe_unused]]`, `[[fallthrough]]` | 자주 쓰는 속성 셋 | [속성](#/read/cpp-syntax/fn-attributes) |
+| 중첩 네임스페이스 | `namespace a::b { }` | [namespace](#/read/cpp-syntax/ns-basic) |
+| `template <auto N>` | 값 인자의 타입까지 추론 | [값 인자](#/read/cpp-syntax/tpl-nontype) |
+| `noexcept`가 타입의 일부 | 함수 포인터의 타입에 들어간다 | [noexcept](#/read/cpp-syntax/exc-noexcept) |
+| `constexpr` 람다 | 람다가 저절로 `constexpr` | [클로저 타입](#/read/cpp-syntax/lam-closure) |
+| `[*this]` 캡처 | 객체를 복사해 품는다 | [캡처](#/read/cpp-syntax/lam-capture) |
+| 정렬된 `new` | `alignas(64)` 타입도 `new`가 맞춰 준다 | [new](#/read/cpp-syntax/life-new) |
+| `__has_include` | 헤더가 있는지 전처리기에서 묻는다 | |
+
+계산 순서도 일부 정해졌습니다. `a.b(c).d(e)`처럼 이어 부를 때 왼쪽이 먼저, `x = y`에서는 오른쪽이 먼저, `<<` 사슬은 왼쪽부터입니다. 그 전에는 `std::cout << f() << g();`에서 `g`가 먼저 불릴 수도 있었습니다.
+
+## 라이브러리
+
+| 헤더·타입 | 하는 일 | 본 곳 |
+| --- | --- | --- |
+| `std::optional<T>` | 값이 있거나 없다 | [optional과 expected](#/read/cpp-syntax/exc-without) |
+| `std::variant<A, B>` | 여럿 가운데 하나. 안전한 `union` | [별칭과 union](#/read/cpp-syntax/ubc-aliasing) |
+| `std::any` | 무엇이든 하나. 꺼낼 때 타입을 댄다 | |
+| `std::string_view` | 글자열을 빌려 본다 | [string](#/read/cpp-syntax/ft-string) |
+| `<filesystem>` | 경로, 디렉터리 훑기, 파일 정보 | |
+| `std::from_chars`, `std::to_chars` | 할당도 로캘도 없는 숫자 변환 | [optional과 expected](#/read/cpp-syntax/exc-without) |
+| `std::byte` | 날것의 바이트 | [bit_cast](#/read/cpp-syntax/cast-reinterpret) |
+| `std::scoped_lock`, `std::shared_mutex` | 뮤텍스 여럿을 교착 없이, 읽기-쓰기 잠금 | |
+| `<memory_resource>` (`std::pmr`) | 할당자를 실행 중에 바꿔 끼운다 | [new](#/read/cpp-syntax/life-new) |
+| `std::invoke`, `std::apply` | 무엇이든 같은 방법으로 부른다, 튜플을 풀어 부른다 | |
+| `std::size`, `std::data`, `std::empty` | 배열과 컨테이너에 같은 이름으로 | |
+| `std::clamp`, `std::gcd`, `std::lcm` | | |
+| `try_emplace`, `insert_or_assign`, `extract`, `merge` | `map`의 정교한 삽입과 노드 옮기기 | |
+| 병렬 알고리즘 | `std::sort(std::execution::par, …)` | |
+| `_v` 타입 특성 | `std::is_integral_v<T>` | [변수 템플릿](#/read/cpp-syntax/tpl-alias) |
+
+## 사라진 것
+
+| 없어진 것 | 대신 |
+| --- | --- |
+| `std::auto_ptr` | `std::unique_ptr` |
+| `throw(타입)` 예외 명세 | `noexcept` |
+| `register` 키워드 | 그냥 지운다. 컴파일러가 알아서 한다 |
+| `std::random_shuffle` | `std::shuffle`과 `<random>`의 생성기 |
+| 삼중자(`??=` 등), `bool`의 `++` | |
+
+옛 코드를 C++17로 올릴 때 걸리는 것이 대개 이 목록입니다([「C++98과 C++03의 코드 읽기」](#/read/cpp-syntax/leg-98)).
+
+## C++17의 모양
+
+기능은 모두 C++17의 것이고, 출력만 이 책의 관례대로 `std::println`을 썼습니다.
+
+```cpp
+#include <filesystem>
+#include <map>
+#include <optional>
+#include <print>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <variant>
+
+struct Off {};
+struct Blink { int period_ms; };
+struct Solid { bool high; };
+using Mode = std::variant<Off, Blink, Solid>;           // 셋 가운데 하나
+
+std::optional<int> find_pin(const std::map<std::string, int>& pins,
+                            std::string_view name)
+{
+    // if 안에서 변수를 만들고 바로 검사한다
+    if (auto it = pins.find(std::string(name)); it != pins.end())
+        return it->second;
+    return std::nullopt;
+}
+
+std::string describe(const Mode& mode)
+{
+    return std::visit([](const auto& m) -> std::string {
+        using T = std::decay_t<decltype(m)>;
+        if constexpr (std::is_same_v<T, Off>)           // 컴파일할 때 갈라진다
+            return "off";
+        else if constexpr (std::is_same_v<T, Blink>)
+            return "blink " + std::to_string(m.period_ms) + "ms";
+        else
+            return m.high ? "high" : "low";
+    }, mode);
+}
+
+int main()
+{
+    std::map<std::string, int> pins{{"led", 17}, {"button", 27}};
+
+    for (const auto& [name, number] : pins)             // 구조적 바인딩
+        std::println("{} -> {}", name, number);
+
+    if (auto [it, inserted] = pins.try_emplace("led", 99); !inserted)
+        std::println("led는 이미 {}", it->second);
+
+    std::println("{}", find_pin(pins, "buzzer").value_or(-1));
+    std::println("{}", describe(Blink{500}));
+    std::println("{}", describe(Solid{true}));
+
+    std::filesystem::path device = "/sys/class/gpio";
+    std::println("{}", (device / "gpio17" / "value").string());
+}
+```
+
+```text
+button -> 27
+led -> 17
+led는 이미 17
+-1
+blink 500ms
+high
+/sys/class/gpio/gpio17/value
+```
+
+`std::variant`와 `std::visit`은 [가상 함수](#/read/cpp-syntax/inh-virtual) 없이 "종류에 따라 다르게"를 하는 방법입니다. 종류가 닫혀 있을 때 쓰고, 하나를 빠뜨리면 컴파일 오류가 납니다.
+
+<Note>
+GCC 7, Clang 5부터 언어 기능은 거의 다 되고, 라이브러리는 조금 늦었습니다. `<filesystem>`은 GCC 8(9부터는 따로 링크할 것이 없다), `std::from_chars`의 실수 판은 GCC 11, 병렬 알고리즘은 GCC에서 Intel TBB 라이브러리가 있어야 합니다.
+</Note>
+
+## 정리
+
+- 언어: 구조적 바인딩, `if constexpr`, 접기 식, CTAD, `inline` 변수, 보장된 복사 생략
+- 라이브러리: `optional`, `variant`, `string_view`, `filesystem`, `from_chars`, `pmr`
+- `auto_ptr`, `throw()` 명세, `register`가 사라졌다

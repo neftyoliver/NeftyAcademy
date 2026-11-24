@@ -1,0 +1,216 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '어긋난 두 신호와 배선, 상태 전이표로 방향 가리기, 떨림이 지워지는 까닭, 긴 디바운스가 지우는 것';
+export const terms = ['gpiod_edge_event_get_line_offset'];
+
+로터리 엔코더는 끝없이 돌아가는 손잡이입니다. 볼륨 손잡이처럼 생겼지만 각도가 아니라 돌린 방향과 칸 수를 알려 줍니다. 줄 둘의 에지를 차례대로 받아야 읽을 수 있어서, 에지 이벤트를 연습하기에 좋은 부품입니다.
+
+## 어긋난 두 신호
+
+기계식 엔코더 안에는 스위치 둘(A와 B)이 있고, 한쪽 다리는 공통으로 묶여 있습니다. 손잡이를 돌리면 둘이 차례로 붙었다 떨어지는데, 한쪽이 다른 쪽보다 4분의 1주기 앞섭니다.
+
+```text
+핀 15 (GPIO 22) ---- A
+핀 16 (GPIO 23) ---- B
+핀 14 (GND)     ---- 공통(가운데 다리)
+```
+
+| 시계 방향으로 한 칸 | A | B | 상태 |
+| --- | --- | --- | --- |
+| 쉬는 자리 | 1 | 1 | 3 |
+| A가 먼저 붙는다 | 0 | 1 | 1 |
+| B도 붙는다 | 0 | 0 | 0 |
+| A가 떨어진다 | 1 | 0 | 2 |
+| B도 떨어져 쉬는 자리로 | 1 | 1 | 3 |
+
+- **풀업으로 읽는다**: 공통을 GND에 잇고 두 줄에 핀 안의 풀업을 켭니다. 스위치가 붙으면 LOW입니다
+- **한 번에 한 줄만 바뀐다**: 이웃한 상태끼리는 비트 하나만 다릅니다. 이런 차례를 그레이 코드라고 합니다
+- **방향은 차례에 있다**: 반대로 돌리면 B가 먼저 붙어서 상태가 3, 2, 0, 1, 3으로 지나갑니다
+- **쉬는 자리는 부품마다 다르다**: 이 쪽은 한 칸에 한 주기를 돌고 둘 다 떨어진 채로 쉬는 엔코더를 가정합니다. 한 칸에 반 주기만 가는 것, 쉬는 자리가 둘 다 붙은 쪽인 것도 있으므로 부품의 문서를 봅니다
+
+## 상태 전이표로 읽기
+
+```c gpiosim=encoder
+// 로터리 엔코더: 두 줄의 에지를 차례대로 받아 상태 전이표로 방향을 가리고 칸을 센다
+#define _POSIX_C_SOURCE 200809L              // clock_gettime을 쓰려고
+#include <errno.h>
+#include <gpiod.h>
+#include <signal.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+enum { A = 22, B = 23 };                     // 핀 15, 16. 가운데 다리는 GND
+enum { ROOM = 16 };
+
+static volatile sig_atomic_t stop;
+static void on_signal(int) { stop = 1; }
+
+// 상태는 A가 윗비트, B가 아랫비트다. 쉬는 자리는 둘 다 HIGH인 3
+// [앞 상태][새 상태]: 시계 방향으로 4분의 1칸이면 +1, 반대면 -1, 건너뛰었으면 9
+static const int STEP[4][4] = {
+    //  새: 00  01  10  11
+    /* 00 */ {0, -1, +1, 9},
+    /* 01 */ {+1, 0, 9, -1},
+    /* 10 */ {-1, 9, 0, +1},
+    /* 11 */ {9, +1, -1, 0},
+};
+
+// 두 줄을 풀업을 켠 입력으로, 두 방향의 에지를 듣게 요청한다
+static struct gpiod_line_request* request_pair(struct gpiod_chip* chip,
+                                               unsigned long debounce_us) {
+    struct gpiod_line_settings* settings = gpiod_line_settings_new();
+    struct gpiod_line_config* config = gpiod_line_config_new();
+    struct gpiod_request_config* request_config = gpiod_request_config_new();
+    struct gpiod_line_request* request = nullptr;
+    if (settings && config && request_config) {
+        gpiod_line_settings_set_direction(settings, GPIOD_LINE_DIRECTION_INPUT);
+        gpiod_line_settings_set_bias(settings, GPIOD_LINE_BIAS_PULL_UP);
+        gpiod_line_settings_set_edge_detection(settings, GPIOD_LINE_EDGE_BOTH);
+        if (debounce_us > 0)
+            gpiod_line_settings_set_debounce_period_us(settings, debounce_us);
+        const unsigned int pair[] = {A, B};
+        gpiod_line_config_add_line_settings(config, pair, 2, settings);
+        gpiod_request_config_set_consumer(request_config, "encoder");
+        request = gpiod_chip_request_lines(chip, request_config, config);
+    }
+    gpiod_request_config_free(request_config);
+    gpiod_line_config_free(config);
+    gpiod_line_settings_free(settings);
+    return request;
+}
+
+int main(int argc, char** argv) {
+    // 인수가 있으면 디바운스 기간(마이크로초)으로 쓴다
+    const unsigned long debounce_us = argc > 1 ? strtoul(argv[1], nullptr, 10) : 0;
+    struct gpiod_chip* chip = gpiod_chip_open("/dev/gpiochip0");
+    if (!chip) {
+        perror("/dev/gpiochip0");
+        return 1;
+    }
+    struct gpiod_line_request* pair = request_pair(chip, debounce_us);
+    gpiod_chip_close(chip);
+    struct gpiod_edge_event_buffer* buffer = gpiod_edge_event_buffer_new(ROOM);
+    if (!pair || !buffer) {
+        perror("요청");
+        return 1;
+    }
+    signal(SIGINT, on_signal);
+    signal(SIGTERM, on_signal);
+
+    // 처음 상태는 두 줄을 한 번에 읽어서 안다
+    enum gpiod_line_value now[2];
+    if (gpiod_line_request_get_values(pair, now) < 0) {
+        perror("읽기");
+        return 1;
+    }
+    int state = (now[0] == GPIOD_LINE_VALUE_ACTIVE) << 1 |
+                (now[1] == GPIOD_LINE_VALUE_ACTIVE);
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    const uint64_t origin =
+        (uint64_t)t0.tv_sec * 1'000'000'000 + (uint64_t)t0.tv_nsec;
+
+    int quarters = 0, position = 0, edges = 0, skipped = 0;
+    while (!stop) {
+        if (gpiod_line_request_wait_edge_events(pair, -1) < 0) {
+            if (errno == EINTR) continue;
+            perror("기다리기");
+            break;
+        }
+        int count = gpiod_line_request_read_edge_events(pair, buffer, ROOM);
+        if (count < 0) {
+            perror("읽기");
+            break;
+        }
+        for (int i = 0; i < count; ++i) {
+            struct gpiod_edge_event* event =
+                gpiod_edge_event_buffer_get_event(buffer, (unsigned long)i);
+            // 이벤트가 말하는 줄의 비트만 바꾼다. 차례는 커널이 지켜 준다
+            const int bit = gpiod_edge_event_get_line_offset(event) == A ? 2 : 1;
+            const bool high = gpiod_edge_event_get_event_type(event) ==
+                              GPIOD_EDGE_EVENT_RISING_EDGE;
+            const int next = high ? state | bit : state & ~bit;
+            const int step = STEP[state][next];
+            state = next;
+            ++edges;
+            if (step == 9) ++skipped;
+            else quarters += step;
+            if (state != 3) continue;        // 쉬는 자리에 돌아왔을 때만 센다
+            if (quarters == 4 || quarters == -4) {
+                position += quarters / 4;
+                printf("%.3fs %s, 위치 %d\n",
+                       (double)(gpiod_edge_event_get_timestamp_ns(event) - origin) /
+                           1e9,
+                       quarters > 0 ? "시계 방향" : "반시계 방향", position);
+            }
+            quarters = 0;
+        }
+    }
+    printf("에지 %d개, 건너뛴 전이 %d번, 마지막 위치 %d\n", edges, skipped,
+           position);
+    gpiod_edge_event_buffer_free(buffer);
+    gpiod_line_request_release(pair);
+}
+```
+
+```text
+1.015s 시계 방향, 위치 1
+1.515s 시계 방향, 위치 2
+2.015s 반시계 방향, 위치 1
+2.503s 시계 방향, 위치 2
+2.507s 시계 방향, 위치 3
+2.511s 시계 방향, 위치 4
+에지 34개, 건너뛴 전이 0번, 마지막 위치 4
+```
+
+- **표가 방향을 안다**: `STEP[앞 상태][새 상태]`에 그 전이가 어느 쪽으로 4분의 1칸인지 적어 두었습니다. 두 비트가 함께 바뀐 전이는 있을 수 없는 것이므로 9로 표시해 따로 셉니다
+- **이벤트가 줄을 알려 준다**: `gpiod_edge_event_get_line_offset`이 어느 줄의 에지인지 돌려줍니다. 그 줄의 비트만 바꿔 새 상태를 만듭니다
+- **차례는 커널이 지킨다**: 한 요청에 담긴 줄들의 이벤트는 일어난 차례대로 한 버퍼에 쌓입니다. 프로그램이 늦게 깨어 여러 개를 한꺼번에 읽어도 차례는 그대로입니다([「이벤트 버퍼」](#/read/libgpiod/ed-buffer))
+- **처음 상태는 한 번에 읽는다**: 시작할 때 손잡이가 어디에 있는지는 `gpiod_line_request_get_values`로 두 줄을 함께 읽어 압니다. 하나씩 읽으면 그 사이에 한쪽이 바뀔 수 있습니다([「값 읽기」](#/read/libgpiod/in-read))
+- **쉬는 자리에서 센다**: 4분의 1칸을 모으다가 상태 3에 돌아왔을 때 합이 4나 -4이면 한 칸으로 칩니다. 3.0초에는 A만 붙었다가 떨어졌습니다. 합이 0이어서 세지 않았습니다
+- **빠르게 돌려도 센다**: 2.5초부터는 전이 사이가 1ms입니다. 세 칸이 모두 세어졌습니다
+
+## 떨림이 지워지는 까닭
+
+대본의 첫 두 칸에서는 A와 B가 붙을 때마다 접점이 떨립니다. 예제는 디바운스를 걸지 않았는데도 한 칸씩만 셌습니다.
+
+- **떨림은 제자리걸음이다**: A가 떨리는 동안 B는 가만히 있습니다. 상태가 3, 1, 3, 1로 오가고, 표의 값은 +1, -1, +1로 더해져 결국 +1입니다
+- **에지를 세는 방법은 속는다**: "A가 내려갈 때 B를 본다" 같은 방법은 A의 떨림마다 한 번씩 세어 버립니다. 표로 읽으면 되돌아간 만큼 빼 줍니다
+- **에지의 수는 늘어난다**: 열두 번의 전이가 있었던 앞의 세 칸에서 에지는 스무 개였습니다. 떨림이 심한 부품은 프로그램을 그만큼 자주 깨웁니다
+- **두 줄이 함께 떨리면 틀린다**: 한쪽이 떨리는 동안 다른 쪽이 바뀔 만큼 빨리 돌리면 표로도 가릴 수 없습니다
+
+## 디바운스를 길게 걸면
+
+같은 대본으로, 두 줄에 5ms의 디바운스를 걸어 돌린 결과입니다(인수로 `5000`).
+
+```text
+1.020s 시계 방향, 위치 1
+1.520s 시계 방향, 위치 2
+2.020s 반시계 방향, 위치 1
+에지 14개, 건너뛴 전이 0번, 마지막 위치 1
+```
+
+- **빠른 세 칸이 사라졌다**: 전이 사이가 1ms인 구간에서는 어느 레벨도 5ms를 버티지 못해 이벤트가 하나도 오지 않았습니다. 건너뛴 전이도 0으로 나옵니다. 틀린 줄도 모르고 틀립니다
+- **기간은 가장 짧은 간격보다 짧게**: 빨리 돌릴 때 전이 사이의 간격을 어림하고 그보다 짧게 겁니다. 0.5ms(`500`)로 돌리면 여섯 칸을 모두 세고 에지는 26개로 줄었습니다([「디바운스」](#/read/libgpiod/ed-debounce))
+- **시각이 밀린다**: 디바운스를 건 이벤트의 시각은 기간만큼 늦습니다. 위에서 첫 칸은 1.015초가 아니라 1.020초입니다
+- **버퍼가 넘치면 다시 맞춘다**: 프로그램이 오래 깨지 못해 커널의 버퍼가 넘치면 에지를 잃습니다. 건너뛴 전이가 보이면 두 줄을 한 번에 읽어 상태를 다시 맞추고, 모으던 4분의 1칸은 버립니다
+
+<Note>
+예제는 이 책의 흉내 칩에서 돌린 것이고, 손잡이를 돌리는 때와 빠르기, 접점의 떨림은 대본으로 넣었습니다. 흉내 칩의 디바운스는 기간을 정확히 지키는데, 진짜 커널과 부품에서는 그렇게 고르지 않습니다. 진짜 libgpiod 2.2.4의 머리 파일로 x86-64와 aarch64에서 컴파일되는지 확인했고, 엔코더를 단 보드에서 돌려 보지는 못했습니다. 어느 쪽이 시계 방향인지는 부품과 배선에 달렸습니다. 거꾸로 세면 A와 B를 바꿔 잇습니다. 라즈베리파이의 `rotary-encoder` 오버레이를 쓰면 커널이 이 일을 대신하지만, 이 쪽에서는 원리를 보려고 직접 읽었습니다([「커널 드라이버에 맡길 것들」](#/read/libgpiod/tm-kernel)).
+</Note>
+
+## 정리
+
+- 엔코더의 두 줄은 4분의 1주기 어긋나 있다. 앞 상태와 새 상태의 짝을 표에서 찾으면 방향이 나온다
+- 한 줄의 떨림은 표에서 더하고 빼져 사라진다. 디바운스는 가장 짧은 전이 간격보다 짧게만 건다
+- 처음 상태와 다시 맞출 때의 상태는 두 줄을 한 번에 읽어서 얻는다
+
+## 참고 문서
+
+- [KEYENCE: Reading Rotary Encoders(A상과 B상, 2비트 그레이 코드, 상태 전이표로 읽는 방법)](https://www.keyence.com/ss/general/embedded-software/peripheral-drivers/rotary-encoder-implementation.jsp)
+- [Microchip 문서: Quadrature Encoding of Signals from Incremental Position Sensors(두 방향의 상태 차례)](https://onlinedocs.microchip.com/oxy/GUID-954122A4-C243-4CDD-AAB7-64D199581D04-en-US-5/GUID-96E15BCB-15F0-4DC6-876D-66EBF4B40CC7.html)
+- [리눅스 커널 문서: rotary-encoder(90도 어긋난 두 출력, 쉬는 자리가 부품마다 다르다는 것)](https://docs.kernel.org/6.7/input/devices/rotary-encoder.html)
+- [Hackaday: Which Way Are We Going? Concepts Behind Rotary Encoders(한쪽만 떨리면 표가 걸러 준다는 댓글)](https://hackaday.com/2014/11/01/which-way-are-we-going-concepts-behind-rotary-encoders)
+- [libgpiod 문서: GPIO edge event(이벤트에서 줄의 오프셋을 꺼내는 함수)](https://libgpiod.readthedocs.io/en/master/core_edge_event.html)

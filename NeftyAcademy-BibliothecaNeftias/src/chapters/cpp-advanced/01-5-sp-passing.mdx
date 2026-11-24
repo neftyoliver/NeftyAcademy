@@ -1,0 +1,203 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '매개변수의 꼴이 말하는 소유권, 넘기는 여섯 가지와 돌려주는 세 가지';
+
+함수의 매개변수에 스마트 포인터를 쓸지, 쓴다면 값으로 받을지 참조로 받을지는 취향이 아닙니다. 그 꼴이 **이 함수가 소유권에 무엇을 하는가**를 부르는 쪽에 알려 줍니다. C++ Core Guidelines가 이것을 정리해 두었고, 여기서는 그 까닭을 실제로 돌려 보며 봅니다.
+
+## 넘기는 꼴
+
+| 함수가 하는 일 | 매개변수 |
+| --- | --- |
+| 객체를 쓰기만 한다 | `const T&`, `T&`. 없을 수도 있으면 `T*` |
+| 소유권을 **가져간다** | `std::unique_ptr<T>` (값으로) |
+| 부른 쪽의 `unique_ptr`를 다른 것으로 **바꿔 놓을 수 있다** | `std::unique_ptr<T>&` |
+| 주인의 하나가 **된다** | `std::shared_ptr<T>` (값으로) |
+| 부른 쪽의 `shared_ptr`를 **바꿔 놓을 수 있다** | `std::shared_ptr<T>&` |
+| 주인이 될 수도, 안 될 수도 있다 | `const std::shared_ptr<T>&` |
+
+가장 중요한 것은 첫 줄입니다. **대부분의 함수는 객체를 쓰기만 하고, 그런 함수는 스마트 포인터를 받지 않습니다.**
+
+```cpp
+#include <memory>
+#include <print>
+#include <string>
+#include <utility>
+#include <vector>
+
+struct Image {
+    std::string name;
+    int width = 0;
+};
+
+// 쓰기만 한다: 누가 어떻게 갖고 있든 상관없다
+int area_hint(const Image& image)
+{
+    return image.width * image.width;
+}
+
+// 가져간다: 부르고 나면 부른 쪽은 빈손이다
+class Gallery {
+public:
+    void add(std::unique_ptr<Image> image) { images_.push_back(std::move(image)); }
+    std::size_t size() const { return images_.size(); }
+
+private:
+    std::vector<std::unique_ptr<Image>> images_;
+};
+
+// 주인이 된다: 복사본 하나를 자기 것으로 둔다
+class Preview {
+public:
+    void show(std::shared_ptr<const Image> image) { current_ = std::move(image); }
+
+private:
+    std::shared_ptr<const Image> current_;
+};
+
+int main()
+{
+    Image on_stack{"stack", 2};
+    auto unique = std::make_unique<Image>("unique", 3);
+    const auto shared = std::make_shared<Image>("shared", 4);
+
+    // 쓰기만 하는 함수는 셋 모두에 쓸 수 있다
+    std::println("{} {} {}", area_hint(on_stack), area_hint(*unique),
+                 area_hint(*shared));
+
+    Gallery gallery;
+    gallery.add(std::move(unique));         // std::move 가 "넘긴다" 를 보여 준다
+    std::println("넘긴 뒤 {} / 갤러리 {}", static_cast<bool>(unique),
+                 gallery.size());
+
+    Preview preview;
+    preview.show(shared);
+    std::println("주인 수 {}", shared.use_count());
+}
+```
+
+```text
+4 9 16
+넘긴 뒤 false / 갤러리 1
+주인 수 2
+```
+
+`area_hint`가 `const std::shared_ptr<Image>&`를 받았다면 스택의 객체와 `unique_ptr`의 객체에는 쓸 수 없었을 것입니다. 쓰기만 하는 함수가 스마트 포인터를 받으면 **부르는 쪽의 소유 방식을 까닭 없이 묶습니다.**
+
+`unique_ptr`를 값으로 받는 함수는 부르는 쪽에 `std::move`를 쓰게 만듭니다. 호출하는 줄만 봐도 소유권이 넘어간다는 것이 보입니다. 받은 함수가 그것을 어디에도 저장하지 않으면 객체는 함수가 끝날 때 지워집니다. "가져간다"는 약속이 타입으로 지켜집니다.
+
+`shared_ptr`를 값으로 받아 멤버에 둘 때는 위처럼 **`std::move`로 옮겨 넣습니다.** 그러지 않으면 계수를 한 번 더 올렸다 내립니다.
+
+## 값으로 받는 값
+
+"혹시 모르니 `shared_ptr`로 받자"의 값을 재 봤습니다. 같은 일을 하는 함수를 세 가지로 불렀습니다(x86-64, GCC 14 `-O2`, [스레드가 있는 프로그램](#/read/cpp-advanced/sp-shared)).
+
+| 매개변수 | 호출 한 번 |
+| --- | --- |
+| `std::shared_ptr<Config>` (값) | 20.1 ns |
+| `const std::shared_ptr<Config>&` | 1.6 ns |
+| `const Config&` | 잴 수 없을 만큼 작다 |
+
+값으로 받으면 부를 때마다 계수를 원자적으로 올리고 내립니다. 그 함수가 주인이 될 것이 아니라면 치를 까닭이 없는 값입니다.
+
+## 참조를 넘긴 사이에
+
+스마트 포인터에서 꺼낸 참조를 넘길 때 조심할 경우가 하나 있습니다. **그 스마트 포인터를 함수 안에서 누가 바꿀 수 있을 때**입니다.
+
+```cpp
+#include <memory>
+#include <print>
+#include <string>
+#include <utility>
+
+struct Config {
+    std::string name;
+    int rate = 0;
+};
+
+// 프로그램 어디서나 닿는 설정
+std::shared_ptr<Config> g_config = std::make_shared<Config>("first", 10);
+
+void reload()
+{
+    // 옛 Config 의 주인이 g_config 뿐이었다면 여기서 지워진다
+    g_config = std::make_shared<Config>("second", 20);
+}
+
+// 복사본을 받아 붙들고 있으므로 안전하다
+int use_and_reload(std::shared_ptr<const Config> pinned)
+{
+    reload();
+    return pinned->rate;
+}
+
+int main()
+{
+    std::println("{}", use_and_reload(g_config));
+    std::println("{}", g_config->name);
+}
+```
+
+```text
+10
+second
+```
+
+같은 함수가 `const Config&`를 받고 `use_and_reload(*g_config)`로 불렸다면, `reload()`가 옛 `Config`를 지운 뒤에 `config.rate`를 읽게 됩니다. 실제로 그렇게 고쳐 `-fsanitize=address`로 돌리면 `heap-use-after-free`가 보고됩니다. 함수 안에서 직접 `reload()`를 부르지 않아도, 부른 콜백이나 다른 스레드가 바꿀 수 있습니다.
+
+규칙은 이렇습니다. **전역이나 멤버처럼 남이 바꿀 수 있는 `shared_ptr`에서 꺼낸 참조를 넘기려면, 먼저 지역 변수로 복사해 붙들어 둡니다.**
+
+```cpp nocheck
+const auto pinned = g_config;       // 이 함수가 끝날 때까지 살아 있다
+process(*pinned);                   // 안쪽 함수들은 참조로 받아도 된다
+```
+
+호출 사슬의 맨 위에서 한 번 붙들면 그 아래의 함수들은 모두 참조로 받을 수 있습니다. 계수를 고치는 일이 한 번으로 끝납니다. 지역 변수의 `shared_ptr`나 `unique_ptr`에서 꺼낸 참조는 이런 걱정이 없습니다. 그 변수는 함수가 끝날 때까지 아무도 바꾸지 못합니다.
+
+## 돌려주는 꼴
+
+| 함수가 하는 일 | 반환 타입 |
+| --- | --- |
+| 새로 만들어 준다 | `std::unique_ptr<T>`. 받는 쪽이 `shared_ptr`로 바꿀 수 있다 |
+| 이미 여럿이 가진 것을 함께 갖게 한다 | `std::shared_ptr<T>` |
+| 가진 것을 보여 주기만 한다 | `T&`, 없을 수도 있으면 `T*` |
+
+```cpp
+#include <memory>
+#include <print>
+#include <string>
+
+struct Image {
+    std::string name;
+};
+
+// 공장 함수는 unique_ptr 를 준다. 주인을 어떻게 둘지는 받는 쪽이 정한다
+std::unique_ptr<Image> load(const std::string& name)
+{
+    return std::make_unique<Image>(name);
+}
+
+int main()
+{
+    const std::unique_ptr<Image> only_mine = load("a.png");
+    const std::shared_ptr<Image> shared = load("b.png");    // 저절로 바뀐다
+    std::println("{} {} {}", only_mine->name, shared->name, shared.use_count());
+}
+```
+
+```text
+a.png b.png 1
+```
+
+공장 함수가 `shared_ptr`를 돌려주면 받는 쪽은 `unique_ptr`로 되돌릴 수 없습니다. `unique_ptr`를 돌려주면 둘 다 됩니다. 덜 묶는 쪽을 돌려줍니다. 다만 그렇게 바꾼 `shared_ptr`는 [제어 블록을 따로 할당합니다](#/read/cpp-advanced/sp-shared). 받는 쪽이 늘 공유한다는 것을 안다면 처음부터 `make_shared`로 만들어 돌려주는 편이 쌉니다.
+
+소유하는 맨 포인터(`T*`를 돌려주고 "받은 쪽이 `delete`할 것")는 새 코드에서 쓰지 않습니다. 맨 포인터와 참조는 <strong>"가리키기만 한다"</strong>는 뜻으로만 씁니다. 그 약속이 지켜지는 코드에서는 `T*`를 보면 지울 걱정을 하지 않아도 됩니다.
+
+<Note>
+`const std::shared_ptr<T>&`는 "어쩌면 복사할지도 모른다"는 애매한 꼴입니다. 조건에 따라 저장하기도 하는 함수(캐시에 없을 때만 넣는다)가 아니라면 `const T&`나 값으로 받는 쪽이 뜻이 분명합니다. 그리고 `shared_ptr<const T>`를 받으면 "주인이 되지만 고치지는 않는다"를 타입으로 말할 수 있습니다. `shared_ptr<T>`는 `shared_ptr<const T>`로 저절로 바뀝니다.
+</Note>
+
+## 정리
+
+- 쓰기만 하는 함수는 `const T&`나 `T*`를 받는다. 스마트 포인터를 받는 것은 소유권에 손을 대는 함수뿐이다
+- 가져가면 `unique_ptr`를 값으로, 주인이 되면 `shared_ptr`를 값으로 받아 `std::move`로 넣는다. 공장 함수는 `unique_ptr`를 돌려준다
+- 남이 바꿀 수 있는 `shared_ptr`에서 꺼낸 참조를 넘기기 전에, 지역 변수로 복사해 붙들어 둔다

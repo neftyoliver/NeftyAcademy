@@ -1,0 +1,114 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'CMake로 프로젝트 만들기: find_package와 qt_add_executable, 자동 moc, 빌드 폴더에 생기는 것들';
+export const terms = ['qt_add_executable', 'qt_standard_project_setup', 'QStringLiteral'];
+
+Qt 6의 공식 빌드 시스템은 **CMake**입니다. Qt 5 시절의 qmake도 아직 쓸 수 있지만, 새 프로젝트는 CMake로 시작하는 것이 기본이고 Qt Creator도 CMake 프로젝트를 먼저 권합니다. 이 장에서는 파일 네 개짜리 프로젝트를 실제로 빌드해 보고, 빌드하는 동안 Qt가 무엇을 끼워 넣는지 봅니다.
+
+## 파일 네 개
+
+`CMakeLists.txt`
+
+```cmake
+cmake_minimum_required(VERSION 3.16)
+project(hello VERSION 1.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets)
+qt_standard_project_setup()        # AUTOMOC, AUTOUIC 켜기 등 권장 설정
+
+qt_add_executable(hello
+    main.cpp
+    greeter.h greeter.cpp
+)
+target_link_libraries(hello PRIVATE Qt6::Widgets)
+```
+
+`greeter.h`
+
+```cpp nocheck
+#pragma once
+#include <QObject>
+#include <QString>
+
+class Greeter : public QObject {
+    Q_OBJECT                        // moc가 이 클래스를 처리하게 하는 표시
+public:
+    explicit Greeter(QObject* parent = nullptr) : QObject(parent) {}
+    void greet(const QString& who);
+signals:
+    void greeted(const QString& message);
+};
+```
+
+`greeter.cpp`
+
+```cpp nocheck
+#include "greeter.h"
+
+void Greeter::greet(const QString& who) {
+    emit greeted(QStringLiteral("안녕, %1!").arg(who));
+}
+```
+
+`main.cpp`
+
+```cpp nocheck
+#include <QApplication>
+#include <cstdio>
+#include "greeter.h"
+
+int main(int argc, char** argv) {
+    QApplication app(argc, argv);
+    Greeter g;
+    QObject::connect(&g, &Greeter::greeted, [](const QString& m) {
+        std::printf("%s\n", qPrintable(m));
+    });
+    g.greet("네프티");
+    return 0;
+}
+```
+
+## 빌드하기
+
+```text nocheck
+$ cmake -S . -B build -G Ninja
+-- Configuring done (1.3s)
+-- Generating done (0.0s)
+-- Build files have been written to: /tmp/qt/hello/build
+$ cmake --build build
+[1/5] Automatic MOC and UIC for target hello
+[2/5] Building CXX object CMakeFiles/hello.dir/greeter.cpp.o
+[3/5] Building CXX object CMakeFiles/hello.dir/hello_autogen/mocs_compilation.cpp.o
+[4/5] Building CXX object CMakeFiles/hello.dir/main.cpp.o
+[5/5] Linking CXX executable hello
+$ ./build/hello
+안녕, 네프티!
+```
+
+(CMake 3.28, Ninja, Qt 6.4.2에서 실제로 빌드한 출력입니다.)
+
+## CMakeLists.txt 읽기
+
+- `find_package(Qt6 REQUIRED COMPONENTS Core Widgets)`는 설치된 Qt를 찾고, 쓸 모듈을 고릅니다. Qt를 표준 위치가 아닌 곳에 설치했다면 `cmake -DCMAKE_PREFIX_PATH=~/Qt/6.12.0/gcc_64 …`처럼 위치를 알려 줍니다
+- `qt_standard_project_setup()`은 Qt 6.3부터 생긴 함수로, `AUTOMOC`와 `AUTOUIC`를 켜는 등 권장 설정을 한 번에 합니다
+- `qt_add_executable`은 `add_executable`의 Qt판입니다. 플랫폼마다 필요한 마무리(안드로이드 패키지, Windows의 진입점 등)를 대신 챙깁니다
+- `target_link_libraries(... Qt6::Widgets)`는 Widgets를 링크합니다. Widgets가 Gui와 Core에 기대므로 그것들도 따라옵니다
+
+## 빌드 중에 끼어드는 것
+
+빌드 출력의 첫 줄 "Automatic MOC and UIC"가 Qt의 몫입니다. CMake의 **AUTOMOC**이 머리 파일들을 훑어 `Q_OBJECT`가 있는 `greeter.h`를 찾고, `moc`를 돌려 `build/hello_autogen/…/moc_greeter.cpp`(이 경우 148줄)를 만들었습니다. 그 파일들을 모은 `mocs_compilation.cpp`가 2단계에서 따로 컴파일되었습니다. 시그널 `greeted`의 본체는 우리가 쓰지 않았는데 링크가 되는 것은, 바로 이 생성된 파일 안에 있기 때문입니다. 무엇이 생성되는지는 [「moc가 하는 일」](#/read/cpp-qt/obj-moc)에서 자세히 봅니다.
+
+`.ui` 파일(Qt Designer로 만든 화면)이 있으면 AUTOUIC이 `uic`를 돌려 `ui_*.h`를 만들고, `.qrc` 자원 파일이 있으면 AUTORCC가 `rcc`로 그것을 C++ 배열로 바꿔 실행 파일에 넣습니다.
+
+<Note>
+이 책의 많은 예제는 읽기 쉽게 파일 하나에 모든 것을 담았습니다. `Q_OBJECT` 클래스를 `.cpp` 파일 안에 선언할 때는 파일 끝에 `#include "main.moc"`처럼 그 파일의 moc 결과를 포함해야 AUTOMOC이 그 파일도 처리합니다. 예제 끝에 이 줄이 보이면 그런 이유입니다. 실제 프로젝트에서는 클래스를 머리 파일에 두는 편이 일반적입니다.
+</Note>
+
+## 정리
+
+- Qt 6 프로젝트는 CMake로 만들며, find_package로 모듈을 고르고 qt_add_executable로 실행 파일을 만든다
+- qt_standard_project_setup이 AUTOMOC·AUTOUIC 같은 권장 설정을 켜고, 빌드 중에 moc가 Q_OBJECT 클래스의 코드를 생성한다
+- 한 파일 안의 Q_OBJECT 클래스는 파일 끝에 그 파일의 .moc를 포함해야 처리된다

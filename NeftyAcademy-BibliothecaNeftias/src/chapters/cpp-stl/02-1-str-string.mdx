@@ -1,0 +1,274 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '속의 세 값과 용량, 고치기와 찾기, +와 +=의 차이, C 함수와 오가기, 글자 함수의 함정';
+export const terms = ['std::string', '~string'];
+
+[「string과 string_view」](#/read/cpp-syntax/ft-string)에서 `std::string`을 만들고, 붙이고, 견주는 데까지 썼습니다. 여기서는 그 속을 보고, 나머지 멤버와 흔한 함정을 다룹니다.
+
+## 세 값을 들고 있는 객체
+
+`std::string`은 글자들이 있는 곳의 포인터, 지금 길이(`size`), 다시 할당하지 않고 담을 수 있는 길이(`capacity`)를 들고 있습니다. [`vector`](#/read/cpp-syntax/ft-vector)와 같은 구조입니다.
+
+```cpp
+#include <print>
+#include <string>
+
+int main()
+{
+    std::string s;
+    std::println("sizeof {} / 빈 문자열의 capacity {}", sizeof s, s.capacity());
+
+    std::size_t last = s.capacity();
+    for (int i = 0; i < 100; ++i) {
+        s += 'x';
+        if (s.capacity() != last) {
+            std::println("size {:3}에서 capacity {:3} -> {:3}", s.size(), last,
+                         s.capacity());
+            last = s.capacity();
+        }
+    }
+    s.clear();
+    std::println("clear 뒤 size {} capacity {}", s.size(), s.capacity());
+    s.shrink_to_fit();
+    std::println("shrink_to_fit 뒤 capacity {}", s.capacity());
+}
+```
+
+```text
+sizeof 32 / 빈 문자열의 capacity 15
+size  16에서 capacity  15 ->  30
+size  31에서 capacity  30 ->  60
+size  61에서 capacity  60 -> 120
+clear 뒤 size 0 capacity 120
+shrink_to_fit 뒤 capacity 15
+```
+
+GCC 14, 64비트의 결과입니다. 읽을 것이 셋 있습니다.
+
+- 빈 문자열인데 용량이 15입니다. 15글자까지는 힙을 쓰지 않고 객체 안에 담기 때문입니다([「작은 문자열 최적화」](#/read/cpp-stl/impl-sso)).
+- 넘치면 용량을 두 배로 잡습니다. [상각 O(1)](#/read/cpp-stl/ov-complexity)이 되는 까닭입니다.
+- `clear()`는 길이만 0으로 만들고 메모리는 쥐고 있습니다. 루프 안에서 줄마다 문자열을 새로 만드는 대신, 루프 밖에 하나를 두고 `clear()`해서 다시 쓰면 할당이 한 번으로 끝납니다.
+
+길이를 미리 알면 `s.reserve(n)`으로 한 번에 잡습니다.
+
+## 고치기
+
+| 하는 일 | 멤버 |
+| --- | --- |
+| 끝에 붙이기 | `s += t`, `s.append(t)`, `s.push_back(c)` |
+| 중간에 넣기 | `s.insert(위치, t)` |
+| 지우기 | `s.erase(위치, 길이)`, `s.pop_back()`, `s.clear()` |
+| 바꿔 끼우기 | `s.replace(위치, 길이, t)` |
+| 길이 바꾸기 | `s.resize(n)`, `s.resize(n, '채울 글자')` |
+
+"모두 찾아 바꾸기"는 표준에 없어서 `find`와 `replace`로 짓습니다.
+
+```cpp
+#include <print>
+#include <string>
+#include <string_view>
+
+void replace_all(std::string& s, std::string_view from, std::string_view to)
+{
+    if (from.empty())
+        return;
+    std::size_t pos = 0;
+    while ((pos = s.find(from, pos)) != std::string::npos) {
+        s.replace(pos, from.size(), to);
+        pos += to.size();               // 바꿔 넣은 글 뒤부터 다시 찾는다
+    }
+}
+
+int main()
+{
+    std::string line = "temp=23.5;humid=41;press=1013";
+    replace_all(line, ";", ", ");
+    std::println("{}", line);
+
+    line.insert(0, "[sensor] ");
+    line.erase(line.find("humid"), 10);     // "humid=41, " 10글자
+    std::println("{}", line);
+}
+```
+
+```text
+temp=23.5, humid=41, press=1013
+[sensor] temp=23.5, press=1013
+```
+
+`pos += to.size()`를 빼먹으면, `to` 안에 `from`이 들어 있을 때(`"a"`를 `"aa"`로) 끝나지 않는 루프가 됩니다.
+
+## 찾기와 npos
+
+| 멤버 | 찾는 것 |
+| --- | --- |
+| `find(t)`, `rfind(t)` | `t` 전체가 처음, 마지막으로 나오는 곳 |
+| `find_first_of(t)`, `find_last_of(t)` | `t`의 글자 **가운데 아무거나** |
+| `find_first_not_of(t)`, `find_last_not_of(t)` | `t`에 **없는** 글자 |
+| `starts_with`, `ends_with`, `contains` | 있는지만 (`bool`) |
+
+찾지 못하면 `std::string::npos`를 돌려줍니다. 이 값은 `std::size_t`의 가장 큰 수입니다. `int pos = s.find(x);`로 받아 `pos >= 0`을 검사하거나 `if (s.find(x))`라고 쓰면 틀립니다. 반드시 `npos`와 견줍니다.
+
+앞뒤 공백 떼기가 `find_first_not_of`의 대표적인 쓰임입니다.
+
+```cpp
+#include <print>
+#include <string>
+#include <string_view>
+
+std::string_view trim(std::string_view s)
+{
+    constexpr std::string_view blank = " \t\r\n";
+    const auto first = s.find_first_not_of(blank);
+    if (first == std::string_view::npos)
+        return {};                      // 전부 공백
+    const auto last = s.find_last_not_of(blank);
+    return s.substr(first, last - first + 1);
+}
+
+int main()
+{
+    std::string line = "  \t GPIO17 = HIGH \r\n";
+    std::println("[{}]", trim(line));
+    std::println("[{}]", trim("   "));
+}
+```
+
+```text
+[GPIO17 = HIGH]
+[]
+```
+
+찾기 멤버는 [`std::string_view`](#/read/cpp-stl/str-view)에도 똑같이 있습니다. 그래서 `trim`은 복사 없이 뷰를 받고 뷰를 돌려줍니다.
+
+## `+`와 `+=`
+
+`a + b`는 새 문자열을 만들고, `a += b`는 `a`의 끝에 붙입니다. 루프 안에서 이 차이가 커집니다. 전역 `operator new`를 바꿔 할당 횟수를 세어 봅니다.
+
+```cpp
+#include <cstdlib>
+#include <new>
+#include <print>
+#include <string>
+
+static int allocations = 0;
+void* operator new(std::size_t n)
+{
+    ++allocations;
+    if (void* p = std::malloc(n))
+        return p;
+    throw std::bad_alloc{};
+}
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+
+int main()
+{
+    const std::string piece = "0123456789";
+
+    allocations = 0;
+    std::string a;
+    for (int i = 0; i < 1000; ++i)
+        a = a + piece;                  // 매번 새 문자열을 만들어 통째로 복사한다
+    std::println("a = a + piece : 할당 {}번", allocations);
+
+    allocations = 0;
+    std::string b;
+    for (int i = 0; i < 1000; ++i)
+        b += piece;                     // 제자리에 붙인다
+    std::println("b += piece    : 할당 {}번", allocations);
+
+    allocations = 0;
+    std::string c;
+    c.reserve(10'000);
+    for (int i = 0; i < 1000; ++i)
+        c += piece;
+    std::println("reserve 뒤 += : 할당 {}번", allocations);
+}
+```
+
+```text
+a = a + piece : 할당 999번
+b += piece    : 할당 10번
+reserve 뒤 += : 할당 1번
+```
+
+할당만 999번이 아닙니다. `a + piece`는 그때까지의 `a` 전체를 복사하므로 복사한 글자 수가 길이의 제곱으로 늡니다. 여러 조각을 한 줄에 잇는 `a + b + c`는 괜찮습니다. 문제는 <strong>루프 안의 `s = s + x`</strong>입니다.
+
+## C 함수와 오가기
+
+`c_str()`과 `data()`는 둘 다 `\0`으로 끝나는 포인터를 줍니다. 그런데 `std::string`은 길이를 따로 알고 있어서, 가운데에 `\0`이 있어도 됩니다. 길이를 모르는 쪽은 C입니다.
+
+```cpp
+#include <cstring>
+#include <ctime>
+#include <print>
+#include <string>
+
+int main()
+{
+    std::string from_literal = "ab\0cd";        // \0 에서 끊긴다
+    std::string with_length("ab\0cd", 5);       // 길이를 주면 전부 들어간다
+    std::println("{} {}", from_literal.size(), with_length.size());
+    std::println("{}", std::strlen(with_length.c_str()));    // C 는 \0 까지만
+
+    // C 함수가 내 버퍼를 채우고 "몇 글자 썼다"를 돌려주는 경우 (C++23)
+    std::tm day = {};
+    day.tm_year = 2026 - 1900;
+    day.tm_mon = 10;                                // 0 이 1월
+    day.tm_mday = 20;
+    std::string date;
+    date.resize_and_overwrite(32, [&](char* buffer, std::size_t n) {
+        return std::strftime(buffer, n, "%Y-%m-%d", &day);
+    });
+    std::println("{} ({}글자)", date, date.size());
+}
+```
+
+```text
+2 5
+2
+2026-11-20 (10글자)
+```
+
+`resize_and_overwrite(n, 함수)`는 n글자 자리를 잡아 함수에 넘기고, 함수가 돌려준 수를 새 길이로 삼습니다. 그 전에는 `std::string s(32, '\0');`로 먼저 0을 채우고, C 함수에 `s.data()`를 넘긴 뒤 `s.resize(쓴 길이)`로 줄였습니다. 지금도 되는 방법이고, 한 번 덜 채운다는 것이 차이입니다.
+
+## 글자 함수의 함정
+
+`<cctype>`의 `std::toupper`, `std::isdigit`, `std::isspace`는 `int`를 받고, 그 값이 `unsigned char`의 범위이거나 `EOF`여야 합니다. `char`가 음수이면 정의되지 않은 동작입니다.
+
+```cpp
+#include <algorithm>
+#include <cctype>
+#include <print>
+#include <string>
+
+int main()
+{
+    std::string id = "gpio-17";
+    // 람다가 char 가 아니라 unsigned char 로 받는다
+    std::ranges::transform(id, id.begin(), [](unsigned char c) {
+        return static_cast<char>(std::toupper(c));
+    });
+    std::println("{}", id);
+    // 비교는 바이트 값으로 한다
+    std::println("{}", std::string("Zebra") < std::string("apple"));
+}
+```
+
+```text
+GPIO-17
+true
+```
+
+<Note kind="warn">
+`char`에 부호가 있는지는 플랫폼이 정합니다. x86 PC에서는 부호가 있어서 한글의 바이트가 음수가 되고, 라즈베리파이 같은 ARM 리눅스에서는 부호가 없습니다. PC에서 `std::isspace(c)`에 `char`를 그대로 넘긴 코드는 한글을 만나면 정의되지 않은 동작이고, 같은 코드가 라즈베리파이에서는 멀쩡합니다. 람다의 인자를 `unsigned char`로 받으면 두 곳에서 같아집니다.
+</Note>
+
+비교(`==`, `<`)는 바이트 값을 차례로 견줍니다. 대문자가 소문자보다 앞이라 `"Zebra" < "apple"`이 참이고, 한글의 가나다순이나 대소문자 무시는 따로 처리해야 합니다. 글자 단위의 일은 [「유니코드와 인코딩」](#/read/cpp-stl/str-unicode)에서 봅니다.
+
+## 정리
+
+- `std::string`은 포인터, 길이, 용량이다. 길이를 알면 `reserve`, 다시 쓸 때는 `clear`로 할당을 줄인다
+- 찾지 못한 결과는 `npos`와 견준다. 루프 안에서는 `s = s + x`가 아니라 `s += x`
+- 글자 함수에는 `unsigned char`로 바꿔 넘긴다. `char`의 부호는 PC와 ARM에서 다르다

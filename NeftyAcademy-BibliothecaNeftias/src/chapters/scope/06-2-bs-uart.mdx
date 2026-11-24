@@ -1,0 +1,133 @@
+import { Figure, Note } from 'paragoniahex';
+import { Scope } from '../../components/Scope';
+import { uartA, uartRs, uartTtl } from './data/bs-uart';
+
+export const summary = '글자 하나의 프레임 읽기, 가장 좁은 펄스로 속도 재기, 이어지는 글자에 트리거 걸기, RS-232의 전압';
+export const terms = [];
+
+UART는 클럭 선 없이 시간 약속만으로 글자를 나릅니다. 그래서 오실로스코프로 볼 때에도 시간을 재는 일이 거의 전부입니다. 비트 하나의 길이를 알면 속도를 알고, 속도를 알면 화면의 높낮이를 글자로 옮겨 적을 수 있습니다. 받는 쪽이 비트의 한가운데에서 선을 읽는다는 것은 [「비트뱅잉」](#/read/libgpiod/tm-bitbang)에서 봤습니다.
+
+## 글자 하나의 모양
+
+<Figure caption="9600bps로 보낸 'A'(0x41) 한 글자. T는 시작 비트가 내려가는 곳이고, 세로 커서는 첫 데이터 비트의 양쪽 변에 놓았다">
+  <Scope tdiv={2e-4} dt={2e-6} traces={[{ name: 'CH1 TX', data: uartA, vdiv: 1, pos: -2 }]} trigger={{ level: 1.65 }} triggerAt={3e-4} cursorsT={[4.0417e-4, 5.0833e-4]} />
+</Figure>
+
+- **쉴 때는 HIGH다**: 보낼 것이 없는 동안 선은 3.3V에 머뭅니다
+- **시작 비트**: 선이 LOW로 내려가 비트 하나만큼 머뭅니다. 받는 쪽은 이 내려가는 변에서 시간을 세기 시작합니다
+- **데이터는 낮은 비트부터 온다**: 시작 비트 뒤로 1, 0, 0, 0, 0, 0, 1, 0이 지나갑니다. 화면의 왼쪽이 가장 낮은 자리이므로 거꾸로 적어 01000001, 곧 0x41입니다
+- **정지 비트**: 마지막에 HIGH로 돌아와 비트 하나만큼 머뭅니다. 뒤따르는 쉬는 구간과 붙어 있어서 화면에는 경계가 없습니다
+- **같은 값이 이어지면 변이 없다**: 0이 다섯 번 이어지는 곳은 긴 LOW 하나로 보입니다. 비트의 경계는 화면에 그려져 있지 않으므로, 비트 하나의 길이로 나눠서 찾습니다
+
+## 속도를 잰다
+
+```python
+for baud in (9600, 19200, 57600, 115200):
+    bit, char = 1e6 / baud, 1e4 / baud   # 비트 하나(µs), 열 비트인 글자 하나(ms)
+    print(f"{baud:>6}bps: 비트 하나 {bit:6.2f}µs, 글자 하나 {char:5.3f}ms")
+
+for off in (2, 4, 6):                    # 두 쪽의 속도가 off % 다를 때
+    slip = 9.5 * off / 100               # 정지 비트의 가운데에서 어긋난 정도(비트)
+    print(f"속도가 {off}% 다르면 마지막에 {slip:.2f}비트 어긋난다 →",
+          "읽힌다" if slip < 0.5 else "틀린다")
+```
+
+```text
+  9600bps: 비트 하나 104.17µs, 글자 하나 1.042ms
+ 19200bps: 비트 하나  52.08µs, 글자 하나 0.521ms
+ 57600bps: 비트 하나  17.36µs, 글자 하나 0.174ms
+115200bps: 비트 하나   8.68µs, 글자 하나 0.087ms
+속도가 2% 다르면 마지막에 0.19비트 어긋난다 → 읽힌다
+속도가 4% 다르면 마지막에 0.38비트 어긋난다 → 읽힌다
+속도가 6% 다르면 마지막에 0.57비트 어긋난다 → 틀린다
+```
+
+- **가장 좁은 펄스를 찾는다**: 화면에서 가장 좁은 HIGH나 LOW가 비트 하나입니다. 그 양쪽 변에 세로 커서를 놓으면 Δt가 비트의 길이이고, 1/Δt가 곧 속도입니다. 그림의 104µs는 9.6kHz, 곧 9600bps입니다
+- **가로는 비트 하나가 반 칸에서 한 칸**: 9600bps면 100µs/칸이나 200µs/칸, 115200bps면 10µs/칸이 알맞습니다. 글자 하나가 열 비트이므로 화면에 한두 글자가 담깁니다
+- **좁은 펄스가 없는 글자도 있다**: 0x00은 시작 비트와 데이터가 이어져 비트 아홉 개짜리 LOW 하나로 보입니다. 여러 글자를 잡아 그 가운데 가장 좁은 것을 고릅니다
+- **어긋남은 쌓인다**: 받는 쪽은 시작 비트에서 한 번 맞추고 정지 비트까지 제 시계로 갑니다. 셈으로는 두 쪽의 차이 5.3%가 한도이고, 변의 기울기와 잡음을 넣으면 더 좁습니다([「보레이트와 오차」](#/read/termios/ua-baud))
+
+## 프로그램으로 읽어 보기
+
+```python
+def frame(byte):                         # 시작 비트, 낮은 비트부터 8개, 정지 비트
+    return [0] + [(byte >> i) & 1 for i in range(8)] + [1]
+
+def line(text, baud):                    # 시각 t(초)의 선의 값을 돌려주는 함수
+    bits = [1, 1]
+    for ch in text.encode():
+        bits += frame(ch)
+    return lambda t: bits[int(t * baud)] if t * baud < len(bits) else 1
+
+def receive(read, baud, until, step=1e-6):
+    out, t = [], 0.0
+    while t < until:
+        if read(t) == 1:                 # 시작 비트가 내려갈 때까지 기다린다
+            t += step
+            continue
+        byte = 0
+        for i in range(8):               # 비트마다 한가운데에서 읽는다
+            byte |= read(t + (1.5 + i) / baud) << i
+        out.append(byte)
+        t += 9.5 / baud                  # 정지 비트의 가운데로 건너뛴다
+    return bytes(out)
+
+print("'A'의 프레임:", frame(0x41))
+wire = line("Hi\n", 9600)
+for baud in (9600, 9300, 10200, 19200, 4800):
+    print(f"{baud:>6}bps로 읽으면 {receive(wire, baud, 4e-3)!r}")
+```
+
+```text
+'A'의 프레임: [0, 1, 0, 0, 0, 0, 0, 1, 0, 1]
+  9600bps로 읽으면 b'Hi\n'
+  9300bps로 읽으면 b'Hi\n'
+ 10200bps로 읽으면 b'H\xd2)\xfe'
+ 19200bps로 읽으면 b'\x80\x98\x86\x9e\x98\x80'
+  4800bps로 읽으면 b'\x9c\xf8'
+```
+
+- **화면을 읽는 순서와 같다**: `receive`는 내려가는 변을 찾고, 비트 하나 반 뒤부터 한 비트 간격으로 여덟 번 읽습니다. 눈으로 화면을 읽을 때에도 이 순서로 읽습니다
+- **조금 다르면 버틴다**: 9300bps는 3% 느린데도 세 글자를 모두 읽습니다
+- **한도를 넘으면 뒤가 깨진다**: 6% 빠른 10200bps에서는 첫 글자만 맞습니다. 그다음부터는 데이터 비트를 시작 비트로 잘못 잡아 글자 수까지 달라집니다
+- **두 배나 반이면 전혀 다른 글자다**: 터미널에 알 수 없는 글자가 쏟아지면 배선보다 속도 설정을 먼저 의심합니다. 화면에서 잰 비트의 길이가 답을 줍니다
+
+## 글자가 이어질 때
+
+<Figure caption="'Hi'와 줄 바꿈, 세 글자가 이어진 모습. CH1은 3.3V 핀에서 본 것이고, CH2는 같은 글자들을 RS-232 선에서 본 것이다(±6V로 그림)">
+  <Scope tdiv={5e-4} dt={2.5e-6} traces={[{ name: 'CH1 3.3V UART', data: uartTtl, vdiv: 2, pos: 1.2 }, { name: 'CH2 RS-232', data: uartRs, vdiv: 5, pos: -2 }]} trigger={{ level: 1.65 }} triggerAt={5e-4} />
+</Figure>
+
+- **내려가는 에지는 글자 안에도 있다**: 에지 트리거만 걸면 글자의 한가운데에서도 걸려, 서로 다른 곳에서 시작한 화면이 겹칩니다
+- **쉬는 구간 뒤의 첫 에지에 건다**: 홀드오프를 글자 묶음보다 길게 주거나, HIGH가 글자 하나보다 길게 이어진 것을 조건으로 겁니다([「홀드오프와 흐르는 화면 멈추기」](#/read/scope/tr-holdoff)). 한 번 오고 마는 메시지는 단발로 잡습니다([「자동, 일반, 단발」](#/read/scope/tr-modes))
+- **길게 잡아 놓고 늘려 읽는다**: 메시지 전체가 담기게 잡은 뒤, 멈춘 화면에서 한 글자씩 늘려 읽습니다([「기록 길이와 확대」](#/read/scope/lm-memory))
+- **값으로 풀어 주는 기능**: UART, I2C, SPI의 파형을 풀어 그 아래에 값으로 적어 주는 장비가 있습니다. 따로 사는 선택 사양인 경우도 있습니다. 긴 메시지를 읽는 일은 로직 분석기가 더 잘합니다([「로직 분석기를 쓸 때」](#/read/scope/bs-logic))
+
+## 전압이 다른 시리얼
+
+| | 3.3V나 5V의 UART | RS-232 |
+| --- | --- | --- |
+| 쉴 때, 정지 비트, 1 | 전원 전압 | 음의 전압 |
+| 시작 비트, 0 | 0V | 양의 전압 |
+| 전압의 범위 | 0V에서 전원 전압까지 | ±3V에서 ±25V까지 |
+
+- **위아래가 뒤집혀 있다**: 그림의 CH2는 CH1과 같은 글자인데, 쉴 때 음의 전압에 있다가 시작 비트에서 양의 전압으로 올라갑니다
+- **쉬는 선이 0V 아래면 RS-232다**: 그런 선은 라즈베리파이의 핀에 곧바로 이으면 안 됩니다. 전압을 바꿔 주는 칩을 거쳐야 합니다([「TTL, RS-232, RS-485」](#/read/termios/ua-levels))
+- **모르는 선은 넓게 놓고 본다**: 무슨 선인지 모를 때에는 V/칸을 크게 놓고 DC 결합으로 0V의 자리부터 확인합니다([「DC 결합, AC 결합, 접지 기준선」](#/read/scope/sc-coupling))
+
+<Note>
+두 그림은 변이 곧은 이상적인 파형을 계산으로 그린 것이고, 장비를 찍은 화면이 아닙니다. 진짜 선의 변은 조금 누워 있고 그 위에 잡음이 얹힙니다. RS-232의 ±6V는 예로 고른 값입니다. 규격이 허용하는 범위와 흔히 보는 전압은 참고 문서의 SparkFun 글에 있습니다. 속도 차이의 한도 5.3%는 이 쪽의 단순한 셈에서 나온 값이고, 받는 칩이 실제로 견디는 차이는 그 칩의 데이터시트를 봐야 합니다.
+</Note>
+
+## 정리
+
+- UART 선은 쉴 때 HIGH이고, LOW인 시작 비트 뒤에 데이터가 낮은 비트부터 오며 HIGH인 정지 비트로 끝난다
+- 가장 좁은 펄스가 비트 하나이고 그 길이의 역수가 속도다. 두 쪽의 속도가 5%쯤 다르면 글자가 깨진다
+- 글자가 이어지면 쉬는 구간 뒤의 첫 에지에 트리거를 건다. 쉬는 선이 음의 전압이면 RS-232다
+
+## 참고 문서
+
+- [All About Circuits: Back to Basics, The Universal Asynchronous Receiver/Transmitter(시작 비트와 정지 비트, 비트의 한가운데에서 읽기)](https://www.allaboutcircuits.com/technical-articles/back-to-basics-the-universal-asynchronous-receiver-transmitter-uart/)
+- [Ezurio: An Overview of UART Protocols(쉬는 선은 HIGH, 낮은 비트부터 보낸다는 것)](https://www.ezurio.com/resources/blog/an-overview-of-uart-protocols)
+- [SparkFun: Serial Communication, Wiring and Hardware(TTL 시리얼과 RS-232의 전압, 뒤집힌 높낮이)](https://learn.sparkfun.com/tutorials/serial-communication/wiring-and-hardware)
+- [Keysight: DSOX1EMBD Embedded Serial Triggering and Analysis(I2C, SPI, UART를 풀어 주는 선택 사양)](https://www.keysight.com/es/en/product/DSOX1EMBD/embedded-serial-triggering-analysis-infiniivision-dsox1000.html)

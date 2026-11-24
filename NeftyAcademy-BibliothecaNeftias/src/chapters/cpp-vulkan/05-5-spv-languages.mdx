@@ -1,0 +1,144 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'HLSL과 Slang에서 오기: DXC와 glslang의 HLSL 앞단, 레지스터와 바인딩, Slang, DirectX의 SPIR-V';
+export const terms = [
+  'shaderc_compile_options_set_source_language', 'shaderc_source_language_hlsl',
+];
+
+벌칸 드라이버는 SPIR-V만 보므로, 그 형식으로 번역해 주는 앞단만 있으면 어떤 언어로든 셰이더를 쓸 수 있습니다. 많은 엔진이 Direct3D와 함께 쓰려고 **HLSL**로 셰이더를 쓰고, 최근에는 **Slang**이 늘고 있습니다. 아래 프로그램은 같은 계산을 HLSL과 GLSL로 써서 각각 SPIR-V로 번역하고, 두 파이프라인을 돌려 결과를 견줍니다. HLSL은 shaderc 안의 glslang HLSL 앞단으로 번역했습니다.
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp,vkx_cmd.hpp,vkx_resource.hpp,vkx_bind.hpp,vkx_compute.hpp,vkx_pipeline.hpp
+#include <cstring>
+#include "vkx_bind.hpp"
+#include "vkx_cmd.hpp"
+#include "vkx_compute.hpp"
+#include "vkx_pipeline.hpp"
+
+// 같은 계산(v = v * v + 1)을 HLSL과 GLSL로
+const char* HLSL = R"(
+[[vk::binding(0, 0)]] RWStructuredBuffer<float> data;
+[numthreads(64, 1, 1)]
+void main(uint3 id : SV_DispatchThreadID) {
+    data[id.x] = data[id.x] * data[id.x] + 1.0;
+})";
+
+const char* GLSL = R"(#version 450
+layout(local_size_x = 64) in;
+layout(binding = 0) buffer Data { float v[]; };
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    v[i] = v[i] * v[i] + 1.0;
+})";
+
+// shaderc가 품은 glslang의 HLSL 앞단으로 번역한다
+std::vector<uint32_t> compile_hlsl(const char* src) {
+    shaderc_compiler_t compiler = shaderc_compiler_initialize();
+    shaderc_compile_options_t o = shaderc_compile_options_initialize();
+    shaderc_compile_options_set_source_language(o, shaderc_source_language_hlsl);
+    shaderc_compile_options_set_target_env(o, shaderc_target_env_vulkan,
+                                           shaderc_env_version_vulkan_1_3);
+    auto kind = shaderc_compute_shader;
+    auto r = shaderc_compile_into_spv(compiler, src, std::strlen(src), kind,
+                                      "square.hlsl", "main", o);
+    auto* w = reinterpret_cast<const uint32_t*>(shaderc_result_get_bytes(r));
+    std::vector<uint32_t> spirv(w, w + shaderc_result_get_length(r) / 4);
+    shaderc_result_release(r);
+    shaderc_compile_options_release(o);
+    shaderc_compiler_release(compiler);
+    return spirv;
+}
+
+// OpSource(명령 번호 3)에 적힌 원문 언어와 버전
+void source_of(const char* label, const std::vector<uint32_t>& m) {
+    for (size_t at = 5; at < m.size(); at += m[at] >> 16)
+        if ((m[at] & 0xFFFF) == 3)
+            std::printf("%s 모듈: OpSource %s %u\n", label,
+                        m[at + 1] == 5 ? "HLSL" : m[at + 1] == 2 ? "GLSL" : "?",
+                        m[at + 2]);
+}
+
+int main() {
+    vkx::Instance inst = vkx::make_instance();
+    vkx::Device dev = vkx::make_device(inst.handle);
+    vkx::Commands cmds = vkx::make_commands(dev);
+    std::vector<uint32_t> from_hlsl = compile_hlsl(HLSL);
+    std::vector<uint32_t> from_glsl = vkx::compile(GLSL, shaderc_compute_shader);
+    source_of("HLSL", from_hlsl);
+    source_of("GLSL", from_glsl);
+
+    const auto SSBO = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    vkx::Buffer buf[2];
+    vkx::Bindings binds[2];
+    VkPipelineLayout layout[2];
+    VkPipeline pipeline[2];
+    VkShaderModule module[2];
+    VkCommandBuffer cmd = vkx::begin(cmds);
+    for (int k = 0; k < 2; ++k) {   // 0은 HLSL, 1은 GLSL에서 온 SPIR-V
+        buf[k] = vkx::make_buffer(dev, 64 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                  true);
+        auto* v = static_cast<float*>(buf[k].mapped);
+        for (int i = 0; i < 64; ++i) v[i] = i * 0.5f;
+        binds[k] = vkx::make_bindings(dev, {SSBO});
+        vkx::bind_buffer(dev, binds[k], 0, SSBO, buf[k]);
+        layout[k] = vkx::make_layout(dev, {binds[k].layout});
+        module[k] = vkx::make_shader(dev, k == 0 ? from_hlsl : from_glsl);
+        pipeline[k] = vkx::make_compute(dev, module[k], layout[k]);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline[k]);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout[k], 0,
+                                1, &binds[k].set, 0, nullptr);
+        vkCmdDispatch(cmd, 1, 1, 1);
+    }
+    VkMemoryBarrier2 host{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+                          .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                          .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                          .dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT,
+                          .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT};
+    VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                         .memoryBarrierCount = 1, .pMemoryBarriers = &host};
+    vkCmdPipelineBarrier2(cmd, &dep);
+    vkx::submit_and_wait(dev, cmds);
+
+    auto* a = static_cast<const float*>(buf[0].mapped);
+    auto* b = static_cast<const float*>(buf[1].mapped);
+    std::printf("HLSL 결과 앞부분: %g %g %g %g\n", a[0], a[1], a[2], a[3]);
+    std::printf("GLSL 결과 앞부분: %g %g %g %g\n", b[0], b[1], b[2], b[3]);
+    bool same = std::memcmp(a, b, 64 * 4) == 0;
+    std::printf("64개가 모두 같음: %s\n", same ? "예" : "아니오");
+    for (int k = 0; k < 2; ++k) {
+        vkDestroyPipeline(dev.handle, pipeline[k], nullptr);
+        vkDestroyPipelineLayout(dev.handle, layout[k], nullptr);
+        vkDestroyShaderModule(dev.handle, module[k], nullptr);
+        vkx::destroy(dev, binds[k]);
+        vkx::destroy(dev, buf[k]);
+    }
+    vkx::destroy(dev, cmds);
+    vkx::destroy(dev);
+    vkx::destroy(inst);
+}
+```
+
+```text
+HLSL 모듈: OpSource HLSL 500
+GLSL 모듈: OpSource GLSL 450
+HLSL 결과 앞부분: 1 1.25 2 3.25
+GLSL 결과 앞부분: 1 1.25 2 3.25
+64개가 모두 같음: 예
+```
+
+- **같은 SPIR-V 세계**: 모듈에는 원문 언어(`OpSource HLSL 500`)가 기록될 뿐, 드라이버가 보는 명령은 같은 SPIR-V라서 결과도 64개 모두 같습니다
+- **대응 관계**: `[numthreads(64, 1, 1)]`은 `local_size_x = 64`, `SV_DispatchThreadID`는 `gl_GlobalInvocationID`, `RWStructuredBuffer`는 `buffer` 블록입니다. HLSL의 `register(u0, space1)` 같은 레지스터 번호는 번역기 옵션으로 세트·바인딩에 대응시키거나, 이 예처럼 `[[vk::binding(바인딩, 세트)]]`로 밝힙니다. 푸시 상수는 `[[vk::push_constant]]`로 표시합니다
+- **어느 번역기로**: HLSL의 기준 컴파일러는 마이크로소프트의 DXC이고, `dxc -spirv`로 SPIR-V를 냅니다(이 SPIR-V 뒷단은 2017년부터 Google과 함께 만들었습니다). glslang의 HLSL 앞단은 2026년 4월부터 지원 중단 상태이고 다음 주 버전에서 빠질 예정이므로, 실제 프로젝트에서는 DXC나 Slang을 씁니다
+
+## Slang
+
+Slang은 NVIDIA가 2017년부터 키워 온 셰이더 언어와 컴파일러로, 2024년 11월 Khronos의 Slang Initiative로 옮겨 여러 회사가 함께 관리합니다. 문법은 HLSL과 비슷하지만 모듈, 제네릭과 인터페이스, 자동 미분 같은 기능을 더했고, 한 원문에서 SPIR-V(벌칸), HLSL(Direct3D), GLSL, Metal Shading Language, WGSL(WebGPU), CUDA를 만듭니다. 벌칸 SDK에도 들어 있어서([「glslang과 shaderc」](#/read/cpp-vulkan/spv-compile)), 여러 API를 겨냥하는 엔진의 새 선택지가 되었습니다.
+
+<Note>
+마이크로소프트는 2024년 9월, 셰이더 모델 7부터 DirectX 12도 SPIR-V로 번역한 셰이더를 받겠다고 발표했습니다. 지금까지 DirectX의 중간 형식은 LLVM에 바탕을 둔 DXIL이었습니다. 다만 HLSL과 GLSL은 행렬을 다루는 관례(곱하는 방향, 메모리 배치의 기본값)가 달라서, 옮겨 온 셰이더에 행렬을 넘길 때는 알려진 값으로 결과를 꼭 확인합니다.
+</Note>
+
+## 정리
+
+- 드라이버는 SPIR-V만 보므로 HLSL, Slang 같은 언어도 앞단만 있으면 벌칸에서 돌고, 결과는 같은 SPIR-V의 실행이다
+- HLSL은 DXC(`-spirv`)로 번역하고, 레지스터는 옵션이나 `[[vk::binding]]`으로 세트·바인딩에 맞추며, glslang의 HLSL 앞단은 지원이 끝나 간다
+- Slang은 Khronos가 관리하는 HLSL풍 언어로 여러 API의 코드를 한 원문에서 만들고, DirectX도 셰이더 모델 7부터 SPIR-V를 받는다

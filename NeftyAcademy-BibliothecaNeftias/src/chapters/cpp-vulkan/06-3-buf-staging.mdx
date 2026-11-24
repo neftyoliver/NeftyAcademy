@@ -1,0 +1,150 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '스테이징: CPU가 쓰는 버퍼에서 GPU 버퍼로 복사, 버퍼 다시 쓰기, vkCmdUpdateBuffer, 되읽기, 전송 큐';
+export const terms = [
+  'VkBufferCopy', 'vkCmdCopyBuffer', 'vkCmdUpdateBuffer', 'vkCopyMemoryToImage',
+];
+
+GPU가 가장 빨리 읽는 DEVICE_LOCAL 메모리는 따로 꽂는 GPU에서 대개 CPU에 보이지 않습니다([「메모리 할당과 VMA」](#/read/cpp-vulkan/buf-alloc)). 그래서 CPU가 쓸 수 있는 **스테이징 버퍼**에 데이터를 적고, GPU에게 복사를 시켜 진짜 버퍼로 옮깁니다. 아래 프로그램은 4KiB짜리 GPU 버퍼를 1KiB 스테이징 버퍼 하나로 네 번에 나눠 채우고, 컴퓨트 셰이더로 값을 바꾼 뒤, 같은 길을 거꾸로 밟아 CPU로 읽어 옵니다. lavapipe에서는 모든 메모리가 CPU에 보이지만, 코드는 `vkx::make_buffer`에 `false`를 주어 받은 버퍼를 매핑하지 않고 따로 꽂는 GPU에서와 같은 길을 갑니다.
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp,vkx_cmd.hpp,vkx_resource.hpp,vkx_bind.hpp,vkx_compute.hpp,vkx_pipeline.hpp
+#include "vkx_bind.hpp"
+#include "vkx_cmd.hpp"
+#include "vkx_compute.hpp"
+#include "vkx_pipeline.hpp"
+
+const char* CS = R"(#version 450
+layout(local_size_x = 64) in;
+layout(binding = 0) buffer Data { float v[]; };                 // DEVICE_LOCAL
+layout(binding = 1) uniform Params { float scale; float bias; };
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    v[i] = v[i] * scale + bias;
+})";
+
+// 앞선 일(src)이 쓴 것을 뒤따르는 일(dst)이 보게 하는 전역 메모리 배리어
+void barrier(VkCommandBuffer cmd, VkPipelineStageFlags2 src,
+             VkAccessFlags2 src_access, VkPipelineStageFlags2 dst,
+             VkAccessFlags2 dst_access) {
+    VkMemoryBarrier2 b{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+                       .srcStageMask = src, .srcAccessMask = src_access,
+                       .dstStageMask = dst, .dstAccessMask = dst_access};
+    VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                         .memoryBarrierCount = 1, .pMemoryBarriers = &b};
+    vkCmdPipelineBarrier2(cmd, &dep);
+}
+
+int main() {
+    vkx::Instance inst = vkx::make_instance();
+    vkx::Device dev = vkx::make_device(inst.handle);
+    vkx::Commands cmds = vkx::make_commands(dev);
+    const uint32_t N = 1024, CHUNK = 256;      // 데이터 4KiB, 스테이징 1KiB
+    const auto SRC = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    const auto DST = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    // false면 DEVICE_LOCAL, true면 HOST_VISIBLE이고 매핑된 버퍼
+    vkx::Buffer gpu = vkx::make_buffer(
+        dev, N * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | SRC | DST, false);
+    vkx::Buffer params =
+        vkx::make_buffer(dev, 8, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | DST, false);
+    vkx::Buffer staging = vkx::make_buffer(dev, CHUNK * 4, SRC, true);
+    vkx::Buffer readback = vkx::make_buffer(dev, N * 4, DST, true);
+
+    // 1) 스테이징이 작으니 네 번에 나눠 올린다. 다시 채우기 전에 복사가 끝나야 한다
+    for (uint32_t k = 0; k < N / CHUNK; ++k) {
+        auto* p = static_cast<float*>(staging.mapped);
+        for (uint32_t i = 0; i < CHUNK; ++i) p[i] = float(k * CHUNK + i);
+        VkCommandBuffer cmd = vkx::begin(cmds);
+        VkBufferCopy region{.srcOffset = 0, .dstOffset = k * CHUNK * 4,
+                            .size = CHUNK * 4};
+        vkCmdCopyBuffer(cmd, staging.handle, gpu.handle, 1, &region);
+        vkx::submit_and_wait(dev, cmds);           // 펜스를 기다린 뒤에야 재사용
+        std::printf("조각 %u: 스테이징 %u바이트 → GPU 버퍼 %u바이트 자리\n", k,
+                    CHUNK * 4, k * CHUNK * 4);
+    }
+
+    const auto SSBO = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    const auto UBO = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    vkx::Bindings binds = vkx::make_bindings(dev, {SSBO, UBO});
+    vkx::bind_buffer(dev, binds, 0, SSBO, gpu);
+    vkx::bind_buffer(dev, binds, 1, UBO, params);
+    VkPipelineLayout layout = vkx::make_layout(dev, {binds.layout});
+    auto cs = vkx::make_shader(dev, vkx::compile(CS, shaderc_compute_shader));
+    VkPipeline pipeline = vkx::make_compute(dev, cs, layout);
+
+    VkCommandBuffer cmd = vkx::begin(cmds);
+    // 2) 작은 값은 커맨드 버퍼에 실어 보낸다(최대 65536바이트, 4의 배수)
+    const float pv[2] = {2.0f, 1.0f};                 // scale, bias
+    vkCmdUpdateBuffer(cmd, params.handle, 0, sizeof pv, pv);
+    // 3) 앞선 복사와 갱신이 끝난 뒤에 셰이더가 읽고 쓰게 한다
+    const auto SHADER_RW = VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                           VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    barrier(cmd, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+            VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            SHADER_RW | VK_ACCESS_2_UNIFORM_READ_BIT);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1,
+                            &binds.set, 0, nullptr);
+    vkCmdDispatch(cmd, N / 64, 1, 1);
+    // 4) 결과를 CPU가 읽는 버퍼로 되돌린다. 거꾸로 가는 스테이징이다
+    barrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
+            VK_ACCESS_2_TRANSFER_READ_BIT);
+    VkBufferCopy all{.srcOffset = 0, .dstOffset = 0, .size = N * 4};
+    vkCmdCopyBuffer(cmd, gpu.handle, readback.handle, 1, &all);
+    barrier(cmd, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
+    vkx::submit_and_wait(dev, cmds);
+
+    auto* r = static_cast<const float*>(readback.mapped);
+    bool ok = true;
+    for (uint32_t i = 0; i < N; ++i) ok = ok && r[i] == float(i * 2 + 1);
+    std::printf("읽어 온 값: %g %g %g %g … %g\n", r[0], r[1], r[2], r[3], r[N - 1]);
+    std::printf("%u개 모두 i × 2 + 1과 같음: %s\n", N, ok ? "예" : "아니오");
+
+    vkDestroyPipeline(dev.handle, pipeline, nullptr);
+    vkDestroyPipelineLayout(dev.handle, layout, nullptr);
+    vkDestroyShaderModule(dev.handle, cs, nullptr);
+    vkx::destroy(dev, binds);
+    for (vkx::Buffer* b : {&gpu, &params, &staging, &readback})
+        vkx::destroy(dev, *b);
+    vkx::destroy(dev, cmds);
+    vkx::destroy(dev);
+    vkx::destroy(inst);
+}
+```
+
+```text
+조각 0: 스테이징 1024바이트 → GPU 버퍼 0바이트 자리
+조각 1: 스테이징 1024바이트 → GPU 버퍼 1024바이트 자리
+조각 2: 스테이징 1024바이트 → GPU 버퍼 2048바이트 자리
+조각 3: 스테이징 1024바이트 → GPU 버퍼 3072바이트 자리
+읽어 온 값: 1 3 5 7 … 2047
+1024개 모두 i × 2 + 1과 같음: 예
+```
+
+- **올리기**: 복사의 원본은 `TRANSFER_SRC`, 대상은 `TRANSFER_DST` 쓰임새가 있어야 하고, `vkCmdCopyBuffer`는 영역(원본 오프셋, 대상 오프셋, 크기)을 여러 개 받습니다. 복사는 기록할 때가 아니라 GPU가 실행할 때 일어나므로([「커맨드 버퍼」](#/read/cpp-vulkan/tri-commands)), 복사가 끝나기 전에 스테이징 버퍼를 다시 채우면 새 값이 섞여 올라갈 수 있습니다. 그래서 조각마다 펜스를 기다렸습니다
+- **작은 값**: `vkCmdUpdateBuffer`는 데이터를 커맨드 버퍼에 실어 보내므로 스테이징 버퍼가 필요 없습니다. 한 번에 65536바이트까지, 크기와 오프셋은 4의 배수여야 하고, 렌더 패스 밖에서만 부를 수 있습니다
+- **배리어**: 복사가 쓴 것을 셰이더가 읽으려면 그 사이에 배리어가 있어야 합니다. 3)의 배리어를 빼고 돌리면 lavapipe에서는 결과가 같지만, 검증 레이어의 동기화 검사가 `SYNC-HAZARD-READ-AFTER-WRITE`로 알립니다([「파이프라인 배리어」](#/read/cpp-vulkan/vsync-barriers))
+- **되읽기**: GPU 결과를 CPU로 가져올 때는 방향만 바뀝니다. GPU 버퍼에서 CPU가 읽을 수 있는 버퍼로 복사하고, 펜스를 기다린 뒤 읽습니다. 기다리는 동안 CPU가 멈춰 GPU에 다음 일을 대 주지 못하므로, 매 프레임 하는 되읽기는 몇 프레임 뒤에 받도록 짭니다
+
+## 스테이징 버퍼 다시 쓰기
+
+조각마다 펜스를 기다리는 방식은 간단하지만 올리는 동안 프로그램이 멈춥니다. 실제 프로그램은 큰 스테이징 버퍼를 하나 두고 앞에서부터 잘라 쓰다가(링 버퍼), 그 영역을 쓴 프레임의 펜스가 신호를 받으면 돌려받습니다([「여러 프레임을 겹쳐 진행하기」](#/read/cpp-vulkan/vsync-frames)). 텍스처도 같은 길로 올리되, 복사 명령이 `vkCmdCopyBufferToImage`이고 앞뒤에 레이아웃 전환이 붙습니다([「레이아웃 전환」](#/read/cpp-vulkan/tex-layout)).
+
+| 방법 | 크기 | 특징 |
+| --- | --- | --- |
+| `vkCmdUpdateBuffer` | 65536바이트까지 | 데이터가 커맨드 버퍼에 실림 |
+| 스테이징 + `vkCmdCopyBuffer` | 제한 없음 | 복사가 끝날 때까지 스테이징을 지켜야 함 |
+| 매핑해서 직접 쓰기 | 제한 없음 | CPU에 보이는 메모리여야 함 |
+
+전송만 하는 큐 패밀리가 있는 장치에서는 복사를 그 큐에 맡겨, 그리는 동안 다음 장면의 데이터를 올릴 수 있습니다. 이때 기본 공유 방식(EXCLUSIVE)의 버퍼는 소유권을 전송 패밀리에서 그래픽 패밀리로 넘겨야 합니다([「큐 패밀리」](#/read/cpp-vulkan/setup-queues)).
+
+<Note>
+1.4에서 코어가 된 호스트 이미지 복사(`vkCopyMemoryToImage`, 확장으로는 `VK_EXT_host_image_copy`)는 스테이징 버퍼와 커맨드 버퍼 없이 CPU 메모리에서 이미지로 바로 복사합니다. 다만 1.4에서도 지원은 선택이므로 `hostImageCopy` 기능을 확인하고, 없으면 스테이징으로 돌아가야 합니다.
+</Note>
+
+## 정리
+
+- DEVICE_LOCAL 버퍼는 CPU가 쓰는 스테이징 버퍼에 적은 뒤 `vkCmdCopyBuffer`로 옮기고, 복사가 끝나기 전에는 스테이징을 다시 쓰지 않는다
+- 65536바이트 이하의 작은 갱신은 `vkCmdUpdateBuffer`로 커맨드 버퍼에 실어 보내고, 복사와 셰이더 사이에는 배리어를 둔다
+- 되읽기는 거꾸로 가는 스테이징이며, 큰 프로그램은 링 버퍼와 전송 큐로 올리기를 그리기와 겹친다

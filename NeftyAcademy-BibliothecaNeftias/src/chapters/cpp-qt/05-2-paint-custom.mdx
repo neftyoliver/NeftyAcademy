@@ -1,0 +1,111 @@
+import { Figure, Note } from 'paragoniahex';
+
+export const summary = '위젯 직접 그리기: paintEvent와 update, sizeHint, 마우스로 상태 바꾸기, 다시 그리기 요청 합치기';
+export const terms = ['QPaintEvent', 'QPoint', 'QRect', 'QMouseEvent'];
+
+기본 위젯으로 안 되는 화면, 예를 들어 별점, 파형, 게이지, 타임라인은 위젯을 직접 그립니다. `QWidget`을 상속하고 `paintEvent`에서 [「QPainter」](#/read/cpp-qt/paint-painter)로 그리면 됩니다. 남은 일은 마우스와 키보드로 상태를 바꾸고, 바뀌면 다시 그려 달라고 요청하는 것입니다.
+
+<Figure caption="별점 위젯이 그린 모습(넷째 칸을 누른 뒤)">
+  <svg viewBox="0 0 120 24" width={240} role="img" aria-label="다섯 개의 원 중 네 개가 주황으로 채워진 별점">
+    <circle cx="12" cy="12" r="10" fill="#f59e0b" stroke="#92400e" />
+    <circle cx="36" cy="12" r="10" fill="#f59e0b" stroke="#92400e" />
+    <circle cx="60" cy="12" r="10" fill="#f59e0b" stroke="#92400e" />
+    <circle cx="84" cy="12" r="10" fill="#f59e0b" stroke="#92400e" />
+    <circle cx="108" cy="12" r="10" fill="#ffffff" stroke="#92400e" />
+  </svg>
+</Figure>
+
+## 별점 위젯
+
+```cpp qt=Widgets,Test
+#include <QApplication>
+#include <QMouseEvent>
+#include <QPainter>
+#include <QTest>
+#include <QWidget>
+#include <cstdio>
+
+// 별점 위젯: 다섯 칸을 그리고, 누른 칸까지 채운다
+class Stars : public QWidget {
+    Q_OBJECT
+public:
+    int rating = 0;
+    int paints = 0;
+    // 레이아웃에 알릴 크기
+    QSize sizeHint() const override { return {5 * 24, 24}; }
+signals:
+    void ratingChanged(int);
+protected:
+    void paintEvent(QPaintEvent*) override {
+        ++paints;
+        QPainter p(this);
+        for (int i = 0; i < 5; ++i) {
+            QRect cell(i * 24 + 2, 2, 20, 20);
+            p.setPen(QColor("#92400e"));
+            p.setBrush(i < rating ? QColor("#f59e0b") : QColor("#ffffff"));
+            p.drawEllipse(cell);
+        }
+    }
+    void mousePressEvent(QMouseEvent* e) override {
+        int n = qBound(1, int(e->position().x()) / 24 + 1, 5);
+        if (n != rating) {
+            rating = n;
+            emit ratingChanged(n);
+            update();                    // "다시 그려 줘" 예약(바로 그리지 않는다)
+        }
+    }
+};
+
+int main(int argc, char** argv) {
+    QApplication app(argc, argv);
+    Stars s;
+    QObject::connect(&s, &Stars::ratingChanged,
+                     [](int n) { std::printf("  별점 %d\n", n); });
+    s.resize(s.sizeHint());
+    s.show();
+    app.processEvents();
+    std::printf("처음 그린 횟수 %d, 크기 %dx%d\n", s.paints, s.width(), s.height());
+
+    QTest::mouseClick(&s, Qt::LeftButton, {}, QPoint(3 * 24 + 10, 12));   // 넷째 칸
+    app.processEvents();
+    QImage img = s.grab().toImage();
+    std::printf("넷째 칸 %s, 다섯째 칸 %s\n",
+                qPrintable(img.pixelColor(3 * 24 + 12, 12).name()),
+                qPrintable(img.pixelColor(4 * 24 + 12, 12).name()));
+
+    int before = s.paints;
+    for (int i = 0; i < 5; ++i) s.update();        // 다섯 번 요청해도
+    app.processEvents();
+    std::printf("update() 5번 -> paintEvent %d번\n", s.paints - before);
+}
+#include "main.moc"
+```
+
+```text
+처음 그린 횟수 1, 크기 120x24
+  별점 4
+넷째 칸 #f59e0b, 다섯째 칸 #ffffff
+update() 5번 -> paintEvent 1번
+```
+
+## 그리기는 이벤트로 온다
+
+- **paintEvent**: 위젯이 처음 보일 때, 가려졌다 드러날 때, 크기가 바뀔 때, 그리고 우리가 요청할 때 불립니다. 그 안에서 `QPainter p(this)`로 위젯 위에 그립니다. 그리기는 언제 몇 번 불릴지 모르므로, 그리는 함수는 **현재 상태를 그대로 그리기만** 해야 하고 상태를 바꾸면 안 됩니다
+- **update()**: "다시 그려 줘"를 예약만 하고 바로 돌아옵니다. 실제 그리기는 이벤트 루프가 돌 때 한 번 일어납니다. `update()`를 다섯 번 불렀지만 `paintEvent`는 한 번뿐이었습니다. 여러 요청이 하나로 합쳐지기 때문에, 상태가 바뀔 때마다 마음 놓고 `update()`를 불러도 됩니다. 바뀐 부분만 다시 그리려면 `update(QRect)`로 영역을 줍니다
+- `repaint()`는 그 자리에서 바로 그립니다. 합쳐지지 않아 같은 프레임에 여러 번 그릴 수 있으므로, 거의 쓸 일이 없습니다
+
+## 입력과 크기
+
+- **마우스**: `mousePressEvent`에서 누른 x 좌표로 몇 번째 칸인지 계산해 별점을 바꾸고, 바뀌었으면 시그널을 내고 `update()`했습니다. 끌기는 `mouseMoveEvent`(기본은 버튼을 누른 동안만 옴, `setMouseTracking(true)`면 항상), 떼기는 `mouseReleaseEvent`에서 처리합니다. 키보드로도 조작하게 하려면 `setFocusPolicy(Qt::StrongFocus)`와 `keyPressEvent`를 더합니다
+- **sizeHint**: 레이아웃에 "나는 이 크기가 알맞다"고 알립니다. 120×24를 돌려주었고, 창 크기를 그대로 맞췄습니다. 이것을 빼먹으면 레이아웃 안에서 위젯이 0 크기로 찌그러지기도 합니다
+- 예제는 `QTest::mouseClick`으로 넷째 칸을 눌렀고, 위젯을 그림으로 떠서 넷째 칸이 주황, 다섯째 칸이 흰색임을 확인했습니다
+
+<Note>
+직접 그린 위젯은 플랫폼 스타일을 따르지 않으므로, 다크 모드에서 흰 원이 눈부시게 보일 수 있습니다. 고정 색 대신 `palette().color(QPalette::Base)`, `palette().highlight()`처럼 팔레트의 색을 쓰면 테마와 스타일시트를 따라갑니다. 또 화면 낭독기를 쓰는 사용자를 위해 `setAccessibleName("별점")`과 현재 값을 알리는 접근성 정보도 챙기는 것이 좋습니다.
+</Note>
+
+## 정리
+
+- 직접 그리는 위젯은 paintEvent에서 현재 상태를 그리기만 하고, 상태가 바뀌면 update()로 다시 그리기를 예약한다
+- update 요청은 이벤트 루프에서 하나로 합쳐지므로 여러 번 불러도 한 번만 그린다
+- 마우스·키보드 이벤트로 상태를 바꾸고 시그널을 내며, sizeHint로 알맞은 크기를 레이아웃에 알린다

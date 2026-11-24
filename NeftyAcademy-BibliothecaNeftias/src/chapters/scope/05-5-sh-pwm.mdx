@@ -1,0 +1,106 @@
+import { Figure, Note } from 'paragoniahex';
+import { Scope } from '../../components/Scope';
+import { filt25, filt25Ac, filt75, jitterA, jitterB, jitterC, pwm25, pwm75, servoFar, servoNear } from './data/sh-pwm';
+
+export const summary = 'PWM을 읽는 세 숫자, 평균이 곧 값이라는 것, 필터 뒤의 전압과 리플, 서보 펄스의 폭 재기, 흔들리는 폭';
+export const terms = [];
+
+PWM은 0V와 전원 전압 사이를 일정한 박자로 오가는 네모파입니다. 높이는 늘 같고, 켜져 있는 시간의 몫으로 값을 전합니다. 화면에서 읽을 숫자는 셋입니다. 주기(또는 주파수), 듀티, 높이입니다([「Vpp, 평균, RMS, 주기, 듀티」](#/read/scope/sc-measure)).
+
+## 평균이 곧 값이다
+
+<Figure caption="1kHz PWM과, 그것이 10kΩ과 1µF의 필터를 지난 전압을 같은 0V 자리에 겹쳤다. 위는 듀티 25%, 아래는 75%">
+  <Scope tdiv={5e-4} dt={1.25e-5} traces={[{ name: '듀티 25%', data: pwm25, vdiv: 1, pos: 0.4 }, { name: '25%의 필터 뒤', data: filt25, vdiv: 1, pos: 0.4 }, { name: '듀티 75%', data: pwm75, vdiv: 1, pos: -3.8 }, { name: '75%의 필터 뒤', data: filt75, vdiv: 1, pos: -3.8 }]} />
+</Figure>
+
+```python
+v, period, tau = 3.3, 1e-3, 10e3 * 1e-6     # 1kHz, 필터는 10kΩ과 1µF
+for duty in (0.10, 0.25, 0.50, 0.75, 0.90):
+    mean = v * duty
+    rms = v * duty ** 0.5
+    ripple = v * duty * (1 - duty) * period / tau
+    print(f"듀티 {duty * 100:2.0f}%: 평균 {mean:.3f}V, RMS {rms:.3f}V, "
+          f"필터 뒤의 리플 {ripple * 1e3:4.1f}mV")
+```
+
+```text
+듀티 10%: 평균 0.330V, RMS 1.044V, 필터 뒤의 리플 29.7mV
+듀티 25%: 평균 0.825V, RMS 1.650V, 필터 뒤의 리플 61.9mV
+듀티 50%: 평균 1.650V, RMS 2.333V, 필터 뒤의 리플 82.5mV
+듀티 75%: 평균 2.475V, RMS 2.858V, 필터 뒤의 리플 61.9mV
+듀티 90%: 평균 2.970V, RMS 3.131V, 필터 뒤의 리플 29.7mV
+```
+
+- **평균은 높이에 듀티를 곱한 값이다**: 3.3V의 25%는 0.825V입니다. 필터 뒤의 선이 네모파 높이의 4분의 1 자리에 누워 있습니다
+- **느린 것은 평균만 본다**: LED를 보는 눈, 모터의 관성, 저항과 커패시터의 필터는 빠른 깜빡임을 따라가지 못하고 평균만 봅니다. 그래서 디지털 핀 하나로 밝기와 빠르기와 전압을 조절할 수 있습니다
+- **자동 측정으로 듀티를 읽는다**: 측정 목록의 듀티(양의 듀티)를 켭니다. 화면에 온전한 주기가 둘 넘게 있어야 믿을 수 있습니다([「커서와 자동 측정」](#/read/scope/sc-cursors))
+- **높이도 본다**: 듀티가 맞아도 높이가 3.3V에 못 미치면 평균이 틀립니다. 핀이 무거운 짐을 몰고 있으면 윗변이 내려앉습니다
+
+## 필터 뒤의 리플
+
+<Figure caption="듀티 25%의 PWM(CH1, 2V/칸)과, 필터 뒤의 전압을 AC 결합 20mV/칸으로 본 것(CH2)">
+  <Scope tdiv={5e-4} dt={1.25e-5} traces={[{ name: 'CH1 PWM', data: pwm25, vdiv: 2, pos: 1.5 }, { name: 'CH2 필터 뒤(AC)', data: filt25Ac, vdiv: 0.02, pos: -2 }]} />
+</Figure>
+
+- **켜진 동안 오르고 꺼진 동안 내린다**: 필터 뒤의 전압은 곧은 선이 아니라 PWM의 박자로 오르내리는 톱니입니다. 봉우리에서 골까지 3칸, 62mV입니다
+- **시정수가 길수록 리플이 작다**: 리플은 주기를 시정수로 나눈 값에 비례합니다. 시정수를 열 배로 하면 리플은 10분의 1이 됩니다
+- **그 대신 느려진다**: 듀티를 바꾸면 필터 뒤의 전압은 시정수의 다섯 배쯤 지나야 새 값에 자리 잡습니다. 10ms의 시정수면 50ms입니다([「RC 충전 곡선과 시정수」](#/read/scope/sh-rc))
+- **주파수를 올리면 둘 다 얻는다**: 같은 필터에 PWM을 10kHz로 올리면 리플이 10분의 1이 됩니다. 필터로 전압을 만드는 일은 뒤의 책에서 다룹니다([「PWM과 RC 필터」](#/read/analog-digital/bk-pwm))
+
+## 서보의 펄스
+
+서보는 20ms쯤마다 오는 펄스의 폭을 각도로 읽습니다. 1.5ms가 가운데입니다.
+
+<Figure caption="서보로 가는 신호를 가로 5ms/칸으로 본 화면. 펄스가 0.3칸이라 폭을 읽을 수 없다">
+  <Scope tdiv={5e-3} dt={1.25e-4} traces={[{ name: 'CH1 서보 신호', data: servoFar, vdiv: 1, pos: -2 }]} />
+</Figure>
+
+<Figure caption="같은 신호를 올라가는 에지에 걸고 가로 0.5ms/칸으로 당겼다. 세로 커서가 폭 1.5ms를 잰다">
+  <Scope tdiv={5e-4} dt={1.25e-5} traces={[{ name: 'CH1 서보 신호', data: servoNear, vdiv: 1, pos: -2 }]} trigger={{ level: 1.65 }} cursorsT={[5e-4, 2e-3]} />
+</Figure>
+
+- **멀리서는 주기를, 가까이서는 폭을**: 5ms/칸에서는 펄스가 20ms마다 오는 것만 확인합니다. 폭은 한 펄스가 화면의 서너 칸을 차지하도록 당겨서 잽니다
+- **듀티로 읽지 않는다**: 1.5ms는 20ms의 7.5%입니다. 듀티의 숫자로는 0.1ms의 차이가 0.5%로 줄어 읽기 어렵습니다. 서보에서는 폭을 잽니다
+- **폭 측정을 쓴다**: 자동 측정의 양의 펄스 폭이 커서보다 빠릅니다
+
+## 흔들리는 폭
+
+프로그램이 잠을 자며 만드는 PWM은 펄스마다 폭이 조금씩 다릅니다([「소프트웨어 PWM의 한계」](#/read/libgpiod/tm-softpwm)). 올라가는 에지에 걸어 여러 번 잡아 겹치면, 내려가는 변이 한 줄이 아니라 띠로 보입니다.
+
+<Figure caption="1.5ms를 내려던 펄스를 세 번 잡아 겹쳤다. 폭이 1.31ms, 1.46ms, 1.58ms다">
+  <Scope tdiv={5e-4} dt={1.25e-5} traces={[{ name: '첫 번째', data: jitterA, vdiv: 1, pos: -2 }, { name: '두 번째', data: jitterB, vdiv: 1, pos: -2 }, { name: '세 번째', data: jitterC, vdiv: 1, pos: -2 }]} trigger={{ level: 1.65 }} />
+</Figure>
+
+```python
+center, per_ms = 1.5, 90.0          # 1.5ms가 가운데, 1ms에 대략 90도
+for width in (1.31, 1.46, 1.50, 1.58):
+    print(f"폭 {width:.2f}ms: 가운데에서 {(width - center) * per_ms:+5.1f}도")
+```
+
+```text
+폭 1.31ms: 가운데에서 -17.1도
+폭 1.46ms: 가운데에서  -3.6도
+폭 1.50ms: 가운데에서  +0.0도
+폭 1.58ms: 가운데에서  +7.2도
+```
+
+- **올라가는 변은 겹치고 내려가는 변은 퍼진다**: 트리거가 올라가는 변을 같은 자리에 맞추므로, 폭의 차이는 모두 내려가는 변에 나타납니다
+- **띠의 너비가 흔들림이다**: 가장 이른 변과 가장 늦은 변 사이를 커서로 재면 0.27ms입니다. 서보로 치면 24도쯤입니다
+- **잔상 기능으로 본다**: 잡은 화면을 지우지 않고 계속 겹쳐 그리는 기능(잔상)이 있는 장비에서는, 켜 두고 기다리면 띠가 저절로 그려집니다
+- **하드웨어 PWM은 한 줄이다**: 칩의 전용 회로가 만드는 PWM은 겹쳐도 변이 한 줄로 보입니다. 띠가 보이면 그 신호는 프로그램이 만들고 있는 것입니다
+
+<Note>
+첫 두 그림은 ngspice 42로 1kHz의 네모파와 10kΩ, 1µF의 필터를 돌린 결과이고, 서보 신호와 겹친 펄스는 수식으로 그렸습니다. 세 폭(1.31ms, 1.46ms, 1.58ms)은 앞의 책에서 소프트웨어 PWM을 x86-64 가상 머신에서 잰 값의 가운데와 양 끝이며, 라즈베리파이나 서보에서 잰 것이 아닙니다. 서보의 가운데와 각도는 Pololu의 글에서 옮겼고, 서보마다 범위가 다릅니다.
+</Note>
+
+## 정리
+
+- PWM은 주기, 듀티, 높이로 읽는다. 느린 짐과 필터는 높이에 듀티를 곱한 평균을 본다
+- 필터 뒤에는 PWM의 박자로 오르내리는 리플이 남는다. 시정수를 늘리면 리플은 줄고 반응은 느려진다
+- 서보의 신호는 당겨서 폭을 잰다. 여러 번 겹쳐 내려가는 변이 띠로 보이면 폭이 흔들리는 것이다
+
+## 참고 문서
+
+- [Pololu 블로그: Servo control interface in detail(펄스의 폭과 각도, 주기)](https://www.pololu.com/blog/17/servo-control-interface-in-detail)
+- [Pololu 블로그: Electrical characteristics of servos and introduction to the servo control interface(50Hz쯤, 1.5ms가 가운데, 1~2ms가 대략 90도)](https://www.pololu.com/blog/16)
+- [Tektronix: XYZs of Oscilloscopes(자동 측정의 듀티와 펄스 폭, 화면의 잔상)](https://www.ece.ucdavis.edu/~spencer/195/datasheets/XYZ.pdf)

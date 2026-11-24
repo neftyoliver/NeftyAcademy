@@ -1,0 +1,137 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '던지지 않는다는 약속, 어기면 생기는 일, vector가 이동과 복사를 고르는 기준';
+export const terms = ['~noexcept'];
+
+`noexcept`는 "이 함수는 예외를 내보내지 않는다"는 약속입니다. [속성 페이지](#/read/cpp-syntax/fn-attributes)에서 문법을 보았고, 여기서는 그것이 **무엇을 바꾸는지**를 봅니다.
+
+## vector가 보는 것
+
+```cpp
+#include <print>
+#include <vector>
+
+struct Careful {
+    Careful() = default;
+    Careful(const Careful&) { std::println("  복사"); }
+    Careful(Careful&&) { std::println("  이동"); }              // noexcept 없음
+};
+
+struct Fast {
+    Fast() = default;
+    Fast(const Fast&) { std::println("  복사"); }
+    Fast(Fast&&) noexcept { std::println("  이동"); }
+};
+
+template <typename T>
+void grow()
+{
+    std::vector<T> v;
+    v.reserve(1);
+    v.emplace_back();
+    v.emplace_back();       // 자리가 모자라다. 있던 원소를 새 메모리로 옮겨야 한다
+}
+
+int main()
+{
+    std::println("noexcept 없음:");
+    grow<Careful>();
+    std::println("noexcept 있음:");
+    grow<Fast>();
+}
+```
+
+```text
+noexcept 없음:
+  복사
+noexcept 있음:
+  이동
+```
+
+두 타입의 차이는 이동 생성자의 `noexcept` 한 단어뿐입니다. `std::vector`는 [강한 보장](#/read/cpp-syntax/exc-safety)을 지키려고, 이동 생성자가 던질 수 **있으면** 안전한 복사를 고릅니다. 원소가 `std::string`을 품은 구조체 백만 개라면 이 한 단어가 재할당의 비용을 몇 배로 가릅니다.
+
+라이브러리는 `std::is_nothrow_move_constructible_v<T>` 같은 [타입 특성](#/read/cpp-syntax/ct-assert)으로 이것을 묻습니다. `noexcept`는 주석이 아니라 **컴파일할 때 읽히는 정보**입니다.
+
+## 어기면
+
+`noexcept` 함수 밖으로 예외가 나가려 하면 `std::terminate`가 불려 프로그램이 끝납니다. 스택이 풀리는지는 정해져 있지 않습니다.
+
+```cpp nocheck
+void save() noexcept
+{
+    risky();            // 이것이 던지면 catch할 기회 없이 프로그램이 끝난다
+}
+```
+
+컴파일러는 `noexcept` 함수 안에서 던질 수 있는 함수를 부르는 것을 **막지 않습니다.** 약속을 지키는 것은 쓰는 사람의 몫입니다. 안에서 `try`/`catch`로 다 받아 내면 약속은 지켜집니다.
+
+## 붙이는 곳
+
+| 함수 | `noexcept` | 까닭 |
+| --- | --- | --- |
+| 이동 생성자, 이동 대입 연산자 | **늘 붙인다** | 컨테이너가 이동을 쓰게 하려면 |
+| `swap` | 늘 붙인다 | 강한 보장을 쌓는 바닥 |
+| 소멸자 | 적지 않아도 이미 `noexcept` | [던지면 안 된다](#/read/cpp-syntax/exc-unwind) |
+| 메모리 할당이 없는 단순한 읽기 함수 | 붙여도 좋다 | 실패할 길이 없다 |
+| 그 밖의 대부분 | 붙이지 않는다 | 아래 참조 |
+
+컴파일러가 만들어 주는 [특수 멤버 함수](#/read/cpp-syntax/sm-rules)는 멤버들의 것이 모두 `noexcept`이면 저절로 `noexcept`입니다. `= default`로 두면 신경 쓸 일이 없습니다. 직접 쓴 이동 연산에만 붙이면 됩니다.
+
+## 아무 데나 붙이지 않는 까닭
+
+`noexcept`는 **인터페이스의 일부**입니다. 한번 붙이면 떼기 어렵습니다.
+
+- 나중에 그 함수가 메모리를 할당하게 되거나 던지는 함수를 부르게 되면, 조용히 "실패 = 프로그램 종료"가 된다
+- `noexcept`를 떼면 그것에 기대던 코드(컨테이너의 선택, 다른 `noexcept` 함수)가 달라진다
+- 속도 이득은 기대만큼 크지 않다. GCC와 Clang의 예외는 원래 안 날 때 비용이 거의 없다
+
+"이 함수는 **절대로** 실패할 수 없는가, 앞으로도 그런가"에 그렇다고 답할 수 있을 때만 붙입니다.
+
+## 조건부 noexcept
+
+템플릿에서는 "`T`의 연산이 던지지 않으면 나도 던지지 않는다"를 적을 수 있습니다.
+
+```cpp
+#include <print>
+#include <string>
+#include <utility>
+
+template <typename T>
+struct Box {
+    T value;
+
+    void swap(Box& other) noexcept(noexcept(std::swap(value, other.value)))
+    {
+        std::swap(value, other.value);
+    }
+};
+
+struct Throwing {
+    Throwing() = default;
+    Throwing(Throwing&&) {}                     // noexcept가 아니다
+    Throwing& operator=(Throwing&&) { return *this; }
+};
+
+int main()
+{
+    Box<std::string> a, b;
+    Box<Throwing> c, d;
+    std::println("{} {}", noexcept(a.swap(b)), noexcept(c.swap(d)));
+}
+```
+
+```text
+true false
+```
+
+`noexcept(조건)`의 바깥 것은 **지정자**(조건이 참이면 던지지 않는다), 안쪽 `noexcept(식)`은 **연산자**(이 식이 던질 수 있는가를 `bool`로)입니다. 식은 실행되지 않습니다. 표준 라이브러리의 `std::pair`, `std::optional`, `std::vector`의 이동과 `swap`이 이렇게 선언되어 있습니다.
+
+<Note>
+C++17부터 `noexcept`는 **함수 타입의 일부**입니다. `void (*)() noexcept` 타입의 포인터에 `noexcept`가 아닌 함수를 넣을 수 없습니다(반대는 됩니다). 콜백이 던지면 안 되는 자리, 예를 들어 C 라이브러리에 넘기는 콜백이나 인터럽트 처리기 표에서 이것을 타입으로 강제할 수 있습니다.
+</Note>
+
+## 정리
+
+- `noexcept`는 컴파일할 때 읽히는 약속. 어기면 프로그램이 끝난다
+- 이동 연산과 `swap`에는 늘 붙인다. `std::vector`가 그것을 보고 이동을 고른다
+- 다른 함수에는 "절대 실패할 수 없다"고 말할 수 있을 때만 붙인다

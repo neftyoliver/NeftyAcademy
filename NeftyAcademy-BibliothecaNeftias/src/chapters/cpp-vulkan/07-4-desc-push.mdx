@@ -1,0 +1,145 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '푸시 상수: 커맨드 버퍼에 싣는 작은 값, 단계별 범위와 오프셋, 일부만 바꾸기, 128·256바이트 한도';
+export const terms = ['VkPushConstantRange', 'vkCmdPushConstants', 'vkGetBufferDeviceAddress'];
+
+**푸시 상수**는 버퍼도 디스크립터도 거치지 않고 커맨드 버퍼에 직접 실어 보내는 작은 값입니다. 파이프라인 레이아웃에 어느 단계가 어느 바이트를 읽는지 범위로 적어 두고 `vkCmdPushConstants`로 값을 넣으면, 그 뒤의 그리기가 그 값을 봅니다. 물체 번호처럼 그리기마다 바뀌는 값을 가장 싸게 넘기는 길입니다. 아래 프로그램은 세트 없이 푸시 상수만으로 사각형 넷을 그립니다.
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp,vkx_cmd.hpp,vkx_resource.hpp,vkx_pipeline.hpp,vkx_draw.hpp
+#include "vkx_cmd.hpp"
+#include "vkx_draw.hpp"
+#include "vkx_pipeline.hpp"
+
+// 16바이트를 두 단계가 나눠 읽는다: 정점 셰이더는 0~11, 프래그먼트 셰이더는 12~15
+const char* VS = R"(#version 450
+layout(push_constant) uniform Push {
+    vec2 center;        // 바이트 0~7
+    float half_size;    // 8~11
+} pc;
+const vec2 corner[6] = vec2[](vec2(-1, -1), vec2(1, -1), vec2(-1, 1),
+                              vec2(-1, 1), vec2(1, -1), vec2(1, 1));
+void main() {
+    vec2 size = vec2(pc.half_size, pc.half_size * 3.0);
+    gl_Position = vec4(pc.center + corner[gl_VertexIndex] * size, 0.0, 1.0);
+})";
+
+const char* FS = R"(#version 450
+layout(push_constant) uniform Push {
+    layout(offset = 12) float shade;    // 블록이 12에서 시작하게 오프셋을 적는다
+} pc;
+layout(location = 0) out float value;
+void main() { value = pc.shade; })";
+
+struct Push { float center[2]; float half_size; float shade; };   // 같은 배치
+
+int main() {
+    vkx::Instance inst = vkx::make_instance();
+    vkx::Device dev = vkx::make_device(inst.handle);
+    vkx::Commands cmds = vkx::make_commands(dev);
+    const uint32_t W = 48, H = 6;
+    vkx::Image target = vkx::make_image(
+        dev, {W, H}, VK_FORMAT_R32_SFLOAT,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    vkx::Buffer pixels =
+        vkx::make_buffer(dev, W * H * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+
+    // 레이아웃에 세트는 없고 푸시 상수 범위만 둘: 어느 단계가 어느 바이트를 읽는지
+    const auto VERT = VK_SHADER_STAGE_VERTEX_BIT;
+    const auto FRAG = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkPushConstantRange ranges[] = {{VERT, 0, 12}, {FRAG, 12, 4}};
+    VkPipelineLayoutCreateInfo lci{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .pushConstantRangeCount = 2, .pPushConstantRanges = ranges};
+    VkPipelineLayout layout;
+    vkCreatePipelineLayout(dev.handle, &lci, nullptr, &layout);
+    auto vs = vkx::make_shader(dev, vkx::compile(VS, shaderc_vertex_shader));
+    auto fs = vkx::make_shader(dev, vkx::compile(FS, shaderc_fragment_shader));
+    VkPipeline pipeline = vkx::make_pipeline(
+        dev, {.vertex = vs, .fragment = fs, .layout = layout,
+              .color = target.format});
+
+    VkCommandBuffer cmd = vkx::begin(cmds);
+    vkx::begin_drawing(cmd, target, {{-1.0f}});
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    uint32_t bytes = 0;
+    // 값은 이 호출 때 커맨드 버퍼에 복사된다
+    auto push = [&](VkShaderStageFlags stage, uint32_t offset, uint32_t size,
+                    const void* data) {
+        vkCmdPushConstants(cmd, layout, stage, offset, size, data);
+        bytes += size;
+    };
+    Push p{{-0.75f, 0.0f}, 0.1f, 0.3f};
+    push(VERT, 0, 12, &p);                   // 위치와 크기
+    push(FRAG, 12, 4, &p.shade);             // 밝기
+    vkCmdDraw(cmd, 6, 1, 0, 0);
+    for (int i = 1; i < 4; ++i) {
+        p.center[0] += 0.5f;
+        push(VERT, 0, 8, p.center);          // 위치만 바꾼다. 나머지는 남아 있다
+        if (i == 3) {
+            p.shade = 0.9f;
+            push(FRAG, 12, 4, &p.shade);     // 마지막 것은 밝기도
+        }
+        vkCmdDraw(cmd, 6, 1, 0, 0);
+    }
+    vkx::end_drawing(cmd, target, pixels);
+    vkx::submit_and_wait(dev, cmds);
+
+    auto* v = static_cast<const float*>(pixels.mapped);
+    const char* ramp = ".:-=+*#%@";
+    for (uint32_t i = 0; i < W * H; ++i) {
+        if (i % W == 0) std::putchar('|');
+        std::putchar(v[i] < 0 ? ' ' : ramp[int(v[i] * 8.999f)]);
+        if (i % W == W - 1) std::puts("|");
+    }
+    std::printf("그리기 4번에 푸시 상수 %u바이트를 기록(세트도 버퍼도 없음)\n",
+                bytes);
+    std::printf("이 장치의 한도(maxPushConstantsSize)는 %u바이트\n",
+                dev.props.limits.maxPushConstantsSize);
+
+    vkDestroyPipeline(dev.handle, pipeline, nullptr);
+    vkDestroyPipelineLayout(dev.handle, layout, nullptr);
+    vkDestroyShaderModule(dev.handle, vs, nullptr);
+    vkDestroyShaderModule(dev.handle, fs, nullptr);
+    vkx::destroy(dev, pixels);
+    vkx::destroy(dev, target);
+    vkx::destroy(dev, cmds);
+    vkx::destroy(dev);
+    vkx::destroy(inst);
+}
+```
+
+```text
+|                                                |
+|                                                |
+|    ----        ----        ----        @@@@    |
+|    ----        ----        ----        @@@@    |
+|                                                |
+|                                                |
+그리기 4번에 푸시 상수 44바이트를 기록(세트도 버퍼도 없음)
+이 장치의 한도(maxPushConstantsSize)는 256바이트
+```
+
+- **범위와 블록**: 레이아웃의 범위는 단계, 오프셋, 크기로 이루어집니다. 셰이더의 `push_constant` 블록은 그 단계의 범위 안에 통째로 들어 있어야 해서, 프래그먼트 셰이더는 `layout(offset = 12)`로 블록을 12에서 시작하게 했습니다(벗어나면 파이프라인을 만들 때 검증 레이어가 VUID-VkGraphicsPipelineCreateInfo-layout-07987로 알립니다). 멤버의 배치는 std430 규칙을 따릅니다([「인터페이스 블록과 레이아웃」](#/read/cpp-vulkan/glsl-interface))
+- **단계 플래그**: `vkCmdPushConstants`에 주는 단계는 고치는 바이트를 덮는 범위의 단계와 같아야 합니다. 0~15를 한 번에 정점과 프래그먼트 단계로 넣으면 VUID-vkCmdPushConstants-offset-01795가 납니다. 범위를 단계별로 나누지 않고 여러 단계가 함께 보는 범위 하나로 두면 이 규칙에 걸릴 일이 줄어서, `vkx::make_layout`은 모든 단계가 보는 범위 하나를 만듭니다
+- **남아 있는 값**: 한 번 넣은 값은 덮어쓸 때까지 남습니다. 둘째 사각형부터는 위치 8바이트만 바꿨고 크기와 밝기는 그대로 쓰였습니다. 파이프라인을 바꿔도 값은 남으며, 푸시 상수 범위가 같은 레이아웃끼리는 그대로 이어 씁니다. 다만 커맨드 버퍼 기록을 시작할 때는 모든 값이 정해져 있지 않으므로 그리기 전에 넣어야 합니다
+- **한도**: 오프셋과 크기는 4의 배수여야 하고, 전체 크기는 128바이트가 보장됩니다(1.4부터 256바이트). 4×4 행렬 하나가 64바이트이므로 행렬 둘이면 128바이트가 찹니다
+
+## 무엇을 넣을까
+
+| 넣는 것 | 크기 | 쓰임 |
+| --- | --- | --- |
+| 물체 번호, 재질 번호 | 4바이트씩 | SSBO 표와 텍스처 표에서 고를 인덱스 |
+| 버퍼의 GPU 주소 | 8바이트 | 디스크립터 없이 버퍼 읽기 |
+| 4×4 행렬 | 64바이트 | 작은 프로그램의 변환 행렬 |
+
+가장 흔한 쓰임은 번호입니다. 데이터는 SSBO나 텍스처 표에 두고([「바인드리스」](#/read/cpp-vulkan/desc-bindless)) 푸시 상수로는 몇 번을 읽을지만 넘깁니다. 행렬을 직접 넣는 방식은 간단하지만 그리기마다 `vkCmdPushConstants`를 불러야 해서, 그리기 여럿을 명령 하나로 묶는 간접 그리기와는 맞지 않습니다([「인스턴싱과 간접 그리기」](#/read/cpp-vulkan/tech-instancing)).
+
+<Note>
+`bufferDeviceAddress` 기능(1.2, `make_device`가 켭니다)이 있으면 `vkGetBufferDeviceAddress`로 버퍼의 64비트 GPU 주소를 얻어 푸시 상수로 넘길 수 있습니다. 셰이더는 `GL_EXT_buffer_reference`의 `layout(buffer_reference)` 블록으로 그 주소를 포인터처럼 읽으므로, 디스크립터 세트를 거치지 않고 버퍼를 고를 수 있습니다. 버퍼는 `VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT` 쓰임새로 만들어야 합니다.
+</Note>
+
+## 정리
+
+- 푸시 상수는 커맨드 버퍼에 직접 싣는 작은 값이고, 레이아웃의 범위가 어느 단계가 어느 바이트를 읽는지 정한다
+- 넣은 값은 덮어쓸 때까지 남아 일부 바이트만 바꿀 수 있고, 넣을 때의 단계 플래그는 범위의 단계와 같아야 한다
+- 보장되는 크기는 128바이트(1.4부터 256바이트)여서, 큰 데이터는 버퍼에 두고 번호나 주소만 넘긴다

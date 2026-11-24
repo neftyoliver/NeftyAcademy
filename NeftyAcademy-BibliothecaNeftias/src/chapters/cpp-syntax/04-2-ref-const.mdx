@@ -1,0 +1,110 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '복사 없이 읽기만, 임시 객체에 묶기, 인자 넘기는 기준';
+
+`const T&`는 C++ 코드에서 가장 자주 보이는 인자 타입입니다. "복사하지 않고 받되, 고치지 않겠다"는 뜻입니다.
+
+## 읽기만 하는 인자
+
+```cpp
+#include <print>
+#include <string>
+#include <vector>
+
+// 복사하지 않고, 고치지도 않는다
+double average(const std::vector<double>& values)
+{
+    double sum = 0;
+    for (double v : values)
+        sum += v;
+    return values.empty() ? 0 : sum / static_cast<double>(values.size());
+}
+
+std::string make_name(int id) { return "sensor-" + std::to_string(id); }
+
+int main()
+{
+    std::vector<double> data = {1.0, 2.0, 6.0};
+    std::println("{}", average(data));
+    std::println("{}", average({10.0, 20.0}));      // 임시 객체도 받는다
+
+    // 임시 객체의 수명이 name만큼 늘어난다
+    const std::string& name = make_name(7);
+    std::println("{} {}", name, name.size());
+}
+```
+
+```text
+3
+15
+sensor-7 8
+```
+
+`average(std::vector<double> values)`라고 값으로 받으면 부를 때마다 벡터 전체가 복사됩니다. `const&`로 받으면 주소 하나만 넘어갑니다. 함수 안에서 `values.push_back(1)`처럼 고치려 하면 컴파일 오류가 납니다.
+
+## 임시 객체에 묶인다
+
+`T&`는 사라질 값(우측값)에 묶을 수 없었습니다. `const T&`는 묶을 수 있습니다.
+
+```cpp nocheck
+std::string& a = make_name(7);          // 오류
+const std::string& b = make_name(7);    // 된다
+```
+
+고칠 수 없는 이름이라면 임시 객체에 붙여도 해가 없기 때문입니다. 그래서 `average({10.0, 20.0})`처럼 그 자리에서 만든 값을 넘길 수 있습니다.
+
+지역 변수로 선언한 `const` 참조에 임시 객체를 묶으면 그 임시 객체는 **참조가 살아 있는 동안** 함께 삽니다. 위의 `name`이 그렇습니다. 다만 이 규칙은 좁아서, 함수가 돌려준 참조를 거친 경우에는 통하지 않습니다([「참조를 돌려줄 때의 함정」](#/read/cpp-syntax/ref-return)).
+
+## 인자를 넘기는 기준
+
+| 인자가 | 넘기는 법 | 예 |
+| --- | --- | --- |
+| 작고 복사가 싸다 | 값 | `int`, `double`, 포인터, `enum`, `std::string_view`, `std::span` |
+| 크고 읽기만 한다 | `const T&` | `const std::vector<int>&`, `const Config&` |
+| 고쳐야 한다 | `T&` | `std::vector<int>&` |
+| 넘겨받아 보관한다 | 값으로 받고 `std::move` | `std::string name` ([이동](#/read/cpp-syntax/sm-move)) |
+| 없을 수도 있다 | 포인터나 `std::optional` | `const Config*` |
+
+"작다"의 기준은 대략 포인터 두 개 크기까지입니다. 문자열을 읽기만 하는 인자는 `const std::string&`보다 `std::string_view`가 낫습니다. 문자열 상수를 넘길 때 임시 `std::string`을 만들지 않기 때문입니다.
+
+## const는 안쪽까지 간다
+
+```cpp
+#include <print>
+#include <string>
+#include <vector>
+
+struct device {
+    std::string name;
+    std::vector<int> pins;
+};
+
+void describe(const device& d)
+{
+    std::println("{} ({}핀)", d.name, d.pins.size());
+    // d.name = "x";            // 오류
+    // d.pins.push_back(1);     // 오류: 멤버도 const로 보인다
+}
+
+int main()
+{
+    device d{"led-bar", {17, 27, 22}};
+    describe(d);
+}
+```
+
+```text
+led-bar (3핀)
+```
+
+`const device&`를 통해서는 멤버도 고칠 수 없고, 멤버의 함수 가운데 "고치지 않는다"고 표시된 것만 부를 수 있습니다. `size()`는 그런 함수이고 `push_back()`은 아닙니다. 이 표시를 붙이는 법은 [「this, const 멤버 함수, mutable」](#/read/cpp-syntax/class-const)에서 봅니다.
+
+<Note kind="tip">
+함수를 쓸 때 인자가 값인지 `const&`인지 `&`인지를 먼저 정하세요. 원형만 읽어도 "무엇을 읽고 무엇을 고치는 함수인가"가 드러납니다. C에서 `const char *`로 하던 약속을 모든 타입으로 넓힌 것입니다.
+</Note>
+
+## 정리
+
+- 크고 읽기만 하는 인자는 `const T&`
+- `const T&`는 임시 객체에도 묶인다. `T&`는 안 된다
+- 작은 값은 그냥 값으로, 문자열 읽기는 `std::string_view`

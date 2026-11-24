@@ -1,0 +1,173 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '사건을 명령으로 바꾸는 상태 기계: 끌기 문턱, 미리 보기와 확정, Esc와 캡처, 잠깐 쓰는 도구';
+export const terms = ['DragDetect', 'WM_CAPTURECHANGED', 'RUNNING_MODAL'];
+
+같은 클릭이 선택 도구에서는 고르기가 되고, 붓 도구에서는 점 하나가 되고, 돋보기 도구에서는 확대가 됩니다. 도구는 포인터와 키의 사건을 받아 명령으로 바꾸는 객체입니다. 누르고, 끌고, 떼는 사이에 무엇을 기다리는 중인지가 달라지므로 도구 하나는 작은 상태 기계가 됩니다. 예제는 물체를 끌어 옮기는 도구입니다.
+
+```cpp
+// 도구 상태 기계: 누름, 문턱, 끌기, 확정과 취소. 끄는 동안의 값은 문서 밖에 둔다
+#include <algorithm>
+#include <cstdlib>
+#include <optional>
+#include <print>
+#include <string>
+#include <variant>
+#include <vector>
+
+struct Point { int x, y; };
+
+struct Document {
+    Point a{10, 10};                         // 물체 A의 왼쪽 위. 크기는 20x20
+    int undo_steps = 0;
+    bool hit(Point p) const {
+        return p.x >= a.x && p.x < a.x + 20 && p.y >= a.y && p.y < a.y + 20;
+    }
+    void move_to(Point p) { a = p, ++undo_steps; }   // 명령 하나
+};
+
+struct Press { Point at; };
+struct Move { Point at; };
+struct Release {};
+struct Shift { bool down; };
+struct Escape {};
+struct CaptureLost {};
+using Event = std::variant<Press, Move, Release, Shift, Escape, CaptureLost>;
+
+class MoveTool {
+public:
+    enum class State { Idle, Armed, Dragging, Swallow };
+    State state = State::Idle;
+    std::optional<Point> preview;            // 끄는 동안 화면에만 그리는 자리
+
+    void handle(Document& doc, const Event& e) {
+        std::visit([&](const auto& event) { on(doc, event); }, e);
+    }
+
+private:
+    static constexpr int kThreshold = 4;     // 화면 픽셀. 이만큼 움직여야 끌기다
+    Point start_{}, last_{}, origin_{};
+    bool shift_ = false;
+
+    void on(Document& doc, Press e) {
+        if (state != State::Idle || !doc.hit(e.at)) return;
+        state = State::Armed, start_ = last_ = e.at, origin_ = doc.a;
+    }
+    void on(Document&, Move e) {
+        last_ = e.at;
+        int dx = std::abs(e.at.x - start_.x), dy = std::abs(e.at.y - start_.y);
+        if (state == State::Armed && std::max(dx, dy) >= kThreshold)
+            state = State::Dragging;
+        update();
+    }
+    void on(Document&, Shift e) { shift_ = e.down, update(); }   // 마우스가 멈춰도
+    void on(Document& doc, Release) {
+        if (state == State::Dragging) doc.move_to(*preview);     // 여기서만 고친다
+        finish(State::Idle);                 // Armed였으면 클릭, Swallow였으면 끝
+    }
+    void on(Document&, Escape) {             // 단추는 아직 눌려 있다: 삼킨다
+        if (state != State::Idle) finish(State::Swallow);
+    }
+    void on(Document&, CaptureLost) { finish(State::Idle); }     // 뗌은 오지 않는다
+
+    void update() {
+        if (state != State::Dragging) return;
+        int dx = last_.x - start_.x, dy = last_.y - start_.y;
+        if (shift_) (std::abs(dx) >= std::abs(dy) ? dy : dx) = 0;    // 긴 쪽으로만
+        preview = Point{origin_.x + dx, origin_.y + dy};
+    }
+    void finish(State next) { state = next, preview.reset(); }
+};
+
+using Script = std::vector<std::pair<const char*, Event>>;
+
+void run(Document& doc, MoveTool& tool, const char* title, const Script& script) {
+    static const char* states[] = {"Idle", "Armed", "Dragging", "Swallow"};
+    std::println("{}", title);
+    for (const auto& [name, event] : script) {
+        tool.handle(doc, event);
+        std::string seen = "-";
+        if (auto p = tool.preview) seen = std::format("({},{})", p->x, p->y);
+        std::println("  {:<14} {:<9} {:<10} ({},{})  {}", name,
+                     states[int(tool.state)], seen, doc.a.x, doc.a.y,
+                     doc.undo_steps);
+    }
+}
+
+int main() {
+    Document doc;
+    MoveTool tool;
+    std::println("  사건           상태      미리 보기  문서     실행 취소");
+    run(doc, tool, "누르고 조금 움직였다 떼기",
+        {{"누름(15,15)", Press{{15, 15}}}, {"움직임(17,16)", Move{{17, 16}}},
+         {"뗌", Release{}}});
+    run(doc, tool, "끌기",
+        {{"누름(15,15)", Press{{15, 15}}}, {"움직임(18,17)", Move{{18, 17}}},
+         {"움직임(35,21)", Move{{35, 21}}}, {"Shift 누름", Shift{true}},
+         {"Shift 뗌", Shift{false}}, {"뗌", Release{}}});
+    run(doc, tool, "끌다가 Esc",
+        {{"누름(35,20)", Press{{35, 20}}}, {"움직임(60,40)", Move{{60, 40}}},
+         {"Esc", Escape{}}, {"움직임(70,50)", Move{{70, 50}}}, {"뗌", Release{}}});
+    run(doc, tool, "끌다가 캡처를 잃음",
+        {{"누름(35,20)", Press{{35, 20}}}, {"움직임(60,40)", Move{{60, 40}}},
+         {"캡처 잃음", CaptureLost{}}});
+}
+```
+
+```text
+  사건           상태      미리 보기  문서     실행 취소
+누르고 조금 움직였다 떼기
+  누름(15,15)    Armed     -          (10,10)  0
+  움직임(17,16)  Armed     -          (10,10)  0
+  뗌             Idle      -          (10,10)  0
+끌기
+  누름(15,15)    Armed     -          (10,10)  0
+  움직임(18,17)  Armed     -          (10,10)  0
+  움직임(35,21)  Dragging  (30,16)    (10,10)  0
+  Shift 누름     Dragging  (30,10)    (10,10)  0
+  Shift 뗌       Dragging  (30,16)    (10,10)  0
+  뗌             Idle      -          (30,16)  1
+끌다가 Esc
+  누름(35,20)    Armed     -          (30,16)  1
+  움직임(60,40)  Dragging  (55,36)    (30,16)  1
+  Esc            Swallow   -          (30,16)  1
+  움직임(70,50)  Swallow   -          (30,16)  1
+  뗌             Idle      -          (30,16)  1
+끌다가 캡처를 잃음
+  누름(35,20)    Armed     -          (30,16)  1
+  움직임(60,40)  Dragging  (55,36)    (30,16)  1
+  캡처 잃음      Idle      -          (30,16)  1
+```
+
+- **문턱을 넘어야 끌기다**: 누른 자리에서 4픽셀 안쪽의 움직임은 끌기로 치지 않습니다. 문턱이 없으면 클릭할 때마다 물체가 한두 픽셀씩 밀립니다. 문턱은 문서의 단위가 아니라 화면 픽셀로 잽니다. 그래야 확대 배율과 상관없이 손의 떨림만큼이 됩니다. Windows에는 이 크기를 알려 주는 `SM_CXDRAG`와, 누른 뒤 그 사각형을 벗어나는지 지켜봐 주는 `DragDetect`가 있습니다
+- **끄는 동안은 미리 보기, 뗄 때 명령 하나**: 끄는 내내 문서는 (10,10) 그대로이고, 뗄 때 한 번 고칩니다. 실행 취소 한 번에 끌기 전체가 돌아갑니다. 다른 길도 있습니다. 움직일 때마다 명령을 내고 하나로 합치면([「명령 묶기와 합치기」](#/read/cpp-complex-app/cmd-merge)) 속성 패널 같은 다른 뷰도 끄는 중의 값을 봅니다. 문서를 바로 고치다가 취소할 때 되감을 수도 있습니다([「트랜잭션」](#/read/cpp-complex-app/cmd-transaction))
+- **보조 키도 사건이다**: Shift를 누르는 순간, 마우스가 멈춰 있어도 미리 보기가 (30,10)으로 바뀝니다. 도구는 마지막 포인터 자리를 기억해 두고 키 사건에서 다시 계산합니다. 움직임 사건에 실려 온 보조 키만 보면 이 순간을 놓칩니다
+- **Esc 뒤에는 뗄 때까지 삼킨다**: Esc로 취소해도 단추는 아직 눌려 있습니다. 이어지는 움직임과 뗌을 버리는 상태가 따로 있어야 합니다. 없으면 취소 뒤의 움직임이 새 끌기가 되거나, 뗌이 클릭으로 처리됩니다
+- **뗌이 오지 않을 수도 있다**: 끄는 중에 다른 창이 앞에 나서면 뗌 사건은 오지 않습니다. Windows는 캡처를 잃는 창에 `WM_CAPTURECHANGED`를 보내고, 웹의 포인터 이벤트에는 `pointercancel`이 있습니다. 이때 취소하지 않으면 도구가 Dragging에 갇힙니다
+
+## 도구를 갈아 끼우기
+
+- **도구가 받는 것**: 켜질 때와 꺼질 때의 알림, 포인터와 키의 사건, 커서 모양을 묻는 호출, 미리 보기를 그릴 차례입니다. GIMP의 도구 클래스에는 누름, 움직임, 뗌 말고도 보조 키가 바뀔 때 불리는 함수(`modifier_key`)와 커서를 정하는 함수(`cursor_update`)가 따로 있습니다
+- **좌표는 뷰가 바꿔 준다**: 도구는 문서 좌표로 일합니다. 화면 좌표를 문서 좌표로 바꾸는 일은 뷰가 맡고([「캔버스: 확대와 타일 렌더링」](#/read/cpp-complex-app/lay-canvas)), 화면 픽셀로 남겨 두는 것은 문턱과 핸들의 크기뿐입니다
+- **켜진 도구는 문서의 것이 아니다**: 어느 도구가 켜져 있는지는 저장하지 않고 실행 취소에도 넣지 않습니다. 도구를 바꾸는 일은 명령으로 등록해서 도구 상자, 메뉴, 단축키가 같은 명령을 부르게 합니다([「메뉴, 도구 모음, 리본」](#/read/cpp-complex-app/win-ribbon)). 글을 치는 동안에는 한 글자 단축키를 꺼야 합니다([「입력기」](#/read/cpp-complex-app/txt-ime))
+- **잠깐 쓰는 도구**: Photoshop은 도구의 단축키를 누르고 있는 동안만 그 도구로 바꾸고, 떼면 쓰던 도구로 돌아갑니다. 켜진 도구를 변수 하나가 아니라 스택으로 두면 이 일이 쉽습니다. 끌기가 진행 중일 때 온 전환은 미루거나 버립니다
+- **Blender의 모달 연산자**: 같은 구조입니다. `invoke`가 `RUNNING_MODAL`을 돌려주면 그 뒤의 사건이 연산자의 `modal`로 가고, `FINISHED`를 돌려주면 확정, `CANCELLED`를 돌려주면 실행 취소에 아무것도 남지 않습니다. 옮기기, 돌리기, 크기 바꾸기가 이렇게 만들어져 있습니다
+
+<Note>
+상태를 `bool` 여러 개에 흩어 두지 말고 열거형 하나에 둡니다. 그러면 상태와 사건으로 표를 그릴 수 있고, 채우지 않은 칸이 버그의 후보입니다. Swallow에서 온 누름, Dragging에서 온 도구 전환 같은 칸입니다. 도구는 사건의 목록을 넣고 상태와 문서를 견주는 것으로 시험할 수 있습니다. 예제가 그렇듯 창이 없어도 됩니다.
+</Note>
+
+## 정리
+
+- 도구는 사건을 받아 명령을 내는 상태 기계다. 누름과 끌기 사이에 문턱이 있고, 끄는 동안의 값은 확정 전까지 문서의 기록에 남지 않는다
+- 끝나는 길은 뗌만이 아니다. Esc와 캡처를 잃는 경우를 상태로 다루지 않으면 도구가 갇히거나 취소 뒤의 사건이 새 동작이 된다
+- 켜진 도구는 문서가 아니라 화면 쪽의 상태다. 도구 전환은 명령이고, 잠깐 쓰는 도구는 스택으로 다룬다
+
+## 참고 문서
+
+- [Microsoft Learn: DragDetect(누른 뒤 끌기 사각형을 벗어나는지 지켜보기, SM_CXDRAG와 SM_CYDRAG)](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-dragdetect)
+- [Microsoft Learn: WM_CAPTURECHANGED(마우스 캡처를 잃는 창이 받는 메시지)](https://learn.microsoft.com/en-us/windows/win32/inputdev/wm-capturechanged)
+- [W3C: Pointer Events(pointercancel이 나는 경우, 포인터 캡처)](https://www.w3.org/TR/pointerevents/)
+- [Blender Python API: Operator(모달 연산자: invoke와 modal, 확정과 취소의 보기)](https://docs.blender.org/api/4.0/bpy.types.Operator.html)
+- [Blender Python API: Operator Return Items(RUNNING_MODAL, FINISHED, CANCELLED의 뜻)](https://docs.blender.org/api/4.1/bpy_types_enum_items/operator_return_items.html)
+- [Adobe: Spring-loaded tool shortcuts(단축키를 누르고 있는 동안만 도구 바꾸기)](https://helpx.adobe.com/photoshop/desktop/get-started/set-up-toolbars-panels/spring-loaded-shortcuts.html)

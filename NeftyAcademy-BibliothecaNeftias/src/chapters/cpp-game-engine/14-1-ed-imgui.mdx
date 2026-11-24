@@ -1,0 +1,144 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '즉시 모드 GUI: 위젯을 객체로 들고 있지 않고 매 프레임 함수 호출로 그리기, hot과 active로 입력 처리';
+
+엔진의 편집기와 디버그 창에는 버튼, 슬라이더, 목록이 수백 개 필요합니다. 보통의 GUI 라이브러리는 위젯 객체를 만들어 나무로 붙여 두고, 값이 바뀌면 콜백으로 알려 주는 **보존 모드**입니다. 게임 데이터와 위젯 상태를 늘 맞춰 줘야 하고, 객체를 만들고 지우는 코드가 많습니다. **즉시 모드 GUI**는 반대로, 위젯을 들고 있지 않고 매 프레임 "지금 버튼 하나 그려, 눌렸으면 알려 줘"라는 함수 호출로 화면 전체를 다시 그립니다. 게임이 이미 매 프레임 화면을 다시 그리니 잘 맞습니다.
+
+## 버튼과 슬라이더 하나씩
+
+마우스 입력 6프레임을 미리 적어 두고, 글자 화면에 그려 봅니다.
+
+```cpp
+#include <algorithm>
+#include <print>
+#include <string>
+#include <vector>
+
+// 글자 화면에 그리는 아주 작은 즉시 모드 GUI
+// (화면 글자는 한 칸짜리 ASCII만 쓴다)
+struct Input { int mx, my; bool down; };
+struct Ui {
+    std::vector<std::string> screen;
+    Input in{}, prev{};
+    int hot = 0, active = 0;            // 마우스가 올라간 위젯, 잡고 있는 위젯
+    int cursor_y = 0;
+
+    void begin(Input i) {
+        prev = in; in = i; hot = 0; cursor_y = 0;
+        screen.assign(5, std::string(30, ' '));
+    }
+    void end() { if (!in.down) active = 0; }
+    bool inside(int x, int y, int w) const {
+        return in.my == y && in.mx >= x && in.mx < x + w;
+    }
+    void put(int x, int y, const std::string& s) {
+        screen[y].replace(x, s.size(), s);
+    }
+
+    // 위젯은 함수 호출 한 번: 그리고, 입력을 처리하고, 결과를 돌려준다
+    bool button(int id, const std::string& label) {
+        int y = cursor_y++, w = int(label.size()) + 2;
+        if (inside(0, y, w)) hot = id;
+        if (hot == id && in.down && !prev.down) active = id;
+        bool clicked = active == id && !in.down && prev.down && hot == id;
+        put(0, y, (active == id ? "[" : hot == id ? "<" : " ") + label +
+                      (active == id ? "]" : hot == id ? ">" : " "));
+        return clicked;
+    }
+    bool slider(int id, const std::string& label, float& v, float lo, float hi) {
+        int y = cursor_y++, x0 = 10, w = 12;
+        if (inside(x0, y, w)) hot = id;
+        if (hot == id && in.down && !prev.down) active = id;
+        bool changed = false;
+        if (active == id) {             // 잡고 있으면 칸 밖으로 나가도 따라간다
+            float t = std::clamp(float(in.mx - x0) / (w - 1), 0.f, 1.f);
+            float nv = lo + t * (hi - lo);
+            changed = nv != v; v = nv;
+        }
+        int knob = int((v - lo) / (hi - lo) * (w - 1) + 0.5f);
+        std::string bar(w, '-'); bar[knob] = 'O';
+        put(0, y, label); put(x0, y, bar);
+        put(x0 + w + 1, y, std::to_string(int(v)));
+        return changed;
+    }
+};
+
+int main() {
+    Ui ui;
+    float speed = 3;
+    int spawned = 0;
+    std::vector<Input> mouse = {
+        {1, 0, false},  // 버튼 위에 올림
+        {1, 0, true},   // 누름
+        {1, 0, false},  // 뗌 -> 클릭
+        {13, 1, true},  // 슬라이더 잡기
+        {25, 1, true},  // 칸 밖 오른쪽으로 끌기
+        {25, 1, false}, // 놓기
+    };
+    for (std::size_t f = 0; f < mouse.size(); ++f) {
+        ui.begin(mouse[f]);
+        if (ui.button(1, "Spawn")) ++spawned;
+        ui.slider(2, "Speed", speed, 0, 20);
+        ui.put(0, 2, "Enemies " + std::to_string(spawned));
+        ui.end();
+        std::println("프레임 {} 마우스({},{}){}", f, mouse[f].mx, mouse[f].my,
+                     mouse[f].down ? " 누름" : "");
+        for (int y = 0; y < 3; ++y) {
+            auto& row = ui.screen[y];
+            std::println("  |{}", row.substr(0, row.find_last_not_of(' ') + 1));
+        }
+    }
+}
+```
+
+```text
+프레임 0 마우스(1,0)
+  |<Spawn>
+  |Speed     --O--------- 3
+  |Enemies 0
+프레임 1 마우스(1,0) 누름
+  |[Spawn]
+  |Speed     --O--------- 3
+  |Enemies 0
+프레임 2 마우스(1,0)
+  |[Spawn]
+  |Speed     --O--------- 3
+  |Enemies 1
+프레임 3 마우스(13,1) 누름
+  | Spawn
+  |Speed     ---O-------- 5
+  |Enemies 1
+프레임 4 마우스(25,1) 누름
+  | Spawn
+  |Speed     -----------O 20
+  |Enemies 1
+프레임 5 마우스(25,1)
+  | Spawn
+  |Speed     -----------O 20
+  |Enemies 1
+```
+
+## 위젯 = 함수 호출
+
+`if (ui.button(1, "Spawn")) ++spawned;` 한 줄이 버튼의 전부입니다. 버튼 객체도, 콜백 등록도, "버튼을 지울 때" 처리도 없습니다. 이 줄을 실행하지 않는 프레임에는 버튼이 없는 것입니다. 그래서 "적이 선택되었을 때만 체력 슬라이더를 보여 준다"는 `if (selected) ui.slider(...)`로 끝납니다. 슬라이더는 `speed` 변수를 직접 고칩니다. 화면에 보이는 값과 게임 데이터가 같은 변수라서 둘을 맞추는 코드가 필요 없습니다.
+
+## hot과 active
+
+위젯을 들고 있지 않아도 상호작용에 필요한 상태는 단 두 개입니다.
+
+- **hot**: 마우스가 지금 올라가 있는 위젯. 매 프레임 비웠다가 위젯을 그리면서 채웁니다. 프레임 0에서 버튼이 `<Spawn>`으로 강조되었습니다
+- **active**: 마우스를 누른 채 잡고 있는 위젯. 누르는 순간 hot인 위젯이 active가 되고, 마우스를 뗄 때 풀립니다
+
+**클릭**은 "active인 채로, 그 위에서 마우스를 뗐다"입니다. 프레임 1에 누르고 프레임 2에 떼서 적이 하나 생겼습니다. 누른 채 밖으로 나가서 떼면 클릭이 아니므로, 사람이 실수로 누른 것을 취소할 수 있습니다. 슬라이더는 active인 동안 마우스가 칸을 벗어나도 계속 따라갑니다. 프레임 4에서 마우스가 칸 오른쪽 바깥(25)으로 나갔지만 슬라이더는 최댓값 20에 붙었습니다. 잡은 위젯이 마우스를 놓치지 않는 것이 active의 역할입니다.
+
+위젯마다 `id`가 필요한 이유도 여기에 있습니다. 프레임을 건너 같은 위젯임을 알아보는 유일한 방법이기 때문입니다. 실제 라이브러리는 레이블 문자열과 반복문 번호 등을 해시해 id를 자동으로 만듭니다.
+
+<Note>
+게임 개발에서 가장 널리 쓰이는 즉시 모드 GUI 라이브러리는 Dear ImGui입니다. 엔진은 그리기 명령 목록(정점, 텍스처, 자르기 사각형)만 받아서 [「그래픽 API 감싸기」](#/read/cpp-game-engine/rend-abstraction)의 렌더러로 그리면 됩니다. 즉시 모드는 개발 도구에는 아주 편하지만, 애니메이션이 많고 화려한 게임 메뉴나 접근성 지원이 필요한 UI에는 보존 모드 UI 시스템을 따로 두는 경우가 많습니다.
+</Note>
+
+## 정리
+
+- 즉시 모드 GUI는 위젯을 객체로 들고 있지 않고, 매 프레임 함수 호출로 그리면서 입력 결과를 돌려받는다
+- 위젯이 게임 변수를 직접 고치므로 동기화 코드가 없고, 보일지 말지는 그 호출을 할지 말지로 정한다
+- 상호작용 상태는 hot과 active 둘뿐이고, 프레임을 건너 위젯을 알아보려고 id를 쓴다

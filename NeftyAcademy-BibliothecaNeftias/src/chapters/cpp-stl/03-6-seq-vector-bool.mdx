@@ -1,0 +1,117 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '비트로 채운 특수화, 대리 객체가 만드는 어긋남, 스레드에서의 경쟁, 대신 쓸 것';
+
+`std::vector<bool>`은 이름과 달리 `bool`의 `vector`가 아닙니다. 표준은 이 한 타입만 따로 정의해서 원소 하나를 **1비트**에 담게 했습니다. 메모리는 여덟 분의 일이 되지만, 그 값으로 `vector`의 약속 몇 가지가 깨집니다.
+
+## 원소가 아니라 대리 객체
+
+비트 하나에는 주소가 없습니다. 그래서 `flags[0]`은 `bool&`를 돌려줄 수 없고, "몇째 워드의 몇째 비트"를 기억하는 작은 **대리 객체**를 돌려줍니다.
+
+```cpp
+#include <print>
+#include <vector>
+
+int main()
+{
+    std::vector<int> numbers = {1, 2};
+    auto n = numbers[0];        // int. 사본이다
+    numbers[0] = 99;
+    std::println("{}", n);
+
+    std::vector<bool> flags = {true, false};
+    auto f = flags[0];          // bool 이 아니다. 그 비트를 가리키는 대리 객체다
+    bool copy = flags[0];       // bool 로 받으면 사본이다
+    flags[0] = false;
+    std::println("{} {}", static_cast<bool>(f), copy);
+
+    for (auto&& bit : flags)    // auto& 는 컴파일되지 않는다. auto&& 로 받는다
+        bit = true;
+    std::println("{} {}", static_cast<bool>(flags[0]), static_cast<bool>(flags[1]));
+}
+```
+
+```text
+1
+false true
+true true
+```
+
+`auto n = numbers[0]`은 사본을 만들었고 원본을 고쳐도 그대로 1입니다. 똑같이 생긴 `auto f = flags[0]`은 원본을 따라 `false`가 되었습니다. `auto`가 `bool`이 아니라 대리 객체의 타입으로 추론되었기 때문입니다.
+
+되지 않는 것들은 이렇습니다.
+
+```cpp nocheck
+std::vector<bool> flags = {true, false};
+
+bool& first = flags[0];         // 오류: 대리 객체는 bool& 에 묶이지 않는다
+bool* p = &flags[0];            // 오류: bool 의 주소가 아니다
+for (auto& bit : flags) {}      // 오류
+bool* raw = flags.data();       // 오류: data() 가 없다
+
+template <typename T>
+void reset(std::vector<T>& v)   // 다른 타입에서는 멀쩡한 템플릿이
+{
+    for (T& x : v)              // T 가 bool 이면 여기서 깨진다
+        x = T{};
+}
+```
+
+```text
+error: cannot bind non-const lvalue reference of type 'std::_Bit_reference&'
+       to an rvalue of type 'std::_Bit_iterator::reference'
+```
+
+GCC 14가 `for (auto& bit : flags)`에 내는 오류입니다. `_Bit_reference`가 그 대리 객체입니다. 마지막의 템플릿이 가장 아픕니다. `std::vector<T>`를 받는 일반 코드를 쓸 때마다 "`T`가 `bool`이면?"을 따로 생각해야 합니다.
+
+## 스레드에서의 경쟁
+
+표준 컨테이너는 **서로 다른 원소**를 여러 스레드가 동시에 고쳐도 됩니다. `vector<bool>`만 예외입니다. 이웃한 비트가 같은 워드에 들어 있어서, 한 비트를 고치려면 워드를 읽고, 바꾸고, 다시 써야 하기 때문입니다.
+
+```cpp nosan
+#include <cstddef>
+#include <print>
+#include <thread>
+#include <vector>
+
+int main()
+{
+    std::vector<bool> flags(2);
+    auto toggle = [&](std::size_t index) {
+        for (int i = 0; i < 20'000'001; ++i)
+            flags[index] = !flags[index];       // 홀수 번 뒤집는다
+    };
+    std::thread a(toggle, 0);       // 0번만 건드린다
+    std::thread b(toggle, 1);       // 1번만 건드린다
+    a.join();
+    b.join();
+    std::println("{} {}", static_cast<bool>(flags[0]), static_cast<bool>(flags[1]));
+}
+```
+
+```text nocheck
+false true
+```
+
+홀수 번 뒤집었으니 둘 다 `true`여야 합니다. 2코어 x86-64 서버에서 여덟 번 돌렸을 때 `true true`는 두 번뿐이었습니다. `flags`를 `std::vector<char>`로 바꾸면 언제나 맞습니다. `-fsanitize=thread`로 빌드하면 `WARNING: ThreadSanitizer: data race`가 바로 나옵니다.
+
+<Note kind="warn">
+"스레드마다 자기 칸에 완료 표시를 한다"는 흔한 구조가 `std::vector<bool> done(n)`으로는 틀린 코드입니다. 겉으로는 서로 다른 원소를 쓰는 것처럼 보여서 눈으로는 찾기 어렵습니다.
+</Note>
+
+## 대신 쓸 것
+
+| 필요한 것 | 쓰는 것 |
+| --- | --- |
+| 평범한 참·거짓의 배열 | `std::vector<char>` 또는 `std::vector<std::uint8_t>` |
+| 길이가 컴파일할 때 정해진 비트 묶음 | [`std::bitset<N>`](#/read/cpp-stl/voc-bitset) |
+| 스레드마다 다른 칸을 고친다 | `std::vector<char>`, 또는 `std::atomic<bool>`의 배열 |
+| 수백만 개의 표시, 메모리가 모자라다 | `std::vector<bool>` (알고 쓴다) |
+
+메모리 차이는 분명합니다. 표시 100만 개가 `vector<char>`로는 1MB, `vector<bool>`로는 125KB입니다. 소수를 거르는 체나 "이 블록을 썼는가" 같은 큰 표시 배열에서는 그 값을 합니다. `flip()`으로 전부 뒤집는 멤버도 따로 있습니다. 문제는 이 타입이 있다는 것이 아니라, `vector`라는 이름으로 `vector`가 아닌 것이 온다는 점입니다.
+
+## 정리
+
+- `std::vector<bool>`은 비트로 채운 별개의 타입이다. `[]`는 `bool&`가 아니라 대리 객체를 돌려준다
+- `auto x = flags[i]`는 사본이 아니고, `bool&`, `bool*`, `data()`는 없다. 일반 템플릿이 여기서 깨진다
+- 서로 다른 원소라도 여러 스레드가 고치면 경쟁이다. 평범한 쓰임에는 `std::vector<char>`를 쓴다

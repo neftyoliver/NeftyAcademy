@@ -1,0 +1,130 @@
+import { Figure, Note } from 'paragoniahex';
+import { QtMock } from '../../components/QtMock';
+
+export const summary = '대화 상자: QDialog와 단추 상자, exec와 open의 차이, 표준 메시지 상자, 파일·입력 대화 상자';
+export const terms = [
+  'QDialog', 'QMessageBox', 'QFileDialog', 'QInputDialog', 'QColorDialog', 'QDialogButtonBox',
+  'QFontDialog',
+];
+
+"저장하지 않은 변경이 있습니다", "새 그림의 크기는?", "어느 파일을 열까요?" 같은 질문은 잠깐 떠서 답을 받고 사라지는 창, **대화 상자**로 묻습니다. Qt는 직접 만드는 `QDialog`와, 자주 쓰는 질문을 위한 표준 대화 상자들을 제공합니다. 중요한 것은 "답을 기다리는 방법"입니다. 그 자리에서 멈춰 기다릴 수도 있고, 답이 오면 알려 달라고 할 수도 있습니다.
+
+<Figure caption="예제의 SizeDialog 배치 그림">
+  <QtMock title="새 그림 크기" width={260} labelWidth={44} spec="label 폭 | spin 1024; label 높이 | spin 600; space | button OK | button Cancel" />
+</Figure>
+
+## 세 가지 대화 상자
+
+```cpp qt=Widgets
+#include <QApplication>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QFormLayout>
+#include <QLineEdit>
+#include <QMessageBox>
+#include <QPushButton>
+#include <QSpinBox>
+#include <QTimer>
+#include <cstdio>
+#include <functional>
+
+// 직접 만든 대화 상자: 값을 묻고 확인/취소를 받는다
+class SizeDialog : public QDialog {
+public:
+    QSpinBox* w = new QSpinBox;
+    QSpinBox* h = new QSpinBox;
+    explicit SizeDialog(QWidget* parent) : QDialog(parent) {
+        setWindowTitle("새 그림 크기");
+        w->setRange(1, 4096); w->setValue(800);
+        h->setRange(1, 4096); h->setValue(600);
+        auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok |
+                                             QDialogButtonBox::Cancel);
+        connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+        auto* form = new QFormLayout(this);
+        form->addRow("폭", w);
+        form->addRow("높이", h);
+        form->addRow(buttons);
+    }
+};
+
+// 지금 떠 있는 모달 대화 상자를 사람 대신 조작한다
+void later(std::function<void()> f) { QTimer::singleShot(0, f); }
+
+int main(int argc, char** argv) {
+    QApplication app(argc, argv);
+    QWidget main;
+    main.show();
+
+    // 1) exec(): 닫힐 때까지 여기서 기다린다(안에서 이벤트 루프가 따로 돈다)
+    SizeDialog dlg(&main);
+    later([&] { dlg.w->setValue(1024); dlg.accept(); });
+    int r = dlg.exec();
+    const char* answer = r == QDialog::Accepted ? "확인" : "취소";
+    std::printf("exec 결과: %s, 크기 %dx%d\n",
+                answer, dlg.w->value(), dlg.h->value());
+
+    // 2) 표준 메시지 상자: 단추 하나를 사람 대신 누른다
+    later([] {
+        auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+        std::printf("떠 있는 상자: '%s'\n", qPrintable(box->text()));
+        box->button(QMessageBox::Discard)->click();
+    });
+    auto choice = QMessageBox::question(
+        &main, "닫기", "저장하지 않은 변경이 있습니다.",
+        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
+        QMessageBox::Save);
+    std::printf("고른 단추: %s\n",
+                choice == QMessageBox::Discard ? "버리기" : "다른 것");
+
+    // 3) open(): 바로 돌아오고, 결과는 시그널로 받는다(권장)
+    auto* d2 = new SizeDialog(&main);
+    d2->setAttribute(Qt::WA_DeleteOnClose);
+    QObject::connect(d2, &QDialog::finished, [&](int res) {
+        std::printf("finished(%s) 받음\n",
+                    res == QDialog::Rejected ? "취소" : "확인");
+        app.quit();
+    });
+    d2->open();
+    std::printf("open()은 바로 돌아옴\n");
+    later([d2] { d2->reject(); });
+    return app.exec();
+}
+```
+
+```text
+exec 결과: 확인, 크기 1024x600
+떠 있는 상자: '저장하지 않은 변경이 있습니다.'
+고른 단추: 버리기
+open()은 바로 돌아옴
+finished(취소) 받음
+```
+
+사람이 단추를 누르는 대신, 대화 상자가 뜬 직후 타이머로 값을 바꾸고 단추를 눌렀습니다.
+
+## 직접 만드는 대화 상자
+
+`QDialog`를 상속해 입력 위젯을 배치하고, 아래에 `QDialogButtonBox`를 둡니다. 단추 상자는 확인과 취소의 **순서를 플랫폼 관례에 맞게** 놓아 줍니다(Windows는 확인이 왼쪽, macOS와 GNOME은 오른쪽). `accepted`를 `accept()`에, `rejected`를 `reject()`에 이으면, Esc 키가 취소로, Enter 키가 기본 단추로 동작하는 것까지 따라옵니다.
+
+## 기다리는 두 가지 방법
+
+- **exec()**: 대화 상자를 모달로 띄우고, 닫힐 때까지 그 자리에서 돌아오지 않습니다. 안에서 **이벤트 루프가 하나 더** 돌기 때문에 창은 계속 반응합니다. 결과를 `Accepted`나 `Rejected`로 돌려주므로 코드가 위에서 아래로 읽혀 편합니다
+- **open()**: 창 모달(그 부모 창만 막음)로 띄우고 바로 돌아옵니다. 결과는 `finished(int)`나 `accepted` 시그널로 받습니다. 출력에서 "open()은 바로 돌아옴"이 결과보다 먼저 찍힌 이유입니다
+
+`exec()`의 숨은 이벤트 루프는 편하지만 위험합니다. 대화 상자가 떠 있는 동안 다른 타이머나 네트워크 응답이 처리되면서 대화 상자를 띄운 객체가 지워질 수 있고, `exec()`에서 돌아왔을 때 이미 사라진 `this`를 쓰게 됩니다. 그래서 Qt 문서는 `open()`과 시그널을 권합니다. 짧은 확인 질문 정도에만 `exec()`나 정적 함수를 씁니다. macOS에서 시트(창 위에서 내려오는 대화 상자)로 보이게 하려면 `open()`을 써야 합니다.
+
+## 표준 대화 상자
+
+- **QMessageBox**: 알림, 경고, 질문입니다. `question`, `warning`, `information` 같은 정적 함수에 단추 조합과 기본 단추를 주면, 눌린 단추를 돌려줍니다
+- **QFileDialog**: 파일 열기와 저장입니다. `getOpenFileName`은 기본적으로 플랫폼의 **네이티브** 대화 상자를 띄워 사용자에게 익숙한 화면을 보여 줍니다
+- **QInputDialog, QColorDialog, QFontDialog**: 글 한 줄, 숫자, 색, 글꼴을 묻는 작은 대화 상자입니다
+
+<Note>
+메시지 상자에 쓰는 글은 짧은 결론(text)과 자세한 설명(informativeText)으로 나누는 것이 플랫폼 지침에 맞습니다. 단추 이름도 "예/아니요"보다 "저장/버리기/취소"처럼 동작을 쓰면 사용자가 글을 읽지 않고도 고를 수 있습니다. 예제가 `Save | Discard | Cancel`을 쓴 이유입니다.
+</Note>
+
+## 정리
+
+- QDialog를 상속하고 QDialogButtonBox를 이어 직접 대화 상자를 만들며, 단추 순서와 Esc·Enter 동작은 플랫폼에 맞게 따라온다
+- exec는 닫힐 때까지 기다리며 안에서 이벤트 루프를 돌리고, open은 바로 돌아오고 결과를 시그널로 주며 이것이 권장 방식이다
+- 알림·질문은 QMessageBox, 파일은 네이티브 QFileDialog, 간단한 값은 QInputDialog 같은 표준 대화 상자를 쓴다

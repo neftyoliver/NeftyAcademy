@@ -1,0 +1,142 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '임베디드 리눅스: eglfs·linuxfb 같은 플랫폼 플러그인, 패널 화면 흉내 내기, 크로스 컴파일';
+
+공장의 조작 패널, 의료 기기, 자동차 계기판, 가전의 터치 화면에는 Qt로 만든 화면이 많습니다. 이런 기기는 대개 리눅스를 쓰지만 데스크톱과는 사정이 다릅니다. 창 관리자가 없고, 화면 하나에 앱 하나가 전원을 켤 때부터 끌 때까지 화면 전체를 씁니다. Qt는 이 차이를 [「Qt의 구성과 라이선스」](#/read/cpp-qt/start-what)에서 본 **플랫폼 플러그인**을 바꾸는 것으로 흡수합니다. 앱 코드는 데스크톱과 거의 같습니다.
+
+## 플랫폼 플러그인 고르기
+
+| 플러그인 | 그리기 | 창 | 어울리는 기기 |
+| --- | --- | --- | --- |
+| eglfs | EGL과 OpenGL ES | 화면마다 전체 화면 하나 | GPU가 있는 기기, 많은 보드의 기본값 |
+| linuxfb | 소프트웨어만 | 화면마다 전체 화면 하나 | GPU가 없는 작은 기기 |
+| wayland | 컴포지터가 합성 | 여러 개 | 앱 여럿이 화면을 나눠 쓸 때 |
+| vkkhrdisplay | Vulkan만 | 전체 화면 | 실험 단계 |
+
+플러그인은 환경 변수 `QT_QPA_PLATFORM`으로 고르고, 플러그인별 설정은 이름 뒤에 쌍점으로 이어 붙입니다. 예를 들어 `linuxfb:fb=/dev/fb1:size=800x480`은 두 번째 프레임버퍼를 800x480 화면으로 씁니다. 같은 문법을 실행 인자 `-platform`으로도 줄 수 있는데, 이쪽은 잠깐 시험할 때 씁니다.
+
+## 개발 PC에서 패널 화면 흉내 내기
+
+기기의 작은 화면에 맞춘 UI를 매번 기기에 올려 확인하기는 번거롭습니다. Qt에는 linuxfb처럼 메모리에 화면을 그리되, 그 화면을 **VNC 서버**로 내보내는 `vnc` 플랫폼 플러그인이 있습니다. 480x272 패널이 달린 기기를 흉내 내 보았습니다.
+
+```cpp qt=Gui
+// 480x272 패널이 달린 기기처럼: vnc 플랫폼 플러그인으로 화면을 흉내 낸다
+#include <QGuiApplication>
+#include <QPainter>
+#include <QRasterWindow>
+#include <QScreen>
+#include <QTimer>
+#include <cstdio>
+
+class Panel : public QRasterWindow {
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        const QRect r(QPoint(), size());   // QWindow에는 rect()가 없다
+        p.fillRect(r, QColor(20, 40, 80));
+        p.setPen(Qt::white);
+        p.setFont(QFont("sans", 28));
+        p.drawText(r, Qt::AlignCenter, "23.5 °C");
+    }
+};
+
+int main(int argc, char* argv[]) {
+    // 기기에서는 시작 스크립트가 정하는 값을, 여기서는 예제가 직접 정한다
+    qputenv("QT_QPA_PLATFORM", "vnc:size=480x272:port=5999");
+    QGuiApplication app(argc, argv);
+    QScreen* screen = app.primaryScreen();
+    std::printf("플랫폼: %s\n", qPrintable(app.platformName()));
+    std::printf("화면: %dx%d\n", screen->size().width(), screen->size().height());
+
+    Panel panel;
+    panel.setGeometry(screen->geometry());  // 6.4의 vnc는 이것이 없으면 0x0
+    panel.showFullScreen();             // 패널 앱은 화면 전체를 쓴다
+    QTimer::singleShot(500, [&] {
+        std::printf("창: %dx%d\n", panel.width(), panel.height());
+        const QImage shot = screen->grabWindow(0).toImage();   // 화면 전체
+        const QColor c = shot.pixelColor(5, 5);
+        std::printf("화면 구석 화소: %d %d %d\n", c.red(), c.green(), c.blue());
+        app.quit();
+    });
+    return app.exec();
+}
+```
+
+```text
+플랫폼: vnc
+화면: 480x272
+창: 480x272
+화면 구석 화소: 20 40 80
+```
+
+- 창 관리자가 없으니 창 장식도, 창 이동도 없습니다. 패널 앱은 `showFullScreen()`으로 화면 전체를 씁니다
+- `grabWindow(0)`은 화면 전체를 읽습니다. 구석 화소가 배경색이므로 앱이 화면을 빈틈없이 채웠음을 알 수 있습니다
+- 실행하는 동안 VNC 뷰어로 이 PC의 5999번 포트에 접속하면 기기에서 보일 화면을 그대로 볼 수 있습니다
+
+Qt Quick 앱을 linuxfb나 vnc처럼 GPU 없이 그리는 플러그인에서 돌릴 때는 `QT_QUICK_BACKEND=software`로 소프트웨어 그리기를 켜야 합니다. 이 책의 QML 예제들도 이 설정으로 검사했습니다.
+
+## eglfs의 규칙
+
+GPU가 있는 기기의 기본인 eglfs는 창 시스템 없이 EGL과 OpenGL ES로 바로 그립니다. 그 대신 지켜야 할 규칙이 있습니다.
+
+- 첫 최상위 창은 강제로 전체 화면이 되고, 그 뒤의 대화 상자나 팝업은 이 창 안에 합성됩니다
+- OpenGL 창(Qt Quick 창 포함)은 화면마다 **하나**만 가능합니다. 둘을 열거나 위젯 창과 섞으면 Qt가 오류를 내고 앱을 끝냅니다
+- 끌어 놓기처럼 데스크톱을 전제로 한 기능은 지원하지 않습니다
+
+요즘 보드에서 eglfs는 대개 리눅스의 DRM/KMS를 거쳐 화면에 출력합니다(eglfs_kms). 어느 출력 단자를 어떤 해상도로 쓸지, 화면을 몇 도 돌릴지는 `QT_QPA_EGLFS_KMS_CONFIG`가 가리키는 JSON 파일이나 `QT_QPA_EGLFS_ROTATION` 같은 환경 변수로 정합니다. 터치와 키 입력은 libinput이나 evdev로 직접 읽습니다. 참고로 linuxfb가 쓰는 fbdev는 리눅스 커널에서 사라지는 중이라, `QT_QPA_FB_DRM`을 주면 linuxfb도 DRM으로 출력합니다.
+
+## 크로스 컴파일
+
+기기의 CPU는 대개 ARM이고 빌드하기에는 느리므로, PC에서 기기용 실행 파일을 만듭니다. 필요한 것은 기기용 컴파일러(**툴체인**)와 기기의 헤더와 라이브러리를 복사해 둔 **sysroot**입니다. Qt를 쓰지 않는 작은 프로그램으로 먼저 감을 잡았습니다. 기기 대신 QEMU 사용자 모드 에뮬레이터로 실행했습니다.
+
+```bash
+aarch64-linux-gnu-g++-14 -O2 hello.cpp -o hello-arm
+file hello-arm | cut -d, -f1,2
+qemu-aarch64-static -L /usr/aarch64-linux-gnu ./hello-arm
+```
+
+```text
+hello-arm: ELF 64-bit LSB pie executable, ARM aarch64
+기기에서 실행 중: aarch64
+```
+
+`hello.cpp`는 `uname`으로 CPU 이름을 출력할 뿐인데, PC에서 그대로 빌드해 실행하면 `x86_64`가 나옵니다. Qt 앱도 원리는 같지만 Qt 6는 CMake **툴체인 파일**로 대상 기기를 알려 줍니다.
+
+```cmake
+# toolchain-aarch64.cmake: aarch64 리눅스 기기용 빌드 설정
+set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_PROCESSOR aarch64)
+set(CMAKE_SYSROOT $ENV{HOME}/sdk/sysroot)
+set(CMAKE_C_COMPILER aarch64-linux-gnu-gcc)
+set(CMAKE_CXX_COMPILER aarch64-linux-gnu-g++)
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)   # 실행할 도구는 PC의 것
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)    # 라이브러리와 헤더는 sysroot에서
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+```
+
+- Qt 자체를 기기용으로 빌드할 때는 PC용 Qt 빌드가 하나 더 있어야 합니다. moc, rcc 같은 도구는 PC에서 돌아야 하기 때문이며, 그 위치를 `QT_HOST_PATH`(configure의 `-qt-host-path`)로 알려 줍니다
+- 기기용으로 설치한 Qt의 `bin/qt-cmake`로 앱을 구성하면 Qt의 툴체인 설정이 자동으로 들어갑니다
+- 툴체인과 sysroot, 기기용 Qt를 한꺼번에 만드는 데는 Yocto와 그 Qt 계층인 meta-qt6를 많이 씁니다. Qt Company는 이것을 바탕으로 한 상용 참조 이미지(Boot2Qt)도 제공합니다
+
+## 기기에서 실행
+
+완성된 앱은 대개 systemd 서비스로 등록해 전원을 켜면 바로 뜨고, 죽으면 다시 뜨게 합니다. 플랫폼 플러그인과 그 설정도 여기서 환경 변수로 정합니다.
+
+```ini
+[Service]
+Environment=QT_QPA_PLATFORM=eglfs
+Environment=QT_QPA_EGLFS_KMS_CONFIG=/etc/panel/kms.json
+ExecStart=/opt/panel/bin/panel
+Restart=always
+```
+
+<Note>
+Qt는 입력 장치를 거르지 않고 열 수 있는 장치를 모두 읽습니다. 어떤 장치를 앱이 읽어도 되는지는 운영 체제의 권한으로 정해야 합니다. 또 기기는 사용자가 Qt를 바꿔 끼우기 어려운 형태가 많으므로, LGPL로 쓴다면 [「정적 빌드」](#/read/cpp-qt/dep-static)에서 본 라이선스 조건을 기기에서 어떻게 지킬지도 처음부터 함께 정해야 합니다.
+</Note>
+
+## 정리
+
+- 임베디드 리눅스에서는 플랫폼 플러그인(eglfs, linuxfb, wayland)을 QT_QPA_PLATFORM으로 고르며, 앱 코드는 데스크톱과 거의 같다
+- eglfs는 화면마다 전체 화면 OpenGL 창 하나만 허용하고, GPU 없이 그리는 플러그인에서 Qt Quick은 software 백엔드를 쓴다
+- 기기용 빌드는 툴체인, sysroot, CMake 툴체인 파일로 하며, Qt 자체의 크로스 빌드에는 PC용 Qt(QT_HOST_PATH)가 필요하다

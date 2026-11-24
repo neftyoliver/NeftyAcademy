@@ -1,0 +1,87 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '윈도우 실행 파일 형식 PE: MZ로 시작하는 DOS 머리, PE 서명, 구역, DLL 함수를 빌려 오는 가져오기 표';
+
+윈도우의 `.exe`와 `.dll`은 PE(Portable Executable)라는 형식입니다. [「ELF」](#/read/c-mid/exe-elf)와 하는 일은 같습니다. OS에게 무엇을 어디에 올리고 어디서 시작할지, 어떤 라이브러리가 필요한지를 알려 줍니다. 생김새는 꽤 다른데, 1980년대 DOS 시절의 흔적까지 품고 있습니다.
+
+이 쪽의 `.exe`는 리눅스에서 **MinGW-w64**(윈도우용 GCC 교차 컴파일러, 13.2)로 만들고 `x86_64-w64-mingw32-objdump`로 열어 봤습니다. 윈도우에서 실행해 보지는 못했습니다. MSVC가 만든 `.exe`도 같은 형식이지만 구역 이름과 가져오는 DLL은 조금 다릅니다.
+
+## 만들어 보기
+
+ELF 쪽에서 쓴 전역 변수 예제(`v.c`)를 그대로 윈도우용으로 컴파일합니다.
+
+```sh
+sudo apt install gcc-mingw-w64-x86-64
+x86_64-w64-mingw32-gcc -O2 -s v.c -o v.exe
+file v.exe
+```
+
+```text nocheck
+v.exe: PE32+ executable (console) x86-64, for MS Windows, 10 sections
+```
+
+`PE32+`는 64비트 PE, `console`은 명령 창에서 도는 프로그램이라는 뜻입니다. 창을 띄우는 프로그램([「윈도우: Win32」](#/read/c-basic/win-win32))은 여기가 `GUI`가 됩니다. `-s`로 디버그 정보를 뺐는데도 파일은 39,424바이트로, 리눅스용(16,064바이트)보다 큽니다. MinGW가 윈도우에 없는 C 라이브러리 기능 일부를 실행 파일 안에 넣기 때문입니다.
+
+## DOS 머리와 PE 서명
+
+파일의 맨 앞을 보면 ELF와 전혀 다릅니다.
+
+```text nocheck
+$ xxd -l 16 v.exe
+00000000: 4d5a 9000 0300 0000 0400 0000 ffff 0000  MZ..............
+$ xxd -s 0x40 -l 64 v.exe
+00000040: 0e1f ba0e 00b4 09cd 21b8 014c cd21 5468  ........!..L.!Th
+00000050: 6973 2070 726f 6772 616d 2063 616e 6e6f  is program canno
+00000060: 7420 6265 2072 756e 2069 6e20 444f 5320  t be run in DOS
+00000070: 6d6f 6465 2e0d 0d0a 2400 0000 0000 0000  mode....$.......
+$ xxd -s 0x80 -l 8 v.exe
+00000080: 5045 0000 6486 0a00                      PE..d...
+```
+
+- 맨 앞 `MZ`는 DOS 실행 파일의 표시입니다. DOS 실행 파일 형식을 설계한 마크 즈비코프스키의 머리글자라고 알려져 있습니다
+- `0x40`부터는 **DOS에서 실행하면 "This program cannot be run in DOS mode."를 찍고 끝나는** 작은 16비트 프로그램입니다. 윈도우 프로그램을 옛 DOS에서 실행했을 때를 위한 것이고, 지금도 모든 PE 파일에 들어 있습니다. [「8086에서 x86-64까지」](#/read/basics/history-x86)의 호환성 이야기가 파일 형식에도 남은 것입니다
+- DOS 머리의 `0x3C` 자리에 적힌 수(여기서는 `0x80`)가 진짜 PE 머리의 위치입니다. 그곳에 `PE\0\0` 서명이 있고, 뒤의 `64 86`은 CPU 종류(0x8664, x86-64), `0a 00`은 구역 수 10입니다
+
+## 구역
+
+```text nocheck
+$ x86_64-w64-mingw32-objdump -h v.exe
+.text  .data  .rdata  .pdata  .xdata  .bss  .idata  .CRT  .tls  .reloc
+```
+
+| PE 구역 | ELF에서 비슷한 것 | 담는 것 |
+| --- | --- | --- |
+| `.text` | `.text` | 기계어 |
+| `.rdata` | `.rodata` | 읽기 전용 자료, 문자열 상수 |
+| `.data`, `.bss` | `.data`, `.bss` | 전역 변수 |
+| `.idata` | `.dynamic`과 GOT의 일부 | 가져오기 표: 빌려 올 DLL과 함수 |
+| `.pdata`, `.xdata` | `.eh_frame` | 예외와 스택 되감기 정보 |
+| `.reloc` | 재배치 정보 | 다른 주소에 올릴 때 고칠 곳 |
+
+ELF는 구역 이름을 `.rodata`, PE는 `.rdata`로 부르는 정도의 차이고, 하는 일은 대부분 맞물립니다.
+
+## 가져오기 표
+
+PE는 필요한 DLL과 그 안의 함수를 이름으로 적은 **가져오기 표**를 둡니다. 윈도우의 로더가 실행할 때 이 표를 보고 DLL을 불러와 함수 주소를 채웁니다.
+
+```text nocheck
+$ x86_64-w64-mingw32-objdump -p v.exe | grep "DLL Name"
+    DLL Name: KERNEL32.dll
+    DLL Name: msvcrt.dll
+```
+
+`KERNEL32.dll`은 윈도우 API의 핵심 DLL로, 여기서는 `EnterCriticalSection`, `GetLastError` 같은 함수를 빌려 옵니다. `msvcrt.dll`은 윈도우에 들어 있는 옛 C 런타임으로, `malloc`, `free`, `vfprintf`, `strlen` 같은 C 라이브러리 함수를 빌려 옵니다. 리눅스의 ELF가 `NEEDED: libc.so.6`으로 C 라이브러리를 빌려 오던 것과 같은 일입니다. MSVC로 빌드하면 [「MSVC」](#/read/c-mid/cc-msvc)에서 본 `/MD` 방식에 따라 `msvcrt.dll` 대신 `VCRUNTIME140.dll`과 `ucrtbase.dll` 계열을 가져옵니다.
+
+<Note>
+리눅스의 동적 라이브러리는 실행 파일에 "어느 라이브러리에서 가져오는지"를 함수마다 묶어 두지 않고, 필요한 라이브러리 목록과 심볼 이름만 둡니다. PE는 "이 DLL에서 이 함수"를 짝지어 적습니다. 그래서 윈도우에서는 서로 다른 DLL에 같은 이름의 함수가 있어도 섞이지 않고, 리눅스에서는 먼저 찾은 쪽이 쓰입니다.
+</Note>
+
+<Note kind="tip">
+윈도우에서 PE 파일을 살펴보려면 비주얼 스튜디오에 든 `dumpbin`(`dumpbin /headers`, `dumpbin /imports`)을 개발자 명령 창에서 씁니다. LLVM의 `llvm-readobj`와 `llvm-objdump`는 ELF, PE, Mach-O를 모두 읽으니, 한 도구로 세 형식을 견주기에 좋습니다.
+</Note>
+
+## 정리
+
+- PE는 윈도우의 실행 파일 형식이고, `MZ`로 시작하는 DOS 머리와 DOS용 안내 프로그램 뒤에 `PE\0\0` 서명과 진짜 머리가 온다
+- 안은 `.text`, `.rdata`, `.data`, `.bss`처럼 ELF와 비슷한 구역으로 나뉘고, `.idata`의 가져오기 표가 빌려 올 DLL과 함수를 짝지어 적는다
+- MinGW-w64로 리눅스에서 윈도우용 `.exe`를 만들 수 있고, MSVC로 만들면 가져오는 C 런타임 DLL이 다르다

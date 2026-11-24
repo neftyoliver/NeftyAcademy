@@ -1,0 +1,142 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '블록 여럿과 블록 목록, 양 끝에 넣어도 원소가 제자리, 속도와 메모리, 쓰는 자리';
+export const terms = ['std::deque', '~deque'];
+
+`std::deque`(덱, double-ended queue)는 **앞에도 뒤에도** O(1)로 넣고 뺄 수 있는 컨테이너입니다. `vector`는 뒤에만 그렇습니다. 첨자 `d[i]`도 O(1)이어서 겉으로는 "앞에도 넣을 수 있는 `vector`"처럼 보이지만 속은 다릅니다.
+
+## 블록 여럿과 블록 목록
+
+`vector`는 한 덩어리이고, 모자라면 통째로 옮깁니다. `deque`는 **같은 크기의 블록 여럿**에 원소를 나눠 담고, 블록들의 주소를 적은 목록을 따로 둡니다.
+
+```text
+블록 목록   [ · | · | · | · ]
+              │   │   │
+              ▼   ▼   ▼
+블록        [ _ _ a b ] [ c d e f ] [ g h _ _ ]
+                  ▲ 처음                  ▲ 끝
+```
+
+앞이나 뒤가 꽉 차면 새 블록 하나를 잡아 목록에 올립니다. **이미 있는 원소는 옮기지 않습니다.** 목록이 꽉 차면 목록만 다시 잡는데, 목록에는 포인터만 있으므로 원소는 여전히 제자리입니다.
+
+```cpp
+#include <cstdint>
+#include <deque>
+#include <print>
+#include <vector>
+
+int main()
+{
+    std::deque<int> d = {1, 2, 3};
+    std::vector<int> v = {1, 2, 3};
+    const auto in_deque = reinterpret_cast<std::uintptr_t>(&d[1]);
+    const auto in_vector = reinterpret_cast<std::uintptr_t>(&v[1]);
+
+    for (int i = 0; i < 1000; ++i) {
+        d.push_front(i);        // 앞에 1000개
+        d.push_back(i);         // 뒤에 1000개
+        v.push_back(i);
+    }
+
+    // 앞에 1000개가 들어갔으니 원래의 d[1] 은 이제 d[1001] 이다
+    const auto now_deque = reinterpret_cast<std::uintptr_t>(&d[1001]);
+    const auto now_vector = reinterpret_cast<std::uintptr_t>(&v[1]);
+    std::println("deque 의 원소는 제자리인가:  {}", in_deque == now_deque);
+    std::println("vector 의 원소는 제자리인가: {}", in_vector == now_vector);
+    std::println("{} {} {}", d.front(), d[1001], d.back());
+}
+```
+
+```text
+deque 의 원소는 제자리인가:  true
+vector 의 원소는 제자리인가: false
+999 2 999
+```
+
+양 끝에 넣는 동안에는 원소를 가리키던 **포인터와 참조가 살아 있습니다.** `vector`에는 없는 성질입니다. 다만 반복자는 죽고, 가운데에 넣거나 지우면 포인터도 죽습니다. 자세한 규칙은 [「반복자 무효화 규칙」](#/read/cpp-stl/seq-invalidation)에 있습니다.
+
+## 큐로 쓰기
+
+"뒤에 넣고 앞에서 뺀다"가 `deque`의 대표적인 쓰임입니다. 최근 N개의 측정값만 들고 평균을 내는 창을 만들어 봅니다.
+
+```cpp
+#include <cstddef>
+#include <deque>
+#include <print>
+
+class MovingAverage {
+public:
+    explicit MovingAverage(std::size_t window) : window_(window) {}
+
+    double add(double sample)
+    {
+        samples_.push_back(sample);
+        sum_ += sample;
+        if (samples_.size() > window_) {
+            sum_ -= samples_.front();
+            samples_.pop_front();       // vector 였다면 전부 한 칸씩 당긴다
+        }
+        return sum_ / static_cast<double>(samples_.size());
+    }
+
+private:
+    std::size_t window_;
+    std::deque<double> samples_;
+    double sum_ = 0;
+};
+
+int main()
+{
+    MovingAverage average(3);
+    for (double sample : {20.0, 22.0, 27.0, 23.0, 19.0})
+        std::println("{:4} -> 평균 {:.2f}", sample, average.add(sample));
+}
+```
+
+```text
+  20 -> 평균 20.00
+  22 -> 평균 21.00
+  27 -> 평균 23.00
+  23 -> 평균 24.00
+  19 -> 평균 23.00
+```
+
+`std::queue`와 `std::stack`이 속에 쓰는 기본 컨테이너도 `deque`입니다([「stack과 queue」](#/read/cpp-stl/adp-stack)).
+
+## 치르는 값
+
+원소가 한 덩어리가 아니라는 데서 값이 나옵니다.
+
+| | `vector` | `deque` |
+| --- | --- | --- |
+| `data()`로 C 함수에 넘기기 | 된다 | 안 된다. 줄지어 있지 않다 |
+| 차례로 돌기 (500만 개의 합) | 2.7ms | 3.4ms |
+| 첨자 `[i]`로 돌기 | 2.5ms | 9.5ms |
+| 비어 있을 때의 힙 사용 | 0 | 576바이트 |
+
+x86-64 서버, GCC 14 `-O2`에서 잰 값입니다.
+
+- 반복자로 차례로 돌 때는 `vector`와 거의 같습니다. 블록 안에서는 줄지어 있기 때문입니다.
+- `d[i]`는 "몇째 블록의 몇째 칸"을 매번 계산하므로 네 배쯤 느렸습니다. `deque`를 돌 때는 첨자 대신 범위 기반 for나 반복자를 씁니다.
+- libstdc++의 `deque`는 비어 있어도 블록 목록(64바이트)과 블록 하나(512바이트)를 잡고 시작합니다. 작은 `deque`를 수천 개 만드는 구조에서는 이것이 큽니다.
+
+<Note>
+블록의 크기는 구현이 정합니다. libstdc++은 512바이트(`int`면 128개), libc++은 4096바이트이고, MSVC는 16바이트여서 원소가 조금만 커도 블록 하나에 원소 하나가 들어갑니다. 같은 코드의 성능이 컴파일러에 따라 크게 달라지는 컨테이너입니다.
+</Note>
+
+## 쓰는 자리
+
+| 상황 | 고르는 것 |
+| --- | --- |
+| 뒤에만 넣는다 | `vector` |
+| 앞뒤로 넣고 뺀다. 길이의 끝을 모른다 | `deque` |
+| 넣는 동안 원소의 주소가 바뀌면 안 된다 (끝에만 넣는다) | `deque` |
+| 최근 N개만 든다. N이 정해져 있다 | 고정 크기 링 버퍼 |
+
+넷째가 작은 기기에서는 더 흔합니다. 창의 크기가 정해져 있으면 [「타입이 아닌 템플릿 인자」](#/read/cpp-syntax/tpl-nontype)에서 만든 `RingBuffer`처럼 `std::array` 위에 직접 짓는 편이 할당이 전혀 없고 빠릅니다. `deque`는 길이가 얼마나 될지 모를 때의 답입니다.
+
+## 정리
+
+- `deque`는 고정 크기 블록 여럿과 블록 목록이다. 양 끝에 O(1)로 넣고 빼며, 그동안 원소는 제자리에 있다
+- 줄지어 있지 않아서 `data()`가 없고 첨자 접근이 느리다. 돌 때는 반복자로 돈다
+- 길이를 모르는 큐에 쓴다. 길이가 정해진 창은 링 버퍼가 낫다

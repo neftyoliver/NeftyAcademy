@@ -1,0 +1,106 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '소비자 이름을 붙이는 법과 31바이트의 한도, 이름이 없을 때의 물음표, 좋은 이름, 이름이 못 하는 일';
+export const terms = ['gpiod_request_config_set_consumer'];
+
+소비자 이름은 요청에 붙이는 명찰입니다. 줄이 구는 방식은 조금도 바꾸지 않습니다. 그런데도 한 쪽을 들여 다루는 까닭은, 줄이 엉뚱하게 움직이거나 요청이 busy로 실패했을 때 그 줄을 누가 쥐고 있는지 알려 주는 단서가 이것 하나뿐이기 때문입니다.
+
+## 이름 붙이기
+
+```c gpiosim=quiet
+// 소비자 이름이 줄 정보에 어떻게 남는지 본다: 없을 때, 있을 때, 너무 길 때
+#include <gpiod.h>
+#include <stdio.h>
+#include <string.h>
+
+enum { LINE = 17 };                          // GPIO 17, 헤더의 핀 11
+
+// 줄을 그 이름으로 쥐었다가, 줄 정보에 남은 이름을 찍고 놓는다
+static void hold_as(struct gpiod_chip* chip, const char* consumer) {
+    struct gpiod_line_config* config = gpiod_line_config_new();
+    struct gpiod_request_config* request_config = nullptr;
+    if (consumer) {                          // 이름이 없으면 request_config도 없이
+        request_config = gpiod_request_config_new();
+        if (request_config)
+            gpiod_request_config_set_consumer(request_config, consumer);
+    }
+    unsigned int offset = LINE;
+    struct gpiod_line_request* request = nullptr;
+    if (config &&
+        gpiod_line_config_add_line_settings(config, &offset, 1, nullptr) == 0)
+        request = gpiod_chip_request_lines(chip, request_config, config);
+    gpiod_request_config_free(request_config);
+    gpiod_line_config_free(config);
+    if (!request) {
+        perror("요청");
+        return;
+    }
+    struct gpiod_line_info* info = gpiod_chip_get_line_info(chip, LINE);
+    if (info) {
+        const char* seen = gpiod_line_info_get_consumer(info);
+        printf("%2zu  %s\n", seen ? strlen(seen) : 0, seen ? seen : "(nullptr)");
+        gpiod_line_info_free(info);
+    }
+    gpiod_line_request_release(request);
+}
+
+int main(void) {
+    struct gpiod_chip* chip = gpiod_chip_open("/dev/gpiochip0");
+    if (!chip) {
+        perror("/dev/gpiochip0");
+        return 1;
+    }
+    hold_as(chip, nullptr);
+    hold_as(chip, "greenhouse-fan");
+    hold_as(chip, "greenhouse-controller-fan-relay-driver");
+    gpiod_chip_close(chip);
+}
+```
+
+```text
+ 1  ?
+14  greenhouse-fan
+31  greenhouse-controller-fan-relay
+```
+
+- **`gpiod_request_config_set_consumer`**: `request_config`에 이름을 적고, 그것을 요청할 때 넘깁니다. 출력의 왼쪽 숫자는 줄 정보에 남은 이름의 길이입니다
+- **이름 없이 요청하면 `?`가 남는다**: 첫 줄입니다. 커널이 빈 이름 대신 물음표를 적어 둡니다. `gpioinfo`에 `consumer="?"`인 줄이 보이면 이름을 붙이지 않은 프로그램이 쥐고 있는 것입니다
+- **31바이트에서 잘린다**: 셋째 줄입니다. 넘치는 이름은 오류 없이 앞의 31바이트만 남습니다
+- **요청 하나에 이름 하나**: 한 요청으로 쥔 줄은 모두 같은 이름을 답니다. 줄마다 다른 이름을 붙이려면 요청을 나눕니다
+- **쥔 채로는 바꿀 수 없다**: 이름은 요청할 때 정해집니다. 바꾸려면 놓고 다시 요청합니다
+
+## 좋은 이름
+
+- **누구의 것인지와 무엇에 쓰는지**: `greenhouse-fan`처럼 프로그램과 역할이 함께 읽히게 짓습니다. 읽는 사람은 대개 급한 사람입니다. 어느 프로그램을 멈춰야 하는지가 이름에서 보여야 합니다
+- **영문자와 숫자로 짓는다**: 한글은 한 자가 3바이트라 열 자면 한도가 차고, 잘릴 때 글자 가운데가 끊겨 깨진 글자가 남습니다
+- **같은 프로그램을 여럿 띄운다면**: 이름에 번호나 역할을 넣어 서로 가릅니다
+- **도구의 기본 이름**: `gpioset`, `gpioget`, `gpiomon`은 제 이름을 소비자 이름으로 씁니다. 스크립트에서 여럿을 띄울 때는 `-C`로 바꿔 줍니다([「gpioset과 gpioget」](#/read/libgpiod/tl-set-get))
+- **커널의 드라이버도 이름을 단다**: `gpioinfo`에 보이는 `led0`이나 `cam1_regulator` 같은 것이 그것입니다. 그런 줄은 프로그램이 아니라 커널이 쥐고 있습니다
+
+## 이름이 하지 못하는 일
+
+- **줄을 나눠 쓰게 해 주지 않는다**: 같은 이름으로 요청해도 이미 쥐인 줄은 busy입니다. 줄의 임자는 이름이 아니라 요청입니다
+- **겹쳐도 막지 않는다**: 서로 다른 프로그램이 같은 이름을 써도 커널은 가리지 않습니다. 이름으로 임자를 확신할 수는 없습니다
+- **권한이 아니다**: 이름을 보고 무엇을 허락하거나 막는 장치는 없습니다
+
+## 이름을 읽는 쪽
+
+- **셸에서**: `gpioinfo`의 `consumer=` 칸입니다([「gpiodetect와 gpioinfo」](#/read/libgpiod/tl-detect)). 쥐이고 놓이는 것을 따라가려면 `gpionotify -F "%E %l %C"`를 씁니다
+- **프로그램에서**: 줄 정보의 `gpiod_line_info_get_consumer`입니다([「줄 정보 읽기」](#/read/libgpiod/ch-info)). 요청이 busy로 실패했을 때 이것을 읽어 오류 글귀에 넣습니다([「이미 쓰이는 줄」](#/read/libgpiod/rq-busy))
+- **`request_config`에 든 또 하나**: 커널이 에지 이벤트를 쌓아 두는 버퍼의 크기도 이 객체에 적습니다([「이벤트 버퍼」](#/read/libgpiod/ed-buffer))
+
+<Note>
+예제는 이 책의 흉내 칩에서 돌린 것입니다. 이름이 31바이트에서 잘린다는 것은 libgpiod 2.2.4의 소스에서, 이름 없는 요청에 커널이 `?`를 적는다는 것은 리눅스 커널의 gpiolib 소스에서 읽어 흉내 칩이 같게 굴도록 했습니다. `led0`과 `cam1_regulator`는 libgpiod 문서에 실린 4 Model B의 예에 나오는 이름입니다. 진짜 머리 파일로 x86-64와 aarch64에서 컴파일되는지 따로 확인했고, 보드에서 돌려 보지는 못했습니다.
+</Note>
+
+## 정리
+
+- 소비자 이름은 `gpiod_request_config_set_consumer`로 붙이고, 줄 정보와 `gpioinfo`에 나온다. 동작은 바꾸지 않는다
+- 31바이트에서 잘리고, 붙이지 않으면 `?`가 남는다. 프로그램과 역할이 읽히는 영문 이름을 쓴다
+- 이름은 임자를 짐작하게 해 줄 뿐이다. 줄을 나눠 쓰게 하지도, 무엇을 막지도 않는다
+
+## 참고 문서
+
+- [libgpiod 문서(request config의 함수: 소비자 이름과 이벤트 버퍼의 크기)](https://libgpiod.readthedocs.io/)
+- [libgpiod 문서: Command-line tools(4 Model B의 gpioinfo 예에 나오는 소비자 이름들)](https://libgpiod.readthedocs.io/en/master/gpio_tools.html)
+- [리눅스 커널 소스: gpiolib.c(이름 없이 요청한 줄에 붙는 이름)](https://git.zx2c4.com/linux-rng/plain/drivers/gpio/gpiolib.c)

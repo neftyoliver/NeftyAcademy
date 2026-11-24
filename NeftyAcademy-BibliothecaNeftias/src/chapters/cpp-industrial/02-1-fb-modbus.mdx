@@ -1,0 +1,153 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'Modbus RTU와 TCP: 네 데이터 영역과 기능 코드, RTU 프레임과 CRC, libmodbus, 흔한 함정';
+export const terms = [
+  'modbus_close', 'modbus_connect', 'modbus_free', 'modbus_get_float_abcd',
+  'modbus_get_float_cdab', 'modbus_mapping_free', 'modbus_mapping_new', 'modbus_mapping_t',
+  'modbus_new_rtu', 'modbus_new_tcp', 'modbus_read_registers', 'modbus_receive', 'modbus_reply',
+  'modbus_set_debug', 'modbus_set_response_timeout', 'modbus_set_slave', 'modbus_strerror',
+  'modbus_t', 'modbus_tcp_accept', 'modbus_tcp_listen', 'modbus_write_bit',
+  'modbus_write_register',
+];
+
+Modbus는 1979년 Modicon이 자기 PLC를 위해 만든 프로토콜인데, 단순하고 공개되어 있어서 지금도 가장 널리 쓰이는 산업용 프로토콜입니다. 온도 조절기, 인버터, 전력계, 유량계처럼 작은 장비는 대개 Modbus를 지원합니다. 산업용 통신을 처음 짜 본다면 거의 틀림없이 Modbus부터 만나게 됩니다.
+
+## 데이터 모델
+
+Modbus 장비는 네 가지 표로 된 메모리를 가진 것처럼 보입니다. 클라이언트(예전 말로 마스터)가 요청하고 서버(슬레이브)인 장비가 답합니다.
+
+| 영역 | 크기 | 접근 | 기능 코드 |
+| --- | --- | --- | --- |
+| 코일 | 1비트 | 읽기·쓰기 | 01 읽기, 05·15 쓰기 |
+| 이산 입력 | 1비트 | 읽기만 | 02 |
+| 입력 레지스터 | 16비트 | 읽기만 | 04 |
+| 보유 레지스터 | 16비트 | 읽기·쓰기 | 03 읽기, 06·16 쓰기 |
+
+어느 주소에 무엇이 있는지는 장비마다 다르며, 장비 설명서의 **레지스터 맵** 표가 알려 줍니다. "레지스터 0은 현재 온도(0.1도 단위), 1은 설정 온도" 같은 식입니다.
+
+전송 방식은 둘입니다. **RTU**는 RS-485 같은 직렬선 위에서 바이너리 프레임을 주고받으며, 프레임 끝에 CRC-16을 붙이고 프레임 사이의 침묵 시간(3.5문자 길이)으로 프레임을 구분합니다. 한 선에 장비를 247대까지 달 수 있고 장비 주소로 구분합니다. **TCP**는 이더넷 위에서 502번 포트를 쓰며, CRC 대신 7바이트 MBAP 머리를 앞에 붙입니다.
+
+## 프레임 만들기와 libmodbus
+
+RTU 요청 하나를 손으로 만들어 CRC를 계산한 뒤, 오픈 소스 라이브러리 libmodbus로 TCP 서버(장비 역할)와 클라이언트를 한 프로그램에서 돌렸습니다. 502번 포트는 관리자 권한이 필요해서 1502번을 썼습니다.
+
+```cpp flags=-I/usr/include/modbus,-lmodbus
+// Modbus: RTU 프레임을 손으로 만들고, libmodbus로 TCP 서버와 클라이언트를 돌린다
+#include <modbus.h>
+#include <cerrno>
+#include <cstdint>
+#include <cstdio>
+#include <thread>
+#include <vector>
+
+// Modbus RTU의 CRC-16 (다항식 0xA001, 초깃값 0xFFFF)
+uint16_t crc16(const uint8_t* p, size_t n) {
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < n; ++i) {
+        crc ^= p[i];
+        for (int b = 0; b < 8; ++b)
+            crc = (crc & 1) ? (crc >> 1) ^ 0xA001 : crc >> 1;
+    }
+    return crc;
+}
+
+void printHex(const char* label, const uint8_t* p, size_t n) {
+    std::printf("%s", label);
+    for (size_t i = 0; i < n; ++i) std::printf(" %02X", p[i]);
+    std::printf("\n");
+}
+
+int main() {
+    // 1) RTU: 장치 1번의 보유 레지스터 0번부터 2개를 읽는 요청
+    std::vector<uint8_t> rtu = {0x01, 0x03, 0x00, 0x00, 0x00, 0x02};
+    const uint16_t crc = crc16(rtu.data(), rtu.size());
+    rtu.push_back(crc & 0xFF);                   // CRC는 낮은 바이트가 먼저
+    rtu.push_back(crc >> 8);
+    printHex("RTU 요청:", rtu.data(), rtu.size());
+
+    // 2) TCP: 같은 프로그램 안에 서버(장비 역할)를 띄운다
+    // 코일 8, 레지스터 10
+    modbus_mapping_t* map = modbus_mapping_new(8, 0, 10, 0);
+    map->tab_registers[0] = 235;                 // 온도 23.5도(0.1도 단위)
+    map->tab_registers[1] = 600;                 // 설정 온도 60.0도
+    map->tab_registers[2] = 1;                   // 운전 모드
+    map->tab_registers[4] = 0x4049;              // 실수 3.14159(0x40490FD0)를
+    map->tab_registers[5] = 0x0FD0;              // 두 레지스터에 높은 쪽부터
+    modbus_t* server = modbus_new_tcp("127.0.0.1", 1502);
+    const int listenFd = modbus_tcp_listen(server, 1);
+    std::thread device([&] {
+        int fd = listenFd;
+        modbus_tcp_accept(server, &fd);
+        uint8_t query[MODBUS_TCP_MAX_ADU_LENGTH];
+        int n;
+        while ((n = modbus_receive(server, query)) > 0)
+            modbus_reply(server, query, n, map);  // 요청을 맵에 적용하고 답한다
+    });
+
+    modbus_t* client = modbus_new_tcp("127.0.0.1", 1502);
+    modbus_set_slave(client, 1);
+    if (modbus_connect(client) == -1) { std::puts("연결 실패"); return 1; }
+
+    uint16_t regs[3];
+    modbus_set_debug(client, TRUE);              // 오가는 바이트를 보여 준다
+    modbus_read_registers(client, 0, 3, regs);   // 기능 코드 03
+    modbus_set_debug(client, FALSE);
+    std::printf("온도 %.1f도, 설정 %.1f도, 모드 %u\n",
+                regs[0] / 10.0, regs[1] / 10.0, regs[2]);
+
+    // 기능 코드 06: 설정 온도를 65.0도로
+    modbus_write_register(client, 1, 650);
+    modbus_write_bit(client, 0, 1);              // 기능 코드 05: 코일 0(히터) 켬
+    std::printf("장비 쪽 메모리: 설정 %u, 히터 코일 %u\n", map->tab_registers[1],
+                map->tab_bits[0]);
+
+    uint16_t two[2];                             // 실수 하나를 두 레지스터로 읽는다
+    modbus_read_registers(client, 4, 2, two);
+    std::printf("레지스터 4,5 = %04X %04X → ABCD로 %.5f, CDAB로 %.3g\n",
+                two[0], two[1], modbus_get_float_abcd(two),
+                modbus_get_float_cdab(two));
+
+    if (modbus_read_registers(client, 100, 1, regs) == -1)   // 없는 주소
+        std::printf("주소 100 읽기: %s\n", modbus_strerror(errno));
+
+    modbus_close(client);
+    modbus_free(client);
+    device.join();                               // 연결이 끊기면 서버 루프가 끝난다
+    modbus_close(server);
+    modbus_free(server);
+    modbus_mapping_free(map);
+}
+```
+
+```text
+RTU 요청: 01 03 00 00 00 02 C4 0B
+[00][01][00][00][00][06][01][03][00][00][00][03]
+Waiting for a confirmation...
+<00><01><00><00><00><09><01><03><06><00><EB><02><58><00><01>
+온도 23.5도, 설정 60.0도, 모드 1
+장비 쪽 메모리: 설정 650, 히터 코일 1
+레지스터 4,5 = 4049 0FD0 → ABCD로 3.14159, CDAB로 2.05e-29
+주소 100 읽기: Illegal data address
+```
+
+- **RTU 프레임**: 장비 주소 `01`, 기능 코드 `03`, 시작 주소 `0000`, 개수 `0002`에 CRC `C4 0B`가 붙었습니다. 주소와 값은 높은 바이트가 먼저인데, CRC만은 낮은 바이트가 먼저입니다
+- **TCP 요청**: 디버그 출력의 `[..]`가 보낸 바이트입니다. 앞의 7바이트가 MBAP 머리(거래 번호 `0001`, 프로토콜 `0000`, 뒤따르는 길이 `0006`, 장비 번호 `01`)이고, 그 뒤는 RTU와 같은 요청 본문입니다
+- **응답**: `<..>`가 받은 바이트입니다. 바이트 수 `06` 뒤에 `00EB`(235), `0258`(600), `0001`이 옵니다. 값을 0.1도 단위의 정수로 주고받는 것이 Modbus 장비의 흔한 관례입니다
+- **예외 응답**: 없는 주소를 읽자 장비가 예외 코드 2(잘못된 데이터 주소)로 답했고, libmodbus는 이를 `errno`로 알려 줍니다
+
+## 흔한 함정
+
+- **주소 표기**: 설명서에 "40001"이라고 적힌 레지스터는 보유 레지스터 영역(4)의 1번째, 곧 프로토콜 주소 0입니다. 1을 빼야 하는지 장비마다 확인합니다
+- **32비트 값의 순서**: Modbus는 16비트 레지스터 안의 바이트 순서만 정하고, 두 레지스터를 어떤 순서로 이어 32비트를 만들지는 정하지 않습니다. 위에서 같은 두 레지스터가 ABCD 순서로는 3.14159, CDAB 순서로는 엉뚱한 값이 되었습니다. 장비 설명서에서 순서를 확인하고, 아는 값을 하나 읽어 검증합니다
+- **한 번에 하나**: RTU 선 위에서는 요청 하나에 응답 하나가 끝나야 다음 요청을 보낼 수 있고, 한 번에 읽을 수 있는 레지스터는 125개까지입니다. 무엇을 얼마나 자주 읽을지는 [「폴링 설계」](#/read/cpp-industrial/plc-polling)에서 다룹니다
+- **보안이 없다**: 기본 Modbus에는 인증도 암호화도 없어서, 네트워크에 닿는 누구나 값을 쓸 수 있습니다. TLS를 쓰는 Modbus/TCP Security(802번 포트)가 있지만 지원하는 장비가 많지 않으므로, 네트워크를 나누어 지킵니다
+
+<Note>
+libmodbus는 LGPL 2.1 라이선스이고 RTU(`modbus_new_rtu`)와 TCP를 같은 함수로 다룹니다. 응답 제한 시간은 `modbus_set_response_timeout`으로 정하는데, 장비가 꺼져 있을 때 프로그램 전체가 그만큼 멈추지 않도록 통신은 제어 루프와 다른 스레드에서 돌리는 것이 보통입니다.
+</Note>
+
+## 정리
+
+- Modbus는 코일, 이산 입력, 입력 레지스터, 보유 레지스터의 네 영역을 기능 코드로 읽고 쓰는 단순한 요청·응답 프로토콜이다
+- RTU는 직렬선 위의 바이너리 프레임에 CRC-16을 붙이고, TCP는 502번 포트에서 MBAP 머리를 붙인다
+- 주소 표기의 1 차이, 32비트 값의 레지스터 순서, 한 번에 하나뿐인 요청, 보안 부재를 늘 확인한다

@@ -1,0 +1,110 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'PLC의 구조와 스캔 주기: 입출력 이미지, 타이머, 스캔보다 짧은 펄스, 태스크와 감시';
+
+PLC와 통신하는 프로그램을 짜려면 PLC가 안에서 어떻게 도는지 알아야 합니다. 그래야 "값을 썼는데 왜 바로 안 바뀌지?", "카운터가 왜 실제보다 적지?" 같은 질문에 답할 수 있습니다.
+
+## 하드웨어와 메모리
+
+PLC는 CPU 모듈, 전원 모듈, 그리고 입출력 모듈(디지털 입력·출력, 아날로그 입력·출력, 고속 카운터, 통신)을 랙이나 레일에 꽂아 구성합니다. 원격 입출력 장치를 [「EtherCAT」](#/read/cpp-industrial/fb-ethercat)이나 PROFINET으로 멀리 둘 수도 있습니다. CPU 안의 메모리는 대략 세 부분으로 볼 수 있습니다.
+
+- **입력 이미지와 출력 이미지**: 입출력 모듈의 값을 비춰 둔 메모리입니다. 지멘스 계열에서는 `I0.0`, `Q0.0` 같은 주소로 부릅니다
+- **작업 메모리**: 프로그램이 쓰는 변수입니다. 비트 메모리(`M`)와 데이터 블록(`DB`), 로크웰 계열에서는 이름이 붙은 태그입니다
+- **프로그램**: IEC 61131-3 언어로 쓰고 PC의 개발 도구에서 내려받은 코드입니다
+
+## 스캔 주기
+
+PLC 프로그래머는 루프를 쓰지 않습니다. 실행 환경이 정해진 주기마다 ① 모든 입력을 읽어 입력 이미지에 복사하고 ② 프로그램을 처음부터 끝까지 한 번 실행하고 ③ 출력 이미지를 출력 모듈에 한꺼번에 쓰고 ④ 통신과 진단 같은 뒷일을 합니다. [「게임 루프와 고정 시간 간격」](#/read/cpp-game-engine/arch-loop)의 게임 루프와 닮았습니다. 작은 PLC 실행기를 만들어 스캔 주기를 바꿔 가며 돌려 보았습니다.
+
+```cpp
+// 작은 PLC 실행기: 입력 이미지 → 프로그램 → 출력 이미지를 정해진 주기로 되풀이한다
+#include <cstdio>
+#include <initializer_list>
+
+struct Field {                       // 바깥 세상(배선된 센서와 모터)
+    bool startButton(int t) const { return t >= 100 && t < 160; }
+    // 3ms 펄스
+    bool partSensor(int t) const { return t % 37 >= 20 && t % 37 < 23; }
+    bool motor = false;
+};
+
+class TON {                          // IEC 61131-3 켜짐 지연 타이머
+    bool lastIn = false;
+    int since = 0;
+public:
+    bool Q = false;
+    int ET = 0;                      // 경과 시간(ms)
+    void operator()(bool in, int pt, int now) {   // now: PLC의 시계
+        if (in && !lastIn) since = now;
+        lastIn = in;
+        ET = in ? (now - since < pt ? now - since : pt) : 0;
+        Q = in && ET >= pt;
+    }
+};
+
+class R_TRIG {                       // 상승 에지
+    bool last = false;
+public:
+    bool operator()(bool clk) { const bool q = clk && !last; last = clk; return q; }
+};
+
+class Plc {
+    struct { bool start, part; } I{};            // 입력 이미지
+    struct { bool motor; } Q{};                  // 출력 이미지
+    bool running = false;
+    TON startDelay;
+    R_TRIG startEdge, partEdge;
+public:
+    int count = 0;
+    void scan(Field& f, int t) {
+        I.start = f.startButton(t);              // 1) 입력을 한꺼번에 읽어 둔다
+        I.part = f.partSensor(t);
+        if (startEdge(I.start)) running = true;  // 2) 프로그램은 이미지만 본다
+        startDelay(running, 200, t);             //    200ms 경고음 뒤 모터를 켠다
+        Q.motor = startDelay.Q;
+        if (partEdge(I.part)) ++count;
+        f.motor = Q.motor;                       // 3) 출력을 한꺼번에 쓴다
+    }
+};
+
+int main() {
+    for (int scanMs : {10, 7, 2}) {
+        Field field;
+        Plc plc;
+        int motorOnAt = -1;
+        for (int t = 0; t < 1000; t += scanMs) {
+            plc.scan(field, t);
+            if (field.motor && motorOnAt < 0) motorOnAt = t;
+        }
+        int real = 0;
+        for (int t = 1; t < 1000; ++t)           // 1ms마다 보면 놓치지 않는다
+            real += field.partSensor(t) && !field.partSensor(t - 1);
+        std::printf("스캔 %2dms: 모터 켜짐 %dms, 셈 %d개 / 실제 %d개\n",
+                    scanMs, motorOnAt, plc.count, real);
+    }
+}
+```
+
+```text
+스캔 10ms: 모터 켜짐 300ms, 셈 8개 / 실제 27개
+스캔  7ms: 모터 켜짐 308ms, 셈 12개 / 실제 27개
+스캔  2ms: 모터 켜짐 300ms, 셈 27개 / 실제 27개
+```
+
+- **이미지는 한 스캔 동안 그대로**: 프로그램은 실제 배선이 아니라 스캔 처음에 찍어 둔 입력 이미지만 봅니다. 스캔 도중에 센서가 바뀌어도 이번 스캔의 계산은 일관되고, 출력도 끝에서 한꺼번에 바뀝니다. 통신으로 PLC에 쓴 값도 다음 스캔에서야 프로그램에 보입니다
+- **타이머는 시계로 잰다**: `TON`은 스캔 수가 아니라 PLC의 시계로 시간을 재므로 10ms든 2ms든 시작 200ms 뒤인 300ms에 모터가 켜졌습니다. 다만 타이머를 확인하는 것도 스캔 때뿐이어서, 7ms 주기에서는 8ms 늦은 308ms에 켜졌습니다. 시간 정밀도는 스캔 주기를 넘을 수 없습니다
+- **스캔보다 짧은 펄스는 놓친다**: 3ms짜리 펄스를 10ms마다 보면 펄스가 마침 그 순간에 걸릴 때만 보입니다. 27개 중 8개만 셌습니다. 펄스의 켜진 시간과 꺼진 시간이 모두 스캔 주기보다 길어야 확실히 셀 수 있습니다. 빠른 신호는 스캔을 줄이는 대신 고속 카운터 모듈이나 입력 인터럽트로 받는 것이 보통입니다
+
+## 태스크와 감시
+
+실제 PLC는 프로그램을 여러 **태스크**로 나눕니다. 모션 제어는 2ms 주기, 일반 논리는 10ms, 통신과 기록은 100ms처럼 주기를 달리하고, 입력이 바뀌거나 시각이 되면 도는 이벤트 태스크도 둡니다. 그리고 한 스캔이 설정한 최대 시간을 넘으면 **감시 타이머**가 PLC를 STOP으로 보내고 출력을 끕니다. 무한 루프 하나가 장비를 제멋대로 움직이게 두는 것보다 멈추는 편이 안전하기 때문입니다.
+
+<Note>
+PC에서 이 구조를 그대로 C++로 짜는 일도 많습니다. 실시간 커널 위의 주기 스레드가 입력을 읽고, 논리를 실행하고, 출력을 쓰는 소프트 PLC나 전용 제어기가 그렇습니다. 그때도 "주기 안에서는 이미지만 본다", "타이머는 시계로 잰다", "한 주기가 너무 길면 안전하게 멈춘다"는 세 원칙은 그대로입니다. 주기 스레드를 만드는 방법은 [「주기 작업」](#/read/cpp-industrial/rt-cyclic)에서 봅니다.
+</Note>
+
+## 정리
+
+- PLC는 입력 이미지를 읽고, 프로그램을 한 번 실행하고, 출력 이미지를 쓰는 스캔을 정해진 주기로 되풀이한다
+- 프로그램은 한 스캔 동안 바뀌지 않는 이미지만 보며, 타이머는 시계로 재지만 정밀도는 스캔 주기에 묶인다
+- 스캔보다 짧은 펄스는 놓치므로 고속 카운터나 인터럽트로 받고, 태스크로 주기를 나누며, 감시 타이머가 너무 긴 스캔을 막는다

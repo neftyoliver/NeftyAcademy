@@ -1,0 +1,289 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '부를 수 있는 것을 담는 네 타입, 할당이 일어나는 크기, 가리키기만 하는 function_ref, bind_front';
+export const terms = [
+  'std::function', 'move_only_function', 'function_ref', 'std::invoke', 'std::bind', 'bind_front',
+  'bad_function_call', 'copyable_function',
+];
+
+[「std::function과 그 비용」](#/read/cpp-syntax/lam-function)에서 타입이 서로 다른 람다들을 `std::function` 한 타입에 담았고, 그 값으로 할당과 간접 호출을 치른다는 것을 보았습니다. C++23과 C++26이 이 자리에 타입을 셋 더 놓았습니다. 넷을 나란히 놓고, 언제 어느 것을 쓰는지 정리합니다.
+
+## 네 타입
+
+| 타입 | 담은 것을 | 복사 | 들어온 판 |
+| --- | --- | --- | --- |
+| `std::function<R(Args…)>` | 소유한다 | 된다 | C++11 |
+| `std::move_only_function<R(Args…)>` | 소유한다 | 안 된다. 옮기기만 | C++23 |
+| `std::copyable_function<R(Args…)>` | 소유한다 | 된다 | C++26 |
+| `std::function_ref<R(Args…)>` | **가리키기만** 한다 | 된다 (포인터 둘) | C++26 |
+
+GCC 14에는 앞의 둘이 있습니다. 뒤의 둘은 GCC 16부터입니다.
+
+`std::move_only_function`은 이름 그대로 `std::unique_ptr`를 잡은 람다처럼 **복사할 수 없는 것**도 담습니다. 그리고 호출 연산자의 성질을 타입에 적을 수 있습니다.
+
+```cpp
+#include <functional>
+#include <memory>
+#include <print>
+#include <utility>
+#include <vector>
+
+int main()
+{
+    // 서명에 const 와 noexcept 를 적는다: "불러도 상태가 안 바뀌고, 던지지 않는다"
+    std::move_only_function<int(int) const noexcept> twice =
+        [factor = std::make_unique<int>(2)](int x) noexcept { return x * *factor; };
+    std::println("{}", twice(21));
+
+    // 한 번 실행하고 버릴 작업들의 줄
+    std::vector<std::move_only_function<void()>> jobs;
+    auto buffer = std::make_unique<int[]>(1024);
+    jobs.push_back([data = std::move(buffer)] {
+        std::println("버퍼를 쓴다 {}", data[0]);
+    });
+    jobs.push_back([] { std::println("LED 를 켠다"); });
+    for (auto& job : jobs)
+        job();
+
+    std::function<int(int)> empty;          // 아무것도 담지 않았다
+    try {
+        empty(1);
+    } catch (const std::bad_function_call&) {
+        std::println("빈 std::function 을 불렀다");
+    }
+}
+```
+
+```text
+42
+버퍼를 쓴다 0
+LED 를 켠다
+빈 std::function 을 불렀다
+```
+
+`std::function`은 `const`인 채로도 속의 것을 고치며 부를 수 있고(오래된 설계의 흠입니다), 비어 있을 때 부르면 예외를 던집니다. `std::move_only_function`은 서명대로만 부를 수 있고, 비어 있을 때 부르는 것은 정의되지 않은 동작입니다. 작업 큐, 콜백 보관처럼 **담아 두었다 나중에 부르는** 새 코드에는 `move_only_function`을 먼저 씁니다. 복사가 꼭 필요할 때만 `std::function`입니다.
+
+## 할당이 일어나는 크기
+
+소유하는 타입들은 담을 것이 작으면 자기 안에 두고, 크면 힙에 둡니다. 그 경계를 재 봅니다.
+
+```cpp
+#include <array>
+#include <cstdlib>
+#include <functional>
+#include <new>
+#include <print>
+
+static int allocations = 0;
+void* operator new(std::size_t n)
+{
+    ++allocations;
+    if (void* p = std::malloc(n))
+        return p;
+    throw std::bad_alloc{};
+}
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+
+template <typename Function, std::size_t Bytes>
+int allocations_for()
+{
+    const std::array<char, Bytes> captured{};
+    allocations = 0;
+    Function f = [captured] { return static_cast<int>(captured[0]); };
+    return allocations + f() * 0;
+}
+
+int main()
+{
+    using F = std::function<int()>;
+    using M = std::move_only_function<int()>;
+    std::println("sizeof: function {}, move_only_function {}", sizeof(F),
+                 sizeof(M));
+    std::println("캡처   function   move_only_function");
+    std::println("{:3}바이트 {:5} {:10}", 8, allocations_for<F, 8>(),
+                 allocations_for<M, 8>());
+    std::println("{:3}바이트 {:5} {:10}", 16, allocations_for<F, 16>(),
+                 allocations_for<M, 16>());
+    std::println("{:3}바이트 {:5} {:10}", 24, allocations_for<F, 24>(),
+                 allocations_for<M, 24>());
+    std::println("{:3}바이트 {:5} {:10}", 32, allocations_for<F, 32>(),
+                 allocations_for<M, 32>());
+}
+```
+
+```text
+sizeof: function 32, move_only_function 40
+캡처   function   move_only_function
+  8바이트     0          0
+ 16바이트     0          0
+ 24바이트     1          0
+ 32바이트     1          1
+```
+
+GCC 14, 64비트의 결과입니다. `std::function`은 포인터 둘(16바이트)까지, `std::move_only_function`은 셋(24바이트)까지 할당 없이 담습니다. 경계는 구현마다 다릅니다. 람다가 `this` 하나와 값 한둘을 잡는 정도면 대개 안에 들어갑니다. `std::string`이나 `std::vector`를 값으로 잡으면 넘습니다. 타이머나 인터럽트 뒤처리처럼 할당이 일어나면 안 되는 길에서 콜백을 만든다면, 잡는 것의 크기를 `sizeof`로 확인해 둡니다.
+
+## 가리키기만 하는 function_ref
+
+함수가 콜백을 **받아서 그 안에서 부르기만** 하고 보관하지 않는다면, 소유할 까닭이 없습니다. 인자를 `const std::function<…>&`로 받으면 람다를 넘길 때마다 `std::function`이 새로 만들어지고, 크면 할당까지 일어납니다. `std::function_ref`는 부를 것을 가리키는 포인터 둘뿐입니다. GCC 14에 없으므로 뼈대를 직접 만들어 봅니다.
+
+```cpp
+#include <cstdlib>
+#include <functional>
+#include <memory>
+#include <new>
+#include <print>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+static int allocations = 0;
+void* operator new(std::size_t n)
+{
+    ++allocations;
+    if (void* p = std::malloc(n))
+        return p;
+    throw std::bad_alloc{};
+}
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+
+template <typename Signature>
+class FunctionRef;
+
+template <typename R, typename... Args>
+class FunctionRef<R(Args...)> {
+public:
+    template <typename F>
+        requires std::is_invocable_r_v<R, F&, Args...>
+    FunctionRef(F& callable) noexcept
+        : object_(std::addressof(callable)),            // 1. 부를 것의 주소
+          // 2. 그 타입으로 되돌려 부르는 함수
+          call_([](void* object, Args... args) -> R {
+              F& callable = *static_cast<F*>(object);
+              return std::invoke(callable, std::forward<Args>(args)...);
+          })
+    {
+    }
+
+    R operator()(Args... args) const
+    {
+        return call_(object_, std::forward<Args>(args)...);
+    }
+
+private:
+    void* object_;
+    R (*call_)(void*, Args...);
+};
+
+int sum_if(const std::vector<int>& values, FunctionRef<bool(int)> keep)
+{
+    int total = 0;
+    for (int v : values)
+        if (keep(v))
+            total += v;
+    return total;
+}
+
+using Keep = std::function<bool(int)>;
+
+int sum_if_function(const std::vector<int>& values, const Keep& keep)
+{
+    int total = 0;
+    for (int v : values)
+        if (keep(v))
+            total += v;
+    return total;
+}
+
+int main()
+{
+    const std::vector<int> values = {1, 2, 3, 4, 5, 6};
+    const long low = 2;
+    const long high = 5;
+    const long step = 1;
+    auto in_range = [low, high, step](int v) {
+        return v >= low && v <= high && step == 1;
+    };
+
+    allocations = 0;
+    const int a = sum_if(values, in_range);
+    std::println("FunctionRef:   합 {}, 할당 {}번, 인자의 크기 {}", a, allocations,
+                 sizeof(FunctionRef<bool(int)>));
+
+    allocations = 0;
+    const int b = sum_if_function(values, in_range);
+    std::println("std::function: 합 {}, 할당 {}번, 인자의 크기 {}", b, allocations,
+                 sizeof(std::function<bool(int)>));
+}
+```
+
+```text
+FunctionRef:   합 14, 할당 0번, 인자의 크기 16
+std::function: 합 14, 할당 1번, 인자의 크기 32
+```
+
+`FunctionRef`는 람다의 주소와, "그 주소를 원래 타입으로 되돌려 부르는 함수"의 포인터를 듭니다. [`std::string_view`](#/read/cpp-stl/str-view)가 글자에 하는 일을 호출에 하는 타입이고, 약점도 같습니다. 가리키는 람다보다 오래 살면 안 됩니다. 인자로 받아 그 함수 안에서만 쓰고, 멤버에 보관하지 않습니다.
+
+<Note>
+위의 것은 원리를 보이려는 뼈대입니다. 이름 있는 객체만 받고, `const`와 `noexcept`를 서명에 적을 수 없습니다. C++26의 `std::function_ref`는 임시 람다와 함수 포인터도 받습니다. 그 전에 실제 코드에서 쓸 것이면 `tl::function_ref` 같은 검증된 한 파일짜리 구현을 가져다 쓰는 편이 낫습니다.
+</Note>
+
+## invoke와 bind_front
+
+부를 수 있는 것에는 함수, 람다, 멤버 함수 포인터, 멤버 변수 포인터가 있고 부르는 문법이 서로 다릅니다. `std::invoke`는 그것을 하나로 맞춰 줍니다. `std::bind_front`는 앞쪽 인자를 미리 채워 둔 새 호출 객체를 만듭니다.
+
+```cpp
+#include <functional>
+#include <print>
+#include <string>
+
+struct Motor {
+    int id = 3;
+    void set_speed(int percent) { std::println("모터 {} 속도 {}%", id, percent); }
+};
+
+void log_event(const std::string& level, int code)
+{
+    std::println("[{}] {}", level, code);
+}
+
+int main()
+{
+    Motor motor;
+    std::invoke(&Motor::set_speed, motor, 40);          // motor.set_speed(40)
+    std::println("{}", std::invoke(&Motor::id, motor)); // motor.id
+
+    // 객체를 미리 묶는다
+    const auto set = std::bind_front(&Motor::set_speed, &motor);
+    set(75);
+
+    // 첫 인자를 미리 채운다
+    const auto warn = std::bind_front(log_event, "warn");
+    warn(7);
+}
+```
+
+```text
+모터 3 속도 40%
+3
+모터 3 속도 75%
+[warn] 7
+```
+
+멤버 함수를 콜백으로 넘길 때 `std::bind_front(&Motor::set_speed, &motor)`는 람다 `[&motor](int p) { motor.set_speed(p); }`와 같은 일을 합니다. 옛 `std::bind`와 자리 표시(`_1`, `_2`)는 읽기 어려워서 새 코드에서는 쓰지 않습니다. 람다나 `bind_front`가 그 자리를 대신합니다.
+
+## 고르기
+
+| 상황 | 쓰는 것 |
+| --- | --- |
+| 콜백을 받아 그 자리에서 부른다. 자주 불리는 함수다 | 템플릿 인자, 또는 `function_ref` |
+| 콜백을 보관했다 나중에 부른다 | `std::move_only_function` |
+| 보관한 콜백을 복사해야 한다 | `std::function` |
+| C 라이브러리에 넘긴다 | 함수 포인터와 `void*` |
+
+## 정리
+
+- 담아 둘 것은 `move_only_function`, 복사가 필요하면 `function`, 받아서 부르기만 하면 가리키는 `function_ref`
+- 소유하는 타입은 포인터 두셋 크기까지는 안에 담고 넘으면 할당한다. 경계는 구현마다 다르다
+- `std::invoke`는 부르는 문법을 하나로 맞추고, `std::bind_front`는 앞 인자를 미리 채운다

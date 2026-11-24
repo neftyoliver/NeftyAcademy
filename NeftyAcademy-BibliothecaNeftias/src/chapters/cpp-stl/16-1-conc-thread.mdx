@@ -1,0 +1,178 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '스레드를 만들고 기다리기, join을 잊으면 생기는 일과 jthread, 복사되는 인자, stop_token, 경합';
+export const terms = [
+  'std::thread', '~thread', 'jthread', 'std::this_thread', 'this_thread::sleep_for',
+];
+
+[「실행 정책」](#/read/cpp-stl/alg-parallel)에서는 라이브러리가 스레드를 대신 굴렸습니다. 여기서는 스레드를 직접 만듭니다. 이 챕터는 맛보기입니다. 스레드 하나를 띄우고, 함께 쓰는 자료를 지키고, 결과를 받아 오는 데까지만 다루고, 그 너머는 [C++ 고급](#/read/cpp-advanced/thr-jthread)에서 봅니다.
+
+## 만들고 기다리기
+
+`std::thread`의 생성자에 함수와 인자를 주면 그 순간 새 스레드가 그 함수를 돌리기 시작합니다. `join()`은 그 스레드가 끝날 때까지 기다립니다.
+
+```cpp
+#include <cstddef>
+#include <functional>
+#include <numeric>
+#include <print>
+#include <thread>
+#include <vector>
+
+void sum_range(const std::vector<int>& data, std::size_t begin, std::size_t end,
+               long long& out)
+{
+    long long total = 0;
+    for (std::size_t i = begin; i < end; ++i)
+        total += data[i];
+    out = total;        // 스레드마다 자기 칸에만 쓴다
+}
+
+int main()
+{
+    std::vector<int> data(1'000'000);
+    std::iota(data.begin(), data.end(), 1);
+    const std::size_t half = data.size() / 2;
+    long long first = 0;
+    long long second = 0;
+
+    std::thread a(sum_range, std::cref(data), 0, half, std::ref(first));
+    std::thread b(sum_range, std::cref(data), half, data.size(), std::ref(second));
+    a.join();
+    b.join();
+    std::println("{} + {} = {}", first, second, first + second);
+}
+```
+
+```text
+125000250000 + 375000250000 = 500000500000
+```
+
+두 스레드가 같은 `data`를 **읽기만** 하고, 결과는 **서로 다른 변수**에 씁니다. 그래서 잠금 없이 안전합니다. 여러 스레드가 읽기만 하는 것은 언제나 괜찮습니다. 문제는 적어도 하나가 쓸 때 생깁니다.
+
+리눅스에서 GCC로 빌드할 때는 `-pthread`를 붙입니다. 요즘 glibc에서는 없어도 링크되지만, 붙여 두면 어디서나 됩니다.
+
+## join을 잊으면: jthread
+
+`std::thread` 객체가 `join()`도 `detach()`도 하지 않은 채 사라지면 프로그램은 `std::terminate`로 **즉시 끝납니다.** 중간에 `return`하거나 예외가 지나가도 마찬가지입니다. C++20의 `std::jthread`는 소멸자에서 스스로 `join`합니다.
+
+```cpp
+#include <print>
+#include <string>
+#include <thread>
+
+void append_mark(std::string& shared, std::string copied)
+{
+    copied += "!";      // 복사본을 고친다. 원본은 그대로다
+    shared += "!";
+}
+
+int main()
+{
+    std::string shared = "공유";
+    std::string original = "원본";
+    {
+        std::jthread worker(append_mark, std::ref(shared), original);
+    }   // 여기서 저절로 join 한다
+    std::println("[{}] [{}]", shared, original);
+    std::println("{} {}", sizeof(std::thread), sizeof(std::jthread));
+}
+```
+
+```text
+[공유!] [원본]
+8 16
+```
+
+새 코드는 `std::jthread`를 씁니다. [자원을 소멸자가 정리한다](#/read/cpp-syntax/class-dtor)는 원칙을 스레드에 적용한 것입니다.
+
+이 예제는 인자가 넘어가는 방식도 보여 줍니다. 스레드 생성자는 인자를 **복사해서** 새 스레드로 가져갑니다. 함수가 참조로 받더라도 그렇습니다. 원본을 고치게 하려면 `std::ref`로 [참조임을 밝혀야](#/read/cpp-stl/voc-refwrap) 합니다. 기본이 복사인 것은 안전장치입니다. 스레드가 부른 쪽의 지역 변수보다 오래 살 수 있기 때문입니다.
+
+`detach()`는 스레드를 떼어 놓고 잊습니다. 그 스레드가 쓰는 것이 먼저 사라지지 않는다고 보장하기 어렵고, `main`이 끝나면 하던 일을 마치지 못한 채 죽습니다. 쓸 일이 거의 없습니다.
+
+## 멈춰 달라고 알리기
+
+스레드를 밖에서 강제로 죽이는 방법은 없습니다. 죽은 스레드가 쥐고 있던 잠금과 메모리가 그대로 남기 때문입니다. 대신 **멈춰 달라고 알리고, 스레드가 스스로 끝냅니다.** `jthread`는 그 신호를 `std::stop_token`으로 넘겨줍니다.
+
+```cpp
+#include <chrono>
+#include <print>
+#include <stop_token>
+#include <thread>
+
+using namespace std::chrono_literals;
+
+int main()
+{
+    int ticks = 0;
+    {
+        // 첫 인자로 stop_token 을 받는 함수에는 jthread 가 토큰을 넣어 준다
+        std::jthread sampler([&ticks](std::stop_token stop) {
+            while (!stop.stop_requested()) {
+                ++ticks;                    // 센서를 읽는 자리
+                std::this_thread::sleep_for(1ms);
+            }
+        });
+        std::this_thread::sleep_for(20ms);
+        sampler.request_stop();             // 멈춰 달라고 알린다
+    }                                       // 끝날 때까지 기다린다
+    std::println("한 번 넘게 돌았다 {}", ticks > 0);
+}
+```
+
+```text
+한 번 넘게 돌았다 true
+```
+
+`request_stop()`을 부르지 않아도 `jthread`의 소멸자가 알리고 기다립니다. 주기적으로 도는 스레드는 모두 이 꼴로 씁니다. 루프 안에서 오래 막히는 호출이 있으면 그동안은 신호를 보지 못하므로, 기다림에는 타임아웃을 두거나 [조건 변수](#/read/cpp-stl/conc-mutex)처럼 신호에 깨어나는 것을 씁니다.
+
+## 경합
+
+두 스레드가 같은 변수를 고치면 어떻게 되는지 봅니다.
+
+```cpp
+#include <print>
+#include <thread>
+
+int main()
+{
+    int counter = 0;
+    {
+        auto work = [&counter] {
+            for (int i = 0; i < 1'000'000; ++i)
+                ++counter;
+        };
+        std::jthread a(work);
+        std::jthread b(work);
+    }
+    std::println("{}", counter);
+}
+```
+
+```text nocheck
+1301545
+```
+
+200만이 되어야 하는데 130만이 나왔고, 돌릴 때마다 다릅니다. `++counter`는 "읽고, 더하고, 쓴다"의 세 단계이고, 두 스레드의 단계가 엇갈리면 한쪽의 더하기가 사라집니다. 이것이 **자료 경합**(data race)이고, C++에서는 [정의되지 않은 동작](#/read/c-basic/ub-what)입니다.
+
+더 나쁜 일이 있습니다. 같은 코드를 `-O2`로 빌드하면 **2000000이 나옵니다.** 컴파일러가 루프를 "100만을 한 번에 더한다"로 바꿔서 엇갈릴 틈이 줄어든 것입니다. 맞는 답이 나온다고 맞는 코드가 아닙니다. 경합은 시험으로 찾기 어려워서, `-fsanitize=thread`(ThreadSanitizer)로 빌드해 돌려 보는 것이 가장 확실합니다. 고치는 법은 [다음 페이지](#/read/cpp-stl/conc-mutex)입니다.
+
+## 알아 둘 것
+
+| 사실 | 내용 |
+| --- | --- |
+| 만드는 값 | 스레드 하나를 만들고 기다리는 데 32 µs (x86-64 서버에서 잰 값). 짧은 일마다 새로 만들지 않는다 |
+| 몇 개까지 | `std::thread::hardware_concurrency()`가 코어 수를 알려 준다. 계산하는 스레드는 그보다 많아 봐야 빨라지지 않는다 |
+| 예외 | 스레드의 함수 밖으로 [예외가 나가면](#/read/cpp-stl/err-exceptions) 프로그램 전체가 `terminate`로 끝난다 |
+| 결과 | 스레드의 함수가 돌려주는 값은 버려진다. 값을 받으려면 [`future`](#/read/cpp-stl/conc-future)를 쓴다 |
+| 스레드마다 다른 변수 | [`thread_local`](#/read/cpp-syntax/life-storage) |
+
+<Note>
+스레드를 쓰기 전에 물어볼 것은 "정말 필요한가"입니다. 센서 하나를 읽고 화면을 고치는 정도는 한 스레드의 루프로 충분하고, 그쪽이 훨씬 고치기 쉽습니다. 스레드는 **기다림이 서로를 막을 때**(입력을 기다리는 동안 다른 일을 해야 한다)와 **계산이 코어 하나로 모자랄 때** 씁니다.
+</Note>
+
+## 정리
+
+- `std::jthread`는 사라질 때 스스로 멈춤을 알리고 `join`한다. `std::thread`는 `join`을 잊으면 프로그램이 끝난다
+- 스레드에 넘기는 인자는 복사된다. 참조로 넘기려면 `std::ref`를 쓰고, 그 대상이 스레드보다 오래 살게 한다
+- 여러 스레드가 읽기만 하는 것은 안전하다. 하나라도 쓰면 경합이고, 우연히 맞는 답이 나와도 틀린 코드다

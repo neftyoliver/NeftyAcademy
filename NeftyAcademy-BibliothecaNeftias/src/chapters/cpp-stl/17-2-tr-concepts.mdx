@@ -1,0 +1,229 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '콘셉트로 타입 살펴보기, 더 좁은 쪽이 이기는 오버로드, 콘셉트가 보지 못하는 뜻, 오류 메시지의 변화';
+export const terms = [
+  'same_as', 'std::integral', 'floating_point', 'convertible_to', 'std::invocable',
+  'std::predicate', 'std::regular', 'std::semiregular', 'std::copyable', 'std::movable',
+  'totally_ordered', 'equality_comparable', 'constructible_from', 'assignable_from',
+  'signed_integral', 'common_with', 'regular_invocable', 'strict_weak_order',
+  'indirect_unary_predicate', 'std::sortable',
+];
+
+[「표준 콘셉트」](#/read/cpp-syntax/con-standard)에서 `<concepts>`의 이름들을 표로 봤습니다. 콘셉트는 [특성](#/read/cpp-stl/tr-type-traits)처럼 `bool`로 값을 내므로, 실제 타입을 넣어 찍어 보면 뜻이 잡힙니다. 예상과 다른 줄이 배울 곳입니다.
+
+## 타입을 넣어 보기
+
+`movable`에서 `regular`까지는 "값처럼 다룰 수 있는 정도"의 사다리입니다.
+
+```cpp
+#include <atomic>
+#include <concepts>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <print>
+#include <string>
+
+struct Sensor {
+    int id;
+};
+
+template <typename T>
+void row(const char* name)
+{
+    std::println("{:16} {:7} {:8} {:11} {}", name, std::movable<T>,
+                 std::copyable<T>, std::semiregular<T>, std::regular<T>);
+}
+
+int main()
+{
+    std::println("{:16} {:7} {:8} {:11} {}", "", "movable", "copyable",
+                 "semiregular", "regular");
+    row<int>("int");
+    row<std::string>("string");
+    row<std::unique_ptr<int>>("unique_ptr<int>");
+    row<std::function<void()>>("function<void()>");
+    row<Sensor>("Sensor");
+    row<std::mutex>("mutex");
+    row<std::atomic<int>>("atomic<int>");
+    row<const int>("const int");
+    row<int&>("int&");
+
+    const int offset = 1;
+    auto with_capture = [offset] { return offset; };
+    auto without_capture = [] { return 1; };
+    row<decltype(with_capture)>("캡처 있는 람다");
+    row<decltype(without_capture)>("캡처 없는 람다");
+}
+```
+
+```text
+                 movable copyable semiregular regular
+int              true    true     true        true
+string           true    true     true        true
+unique_ptr<int>  true    false    false       false
+function<void()> true    true     true        false
+Sensor           true    true     true        false
+mutex            false   false    false       false
+atomic<int>      false   false    false       false
+const int        false   false    false       false
+int&             false   false    false       false
+캡처 있는 람다   false   false    false       false
+캡처 없는 람다   true    true     true        true
+```
+
+| 콘셉트 | 더해지는 요구 | 떨어진 타입과 까닭 |
+| --- | --- | --- |
+| `movable` | 이동 생성, 이동 **대입**, 교환 | `const int`(대입이 안 된다), `int&`(객체가 아니다), `mutex`와 `atomic`(옮길 수 없다) |
+| `copyable` | 복사 생성, 복사 대입 | `unique_ptr` |
+| `semiregular` | 기본 생성 | 생성자가 인자를 요구하는 타입 |
+| `regular` | `==` | `Sensor`(`==`를 정의하지 않았다), `function` |
+
+눈에 띄는 줄이 둘입니다. **캡처 있는 람다는 `movable`조차 아닙니다.** 이동 생성은 되지만 대입 연산자가 없어서입니다. 그래서 람다를 `std::vector`에 담을 수는 있어도 정렬하거나 `erase`할 수는 없습니다. 대입이 필요하면 `std::function`에 넣습니다. 캡처 없는 람다는 C++20부터 대입과 기본 생성이 되고, 함수 포인터로 바뀔 수 있어서 `==`까지 됩니다.
+
+내 타입이 `regular`인지는 한 줄로 확인해 둘 수 있습니다. `static_assert(std::regular<Point>);`를 클래스 아래에 두면, 누가 `==`를 지우거나 복사를 막는 멤버를 넣었을 때 그 자리에서 걸립니다.
+
+## 더 좁은 쪽이 이긴다
+
+같은 이름의 템플릿이 여럿 맞으면, **요구가 더 많은 쪽**이 뽑힙니다. 콘셉트끼리 "이것은 저것을 포함한다"는 관계를 컴파일러가 압니다.
+
+```cpp
+#include <concepts>
+#include <iterator>
+#include <list>
+#include <print>
+#include <vector>
+
+const char* kind(std::integral auto) { return "정수"; }
+const char* kind(std::signed_integral auto) { return "부호 있는 정수"; }
+const char* kind(std::floating_point auto) { return "실수"; }
+
+// n 칸 앞으로 가는 방법을 반복자의 능력에 따라 고른다
+template <std::input_iterator I>
+const char* how_to_advance(I) { return "++ 를 n 번"; }
+template <std::random_access_iterator I>
+const char* how_to_advance(I) { return "+= n 한 번"; }
+
+int main()
+{
+    std::println("{} / {} / {}", kind(5u), kind(5), kind(5.0));
+
+    std::vector<int> v;
+    std::list<int> l;
+    std::println("{} / {}", how_to_advance(v.begin()), how_to_advance(l.begin()));
+}
+```
+
+```text
+정수 / 부호 있는 정수 / 실수
++= n 한 번 / ++ 를 n 번
+```
+
+`5`는 `integral`도 `signed_integral`도 만족하지만 애매하다는 오류가 나지 않습니다. `signed_integral`이 `integral`을 **포함해서 정의되어** 있기 때문입니다. [반복자의 다섯 등급](#/read/cpp-stl/it-category)도 같은 방식으로 쌓여 있어서, `std::ranges::advance`나 `std::ranges::distance`는 위와 같은 오버로드로 가장 빠른 방법을 고릅니다.
+
+이 관계는 **콘셉트의 이름으로** 조건을 적었을 때만 성립합니다. 같은 조건을 타입 특성으로 풀어 적으면(`std::is_integral_v<T> && std::is_signed_v<T>`) 컴파일러는 포함 관계를 알지 못하고, 둘 다 맞는 호출은 애매하다는 오류가 됩니다. 등급을 나눠 오버로드할 때는 [콘셉트에 이름을 붙여](#/read/cpp-syntax/con-own) `&&`로 쌓습니다.
+
+## 콘셉트가 보지 못하는 것
+
+콘셉트가 확인하는 것은 **식이 컴파일되는가**입니다. 그 식이 약속대로 동작하는지는 볼 수 없습니다.
+
+```cpp
+#include <concepts>
+#include <functional>
+#include <print>
+
+int main()
+{
+    // <= 는 정렬에 쓰면 안 되는 비교다. 그래도 콘셉트는 통과한다
+    auto less_or_equal = [](int a, int b) { return a <= b; };
+    std::println("{} {}", std::strict_weak_order<std::less<>, int, int>,
+                 std::strict_weak_order<decltype(less_or_equal), int, int>);
+
+    // double 은 NaN 때문에 모든 값이 줄 세워지지 않는다
+    std::println("{}", std::totally_ordered<double>);
+
+    // 반환값이 bool 로 쓰이기만 하면 predicate 다
+    std::println("{} {}", std::predicate<bool (*)(int), int>,
+                 std::predicate<void (*)(int), int>);
+}
+```
+
+```text
+true true
+true
+true false
+```
+
+`a <= b`는 [정렬의 비교 함수로 쓰면 정의되지 않은 동작](#/read/cpp-stl/alg-sort)이지만 `std::strict_weak_order`를 통과합니다. "같은 것끼리는 `false`"라는 규칙은 문법이 아니라 **뜻**이기 때문입니다. 표준은 이런 것을 "의미상의 요구"라고 부르고, 지키는 책임을 쓰는 사람에게 둡니다.
+
+| 콘셉트 | 컴파일러가 확인하는 것 | 내가 지켜야 하는 것 |
+| --- | --- | --- |
+| `equality_comparable` | `a == b`가 컴파일된다 | 자기 자신과 같다, 대칭이다, 건너서도 같다 |
+| `strict_weak_order` | `comp(a, b)`가 `bool`로 쓰인다 | `comp(a, a)`는 거짓이다, 순서가 한결같다 |
+| `regular_invocable` | 부를 수 있다 | 같은 인자에는 같은 결과를 내고 인자를 바꾸지 않는다 |
+| `copyable` | 복사가 컴파일된다 | 복사본이 원본과 같고, 한쪽을 고쳐도 다른 쪽은 그대로다 |
+
+## 관계를 묻는 콘셉트
+
+| 콘셉트 | 뜻 | 조심할 곳 |
+| --- | --- | --- |
+| `std::same_as<T, U>` | 정확히 같다 | `const`가 다르면 다른 타입이다 |
+| `std::convertible_to<From, To>` | 암시적으로도, `static_cast`로도 바뀐다 | `explicit` 생성자뿐이면 거짓 |
+| `std::constructible_from<T, Args...>` | `T(args...)`로 만들 수 있다 | `explicit`이어도 참 |
+| `std::assignable_from<T&, U>` | `t = u`가 된다 | 왼쪽은 참조로 적는다 |
+| `std::common_with<T, U>` | 둘이 함께 바뀔 수 있는 타입이 있다 | |
+| `std::invocable<F, Args...>` | `std::invoke(f, args...)`가 된다 | 멤버 함수 포인터와 멤버 변수 포인터도 된다 |
+
+```cpp
+#include <concepts>
+#include <print>
+#include <string>
+
+struct Sensor {
+    int id;
+    double read() const { return 21.5; }
+};
+
+int main()
+{
+    std::println("{} {}", std::same_as<int, const int>,
+                 std::convertible_to<const char*, std::string>);
+    std::println("{} {}", std::constructible_from<std::string, const char*>,
+                 std::constructible_from<std::string, int>);
+    std::println("{} {}", std::assignable_from<int&, double>,
+                 std::common_with<int, double>);
+    // 멤버 함수와 멤버 변수도 "부를 수 있는 것" 이다
+    std::println("{} {}", std::invocable<decltype(&Sensor::read), Sensor>,
+                 std::invocable<decltype(&Sensor::id), Sensor*>);
+}
+```
+
+```text
+false true
+true false
+true true
+true true
+```
+
+마지막 줄이 [프로젝션](#/read/cpp-stl/rng-algorithms)에 `&Sensor::id`를 그대로 넘길 수 있는 까닭입니다. 레인지 알고리즘은 받은 것을 `std::invoke`로 부르고, `std::invoke`는 멤버 포인터를 "그 객체의 그 멤버"로 풀어 줍니다.
+
+## 오류 메시지는 나아졌나
+
+콘셉트를 쓰면 오류가 짧아진다고들 합니다. `std::list`를 정렬하려는 틀린 코드로 세어 봤습니다(GCC 14).
+
+| 코드 | 오류 출력 | 첫 줄이 말하는 것 |
+| --- | --- | --- |
+| `std::sort(l.begin(), l.end())` | 28줄 | `stl_algo.h` 안에서 `operator-`를 찾지 못했다 |
+| `std::ranges::sort(l)` | 29줄 | 부를 수 있는 `sort`가 없다. 이어서 `random_access_iterator`를 만족하지 못했다고 나온다 |
+
+줄 수는 같습니다. 달라진 것은 **내용**입니다. 앞의 것은 라이브러리 속 깊은 곳의 실패를 보여 주고 읽는 사람이 원인을 거슬러 올라가야 하지만, 뒤의 것은 "임의 접근 반복자가 아니다"라는 요구의 이름을 말해 줍니다. 오류 출력에서 `constraints not satisfied`를 찾고 그 아래의 `required for the satisfaction of`를 따라 내려가면 어긋난 요구가 나옵니다.
+
+<Note>
+내 템플릿에 콘셉트를 붙일 때는 쓰는 것만 요구합니다. 정렬만 하는 함수에 `std::regular`를 요구하면 쓸 수 있는 타입을 까닭 없이 줄입니다. 반대로 요구를 빼먹으면 예전처럼 라이브러리 속에서 오류가 납니다. 표준 알고리즘의 서명에 적힌 콘셉트(`std::sortable`, `std::indirect_unary_predicate` 등)를 읽어 보면 "이 알고리즘이 정확히 무엇을 필요로 하는가"의 본보기가 됩니다.
+</Note>
+
+## 정리
+
+- 표준 콘셉트는 `bool` 값이라 타입을 넣어 찍어 볼 수 있다. 캡처 있는 람다는 `movable`이 아니고, `==`가 없는 구조체는 `regular`가 아니다
+- 오버로드는 더 좁은 콘셉트가 이긴다. 이 관계는 조건을 콘셉트의 이름으로 적었을 때만 성립한다
+- 콘셉트는 문법만 확인한다. 비교 함수가 규칙을 지키는지 같은 뜻은 쓰는 사람의 몫이다

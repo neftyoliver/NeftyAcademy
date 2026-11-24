@@ -1,0 +1,223 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '명령 하나로 원소 여럿을 계산한다. 컴파일러가 해 줄 때와 못 할 때, 손으로 쓰는 법, CPU마다 다른 폭';
+export const terms = ['std::simd', 'std::experimental::simd', 'native_simd'];
+
+레지스터 하나에 `float` 넷, 여덟, 열여섯을 나란히 담고 명령 하나로 한꺼번에 계산하는 것이 SIMD(single instruction, multiple data)입니다. [앞의](#/read/cpp-advanced/perf-branch) [두 페이지](#/read/cpp-advanced/perf-inline)에서 컴파일러가 루프를 이것으로 바꿔 놓은 것을 몇 번 지나쳤습니다. 언제 바꿔 주고, 언제 못 하며, 그때 무엇을 할 수 있는지 봅니다.
+
+## 컴파일러가 해 주는 것
+
+```cpp nosan flags=-O3
+#include <chrono>
+#include <cstddef>
+#include <print>
+#include <span>
+#include <vector>
+
+template <typename T>
+[[gnu::always_inline]] inline void hide(T& v) { asm volatile("" : "+r"(v)); }
+
+using Floats = std::span<const float>;
+
+// y[i] += a * x[i]
+[[gnu::noinline]] void scale_add(std::span<float> y, Floats x, float a)
+{
+    for (std::size_t i = 0; i < y.size(); ++i) y[i] += a * x[i];
+}
+
+// 문턱을 넘는 원소의 수
+[[gnu::noinline]] int count_over(Floats x, float limit)
+{
+    int count = 0;
+    for (float v : x) count += (v > limit);
+    return count;
+}
+
+// 모두 더한다
+[[gnu::noinline]] float sum(Floats x)
+{
+    float total = 0;
+    for (float v : x) total += v;
+    return total;
+}
+
+template <typename F>
+double ns_each(std::size_t n, F work)
+{
+    const int rounds = 200'000;
+    const auto start = std::chrono::steady_clock::now();
+    for (int r = 0; r < rounds; ++r) work();
+    const auto end = std::chrono::steady_clock::now();
+    return std::chrono::duration<double, std::nano>(end - start).count()
+           / (static_cast<double>(n) * rounds);
+}
+
+int main()
+{
+    const std::size_t n = 4096;               // 16 KB. L1 캐시에 들어간다
+    std::vector<float> x(n), y(n, 0.0f);
+    for (std::size_t i = 0; i < n; ++i) x[i] = static_cast<float>(i % 100) * 0.25f;
+
+    long hits = 0;
+    float total = 0;
+    auto a = ns_each(n, [&] { float k = 1e-6f; hide(k); scale_add(y, x, k); });
+    auto b = ns_each(n, [&] { float k = 12; hide(k); hits += count_over(x, k); });
+    auto c = ns_each(n, [&] { auto* p = x.data(); hide(p); total += sum({p, n}); });
+    hide(hits);
+    hide(total);
+    std::println("scale_add {:.3f} ns, count_over {:.3f} ns, sum {:.3f} ns",
+                 a, b, c);
+}
+```
+
+```text nocheck
+scale_add 0.094 ns, count_over 0.104 ns, sum 0.512 ns
+```
+
+옵션을 바꿔 가며 잰 값입니다. x86-64이고 원소 하나에 든 시간입니다.
+
+| 옵션 | `scale_add` | `count_over` | `sum` |
+| --- | --- | --- | --- |
+| GCC 14 `-O2` | 0.30 ns | 0.53 ns | 0.52 ns |
+| `-O3` (SSE2, 넷씩) | 0.095 ns | 0.105 ns | 0.52 ns |
+| `-O3 -mavx2 -mfma` (여덟씩) | 0.052 ns | 0.050 ns | 0.51 ns |
+| `-O3 -march=native`, 512비트 (열여섯씩) | 0.038 ns | 0.040 ns | 0.52 ns |
+| Clang 20 `-O2` | 0.075 ns | 0.056 ns | 0.50 ns |
+
+- **넷씩 하면 3~5배, 열여섯씩 하면 8~13배입니다.** 폭에 비례하지는 않습니다.
+- **GCC의 `-O2`는 거의 하지 않습니다.** 겹침 검사나 자투리 루프가 필요하면 포기하도록 맞춰져 있습니다(`-fvect-cost-model=very-cheap`). `-O3`를 쓰거나 `-O2 -fvect-cost-model=dynamic`을 줍니다. Clang은 `-O2`에서 합니다.
+- **x86-64의 기본은 SSE2입니다.** 더 넓은 명령은 옵션으로 허락해야 씁니다. 마지막 GCC 줄에는 `-mprefer-vector-width=512`도 줬습니다.
+- **`sum`은 꿈쩍도 않습니다.** 다음 절의 이야기입니다.
+
+무엇을 했는지는 컴파일러가 알려 줍니다. Clang에서는 `-Rpass=loop-vectorize`와 `-Rpass-missed=loop-vectorize`입니다.
+
+```text nocheck
+$ g++ -O3 -fopt-info-vec-optimized -c simd.cpp
+simd.cpp:15:31: optimized: loop vectorized using 16 byte vectors
+simd.cpp:15:31: optimized:  loop versioned for vectorization because of
+    possible aliasing
+simd.cpp:15:31: optimized: loop vectorized using 8 byte vectors
+simd.cpp:22:20: optimized: loop vectorized using 16 byte vectors
+simd.cpp:30:20: optimized: loop vectorized using 16 byte vectors
+```
+
+둘째 줄은 `y`와 `x`가 [겹칠 수도 있어서](#/read/cpp-syntax/ubc-aliasing) 루프를 두 벌 만들고, 실행할 때 겹치는지 보고 고른다는 뜻입니다. 셋째 줄은 넷이 안 되는 자투리를 맡는 루프입니다. 마지막 줄은 `sum`입니다. 벡터화했다고 하지만 어셈블리를 보면 넷을 읽어 **적힌 순서대로 하나씩** 더하고, 시간도 그대로입니다. 알림만 믿지 말고 잽니다.
+
+## 순서를 바꿔도 되는가
+
+실수의 덧셈은 순서를 바꾸면 결과가 달라집니다. `0.1f` 천만 개를 더했습니다. 맞는 답은 1,000,000입니다.
+
+| 더하는 방법 | 결과 | 원소 하나에 |
+| --- | --- | --- |
+| 적힌 순서대로 | 1,087,937 | 0.51 ns |
+| 합계를 넷으로 나눠서 | 975,599.1 | 0.12 ns |
+| 합계를 여덟으로 나눠서 | 1,010,791.9 | 0.060 ns |
+
+셋이 다 다릅니다. 컴파일러는 프로그램의 결과를 바꿀 수 없으므로, 허락 없이는 첫 줄대로만 합니다. 허락하는 방법은 넓은 것부터 이렇습니다.
+
+| 방법 | 미치는 곳 |
+| --- | --- |
+| `-ffast-math` | 프로그램 전체. NaN과 무한대가 없다는 가정까지 함께 켠다 |
+| `#pragma omp simd reduction(+ : total)`와 `-fopenmp-simd` | 그 루프 하나. [OpenMP](#/read/openmp/sm-simd)의 지시문이다 |
+| [`std::reduce`](#/read/cpp-stl/alg-numeric) | 그 호출 하나. 순서를 정하지 않는 알고리즘이다 |
+| 합계 변수를 여러 개로 나눠 직접 쓴다 | 코드에 적힌 그대로 |
+
+<Note kind="warn">
+허락한 뒤에는 **옵션이 답을 바꿉니다.** `#pragma omp simd`를 붙인 루프의 결과가 `-mavx2`를 주자 975,599.1에서 1,010,791.9가 됐습니다. 실수 결과를 `==`로 견주는 테스트는 CPU를 바꾸면 깨집니다.
+</Note>
+
+## 손으로 쓰기
+
+컴파일러가 못 하는 꼴도 있습니다. 중간에 빠져나가는 루프가 그렇습니다. GCC 14와 Clang 20 모두 아래의 `first_over`를 그대로 두었습니다. Clang은 "Cannot vectorize potentially faulting early exit loop"라고 알립니다. 묶음으로 읽으면 원래 루프가 읽지 않았을 자리까지 읽게 된다는 뜻입니다. 범위 안이라는 것을 아는 사람이 직접 씁니다.
+
+```cpp
+#include <cstddef>
+#include <experimental/simd>
+#include <print>
+#include <span>
+#include <vector>
+
+namespace stdx = std::experimental;
+
+// 문턱을 넘는 첫 원소의 자리. 없으면 size()
+std::size_t first_over(std::span<const float> x, float limit)
+{
+    for (std::size_t i = 0; i < x.size(); ++i)
+        if (x[i] > limit) return i;
+    return x.size();
+}
+
+std::size_t first_over_simd(std::span<const float> x, float limit)
+{
+    using floatv = stdx::native_simd<float>;   // 레지스터 하나에 들어가는 float들
+    std::size_t i = 0;
+    for (; i + floatv::size() <= x.size(); i += floatv::size()) {
+        const floatv chunk(&x[i], stdx::element_aligned);   // 한 묶음을 읽는다
+        const auto over = chunk > limit;                    // 원소마다 참·거짓
+        if (stdx::any_of(over))
+            return i + static_cast<std::size_t>(stdx::find_first_set(over));
+    }
+    for (; i < x.size(); ++i)                  // 한 묶음이 안 되는 자투리
+        if (x[i] > limit) return i;
+    return x.size();
+}
+
+int main()
+{
+    std::vector<float> x(4099, 1.0f);
+    x[4093] = 1000.0f;
+    std::println("한 묶음에 {}개", stdx::native_simd<float>::size());
+    std::println("{} {}", first_over(x, 999.0f), first_over_simd(x, 999.0f));
+    std::println("{} {}", first_over(x, 5000.0f), first_over_simd(x, 5000.0f));
+}
+```
+
+```text
+한 묶음에 4개
+4093 4093
+4099 4099
+```
+
+| 원소 하나에 | `-O3` | `-O3 -mavx2` | `-O3 -march=native` |
+| --- | --- | --- | --- |
+| `first_over` | 0.42 ns | 0.42 ns | 0.42 ns |
+| `first_over_simd` | 0.10 ns | 0.052 ns | 0.035 ns |
+
+같은 소스가 옵션에 따라 넷, 여덟, 열여섯 개씩 묶습니다. AArch64용으로 컴파일해도 고칠 것이 없었습니다(NEON으로 넷씩. 에뮬레이터에서 답만 확인했습니다). CPU마다 다시 써야 하는 `<immintrin.h>`의 내장 함수와 다른 점입니다.
+
+<Note>
+`std::experimental::simd`는 libstdc++의 것이 온전합니다. libc++ 20에서는 `-fexperimental-library`를 줘도 비교 연산과 `any_of`가 없어 위 코드가 컴파일되지 않았습니다. C++26은 이것을 다듬어 `<simd>`의 `std::simd::vec<float>`로 넣었고, GCC 16의 libstdc++가 실험적으로 싣고 있습니다. 이름과 세부가 달라 그대로 옮겨지지는 않습니다. 이 책의 환경에는 없어서 돌려 보지 못했습니다.
+</Note>
+
+## 어느 CPU에서 도는가
+
+넓은 명령을 허락한 프로그램은 그 명령이 없는 CPU에서 죽습니다. AVX-512가 있는 기계에서 빌드해, 2008년에 나온 CPU를 흉내 낸 에뮬레이터에서 돌렸습니다.
+
+```text nocheck
+$ g++ -O3 -march=native -static simd.cpp -o simd
+$ qemu-amd64-static -cpu Nehalem ./simd
+qemu: uncaught target signal 4 (Illegal instruction) - core dumped
+```
+
+`-march=native`는 **빌드한 기계에서만 돌릴 프로그램**에 씁니다. 나눠 줄 프로그램은 함수를 여러 벌 컴파일해 두고 실행을 시작할 때 고르게 합니다.
+
+```cpp
+#include <cstddef>
+#include <span>
+
+[[gnu::target_clones("avx512f", "avx2", "default")]]
+void scale_add(std::span<float> y, std::span<const float> x, float a)
+{
+    for (std::size_t i = 0; i < y.size(); ++i) y[i] += a * x[i];
+}
+```
+
+GCC 14와 Clang 20이 받습니다. `-O3`만 주고 빌드한 프로그램이 이 기계에서는 AVX-512 판을 불러(디버거로 확인했습니다) 0.06 ns였고, 위의 에뮬레이터에서도 죽지 않았습니다. 속성 안의 이름은 x86의 것이어서, AArch64용 컴파일러는 이 코드를 오류로 거부했습니다.
+
+데이터의 배치도 맞아야 합니다. 32바이트 구조체 1,000개에 `x += vx * dt`를 하면 [멤버별 배열](#/read/cpp-advanced/mm-layout)은 0.085 ns, 구조체의 배열은 0.30 ns입니다. `-mavx2`를 주자 GCC는 구조체의 배열도 벡터화했는데, 멤버를 골라 모으는 명령(`vpermd`)이 줄줄이 붙어 1.1 ns로 **더 느려졌습니다**.
+
+## 정리
+
+- GCC는 `-O3`에서, Clang은 `-O2`에서 루프를 벡터화한다. 넷씩 묶어 3~5배, 열여섯씩 묶어 8~13배였다
+- 실수의 합처럼 순서가 결과를 바꾸는 계산은 허락해야 하고, 중간에 빠져나가는 루프는 직접 묶음으로 쓴다
+- `-march=native`로 빌드한 프로그램은 옛 CPU에서 죽는다. 나눠 줄 것은 `target_clones`로 여러 벌을 둔다

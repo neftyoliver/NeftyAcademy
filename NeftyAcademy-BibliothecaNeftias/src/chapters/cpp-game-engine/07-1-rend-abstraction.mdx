@@ -1,0 +1,162 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '그래픽 API 감싸기: 얇은 RHI를 두는 까닭, 핸들과 명령 목록, 명령을 바이트로 적기, 검사 층';
+
+렌더러는 엔진에서 가장 크고 플랫폼마다 가장 다른 서브시스템입니다. PC는 Vulkan과 Direct3D 12, 애플 기기는 Metal, 콘솔은 저마다의 API를 씁니다. 그래서 엔진은 그 위에 **렌더 하드웨어 인터페이스**(RHI)라는 얇은 층을 두고, 렌더러의 나머지 부분(7장의 다른 쪽들)은 이 층만 봅니다.
+
+## 얇게, 그러나 요즘 API의 모양으로
+
+예전 API(OpenGL, D3D11)는 "지금 상태를 바꾸고 그려라"를 한 줄씩 부르는 방식이었고, 드라이버가 뒤에서 많은 일을 했습니다. 요즘 API(Vulkan, D3D12, Metal)는 **명령을 목록에 미리 적고, 한꺼번에 GPU에 넘기는** 방식이고, 메모리와 동기화를 프로그램이 직접 관리합니다. RHI는 요즘 API의 모양을 따르는 것이 좋습니다. 옛 방식으로 감싸면 요즘 API의 장점(여러 스레드에서 명령 적기, 미리 만든 파이프라인)을 잃습니다.
+
+| RHI가 내놓는 것 | 뜻 |
+| --- | --- |
+| 핸들 | 버퍼, 텍스처, 파이프라인을 가리키는 작은 번호 |
+| 명령 목록 | 묶기와 그리기 명령을 적어 두는 곳 |
+| 제출 | 명령 목록을 GPU 큐에 넘긴다 |
+| 동기화 | "이 텍스처를 다 쓴 뒤에 읽어라" 같은 순서 |
+
+## 명령을 바이트로 적기
+
+```cpp
+#include <cstdint>
+#include <cstring>
+#include <print>
+#include <string>
+#include <vector>
+
+// ---- 엔진이 보는 그래픽 층: 핸들과 명령만 ----
+struct BufferH { std::uint32_t id; };
+struct PipelineH { std::uint32_t id; };
+
+enum class Op : std::uint8_t { BindPipeline, BindVertices, Draw, End };
+struct CmdBindPipeline { PipelineH p; };
+struct CmdBindVertices { BufferH b; };
+struct CmdDraw { std::uint32_t vertex_count, instance_count; };
+
+// 명령은 바이트 배열에 [종류][내용]으로 차곡차곡 적는다
+class CommandList {
+public:
+    template <typename T>
+    void push(Op op, const T& c)
+    {
+        bytes_.push_back(static_cast<std::uint8_t>(op));
+        auto at = bytes_.size();
+        bytes_.resize(at + sizeof(T));
+        std::memcpy(bytes_.data() + at, &c, sizeof(T));
+    }
+    void bind_pipeline(PipelineH p) { push(Op::BindPipeline, CmdBindPipeline{p}); }
+    void bind_vertices(BufferH b) { push(Op::BindVertices, CmdBindVertices{b}); }
+    void draw(std::uint32_t v, std::uint32_t inst = 1)
+    {
+        push(Op::Draw, CmdDraw{v, inst});
+    }
+    const std::vector<std::uint8_t>& bytes() const { return bytes_; }
+
+private:
+    std::vector<std::uint8_t> bytes_;
+};
+
+// ---- 뒷단 하나: 실제로는 Vulkan, D3D12, Metal이 이 자리에 온다 ----
+class NullBackend {
+public:
+    PipelineH create_pipeline(std::string name)
+    {
+        pipelines_.push_back(std::move(name));
+        return {static_cast<std::uint32_t>(pipelines_.size() - 1)};
+    }
+    BufferH create_buffer(std::uint32_t bytes)
+    {
+        buffers_.push_back(bytes);
+        return {static_cast<std::uint32_t>(buffers_.size() - 1)};
+    }
+    void submit(const CommandList& cl)
+    {
+        const auto& b = cl.bytes();
+        bool have_pipeline = false;
+        for (std::size_t i = 0; i < b.size();) {
+            auto op = static_cast<Op>(b[i++]);
+            switch (op) {
+            case Op::BindPipeline: {
+                CmdBindPipeline c;
+                std::memcpy(&c, &b[i], sizeof c); i += sizeof c;
+                have_pipeline = true;
+                std::println("  파이프라인 {}", pipelines_[c.p.id]);
+                break;
+            }
+            case Op::BindVertices: {
+                CmdBindVertices c;
+                std::memcpy(&c, &b[i], sizeof c); i += sizeof c;
+                std::println("  정점 버퍼 #{} ({}바이트)", c.b.id,
+                             buffers_[c.b.id]);
+                break;
+            }
+            case Op::Draw: {
+                CmdDraw c;
+                std::memcpy(&c, &b[i], sizeof c); i += sizeof c;
+                if (!have_pipeline) {            // 디버그 검사 층의 일
+                    std::println("  [검사] 파이프라인 없이 그리기!");
+                    break;
+                }
+                std::println("  그리기 정점 {} x {}번", c.vertex_count,
+                             c.instance_count);
+                break;
+            }
+            case Op::End: return;
+            }
+        }
+    }
+
+private:
+    std::vector<std::string> pipelines_;
+    std::vector<std::uint32_t> buffers_;
+};
+
+int main()
+{
+    NullBackend gpu;
+    auto lit = gpu.create_pipeline("lit_opaque");
+    auto cube = gpu.create_buffer(24 * 32);
+
+    CommandList bad;
+    bad.bind_vertices(cube);
+    bad.draw(36);
+    std::println("명령 목록 1 ({}바이트)", bad.bytes().size());
+    gpu.submit(bad);
+
+    CommandList ok;
+    ok.bind_pipeline(lit);
+    ok.bind_vertices(cube);
+    ok.draw(36, 100);                             // 정육면체 100개를 한 번에
+    std::println("명령 목록 2 ({}바이트)", ok.bytes().size());
+    gpu.submit(ok);
+}
+```
+
+```text
+명령 목록 1 (14바이트)
+  정점 버퍼 #0 (768바이트)
+  [검사] 파이프라인 없이 그리기!
+명령 목록 2 (19바이트)
+  파이프라인 lit_opaque
+  정점 버퍼 #0 (768바이트)
+  그리기 정점 36 x 100번
+```
+
+- **핸들**: 엔진은 `VkBuffer`나 `ID3D12Resource*`를 직접 만지지 않고 `BufferH` 같은 번호만 들고 다닙니다([「핸들과 세대 인덱스」](#/read/cpp-game-engine/mem-handles)). 뒷단이 그 번호를 진짜 객체로 바꿉니다
+- **명령을 바이트로**: 명령마다 가상 함수 객체를 만들지 않고, `[종류 1바이트][내용]`을 배열에 차곡차곡 적었습니다. 할당이 거의 없고, 여러 스레드가 각자의 명령 목록에 동시에 적을 수 있으며, 나중에 정렬하거나 저장해 두었다 다시 틀 수도 있습니다. 명령 목록 2는 세 명령이 19바이트였습니다
+- **뒷단은 하나만 고른다**: 명령 하나마다 가상 함수로 뒷단을 부르면 그리기 수만 번에 그만큼 간접 호출이 붙습니다. 대부분의 엔진은 빌드할 때 뒷단을 정하거나(플랫폼마다 하나), 명령 목록을 통째로 뒷단에 넘겨 뒷단이 한 번에 해석하게 합니다
+- **인스턴싱**: `draw(36, 100)`은 같은 정육면체를 100번, 명령 하나로 그립니다. 그리기 명령 수를 줄이는 것이 렌더러 성능의 큰 부분입니다
+
+## 검사 층
+
+명령 목록 1은 파이프라인을 묶지 않고 그렸습니다. 요즘 API는 이런 실수를 드라이버가 막아 주지 않고, 화면이 이상해지거나 GPU가 멈춥니다. Vulkan은 검증 층(validation layer), D3D12는 디버그 층을 켜면 이런 실수를 알려 주고, RHI도 디버그 빌드에서 자기 수준의 검사를 해 줍니다(위의 `[검사]`). 개발 중에는 항상 켜 두는 것이 좋습니다.
+
+<Note>
+RHI를 직접 만들기 전에, 이미 있는 것을 쓸지도 생각해 볼 만합니다. bgfx, Diligent Engine, SDL3의 GPU API, WebGPU 구현(Dawn, wgpu) 같은 것들이 여러 API를 감싼 층을 제공합니다. 벌칸 자체를 깊이 다루는 일은 이 서가의 「벌칸, GLSL, SPIR-V」 책에서 합니다. 이 장은 RHI 위에서 렌더러가 무엇을 하는지에 집중합니다.
+</Note>
+
+## 정리
+
+- 렌더러는 플랫폼마다 다른 그래픽 API 위에 얇은 RHI를 두고, 나머지는 RHI만 본다
+- RHI는 요즘 API의 모양을 따라 핸들, 명령 목록, 제출, 동기화를 내놓고, 명령은 바이트로 적어 여러 스레드에서 할당 없이 만든다
+- 뒷단은 명령마다가 아니라 빌드나 목록 단위로 고르고, 개발 중에는 API의 검증 층과 RHI의 검사를 켜 둔다

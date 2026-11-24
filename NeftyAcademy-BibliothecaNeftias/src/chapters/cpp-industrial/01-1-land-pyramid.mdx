@@ -1,0 +1,114 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '자동화 피라미드: ISA-95의 다섯 수준, 수준마다 다른 시간 단위와 데이터 양, OEE, 납작해지는 피라미드';
+
+공장, 정유 시설, 물류 창고, 정수장, 발전소에는 사무실의 소프트웨어와 전혀 다른 소프트웨어가 돌아갑니다. 모터와 밸브를 움직이는 코드부터 하루 생산량을 회계 시스템에 넘기는 코드까지 층이 여럿이고, 층마다 다루는 시간의 단위가 다릅니다. 이 책은 그중 C++가 가장 많이 쓰이는 아래쪽 층, 곧 장비와 말하고 실시간으로 제어하고 기록하는 프로그램을 다룹니다. 먼저 전체 지도를 그려 봅니다.
+
+## ISA-95의 다섯 수준
+
+공장 소프트웨어의 층을 부를 때 가장 널리 쓰는 말은 ISA-95 표준(국제 표준으로는 IEC 62264)의 수준입니다. 흔히 피라미드로 그립니다.
+
+| 수준 | 하는 일 | 대표 시스템 | 시간 단위 |
+| --- | --- | --- | --- |
+| 4 | 사업 계획과 물류 | ERP | 월, 주, 일 |
+| 3 | 생산 운영 관리 | MES, 이력 저장소 | 교대, 시, 분, 초 |
+| 2 | 감시와 제어 | PLC, DCS, HMI, SCADA | 분, 초, 초 이하 |
+| 1 | 감지와 조작 | 센서, 구동기, 드라이브 | 초 이하 |
+| 0 | 물리 공정 | 모터, 밸브, 흐르는 액체 | 연속 |
+
+위로 갈수록 다루는 시간이 길어지고, 데이터는 요약되어 줄어듭니다. 병 채우는 라인 하나의 8시간을 흉내 내며 수준마다 생기는 데이터를 세어 보았습니다.
+
+```cpp
+// 병 채우는 라인의 8시간을 흉내 내며, 수준마다 데이터가 얼마나 줄어드는지 센다
+#include <cstdio>
+#include <random>
+
+constexpr int kScanMs = 10;                 // PLC 스캔 주기
+constexpr int kHourMs = 3600 * 1000;
+constexpr int kIdealPerHour = 1800;         // 설계상 시간당 병 수(2초에 하나)
+
+struct Hour { long long good = 0, bad = 0, stopMs = 0; };
+
+void reportHour(int hour, const Hour& h) {  // 수준 3: MES의 시간별 요약
+    const double run = double(kHourMs - h.stopMs);
+    const double avail = run / kHourMs;                     // 가동률
+    const double perf = (h.good + h.bad) / (kIdealPerHour * run / kHourMs);
+    const double qual = double(h.good) / double(h.good + h.bad);
+    std::printf("%d시: 가동률 %3.0f%%, 성능 %3.0f%%, 품질 %3.0f%%, OEE %3.0f%%\n",
+                hour, avail * 100, perf * 100, qual * 100,
+                avail * perf * qual * 100);
+}
+
+int main() {
+    std::mt19937 rng(95);                   // 씨앗을 고정해 늘 같은 결과
+    long long edges = 0, scans = 0, polls = 0, good = 0, bad = 0;
+    Hour hour;
+    bool stopped = false;
+    int nextBottleMs = 2000, restartMs = 0;
+
+    for (int t = 0; t < 8 * kHourMs; t += kScanMs) {
+        ++scans;                            // 수준 2: PLC가 한 바퀴 돈다
+        if (stopped) {
+            hour.stopMs += kScanMs;
+            if (t >= restartMs) { stopped = false; nextBottleMs = t + 2000; }
+        } else if (rng() % 360000 == 0) {   // 드물게 고장이 나서 1~11분 멈춘다
+            stopped = true;
+            restartMs = t + 60000 + int(rng() % 600) * 1000;
+        } else if (t >= nextBottleMs) {     // 수준 1: 센서 앞을 병이 지난다
+            edges += 2;                     // 신호가 켜졌다 꺼진다
+            const bool reject = rng() % 100 < 3;               // 3%쯤은 불량
+            ++(reject ? bad : good);
+            ++(reject ? hour.bad : hour.good);
+            nextBottleMs = t + 2000 + int(rng() % 300);        // 조금씩 늦어진다
+        }
+        if (t % 1000 == 0) ++polls;         // 수준 2: SCADA가 1초마다 읽는다
+        if ((t + kScanMs) % kHourMs == 0) {
+            reportHour((t + kScanMs) / kHourMs, hour);
+            hour = {};
+        }
+    }
+    std::printf("\n수준 1 센서 신호 변화: %lld번\n", edges);
+    std::printf("수준 2 PLC 스캔: %lld번, SCADA 읽기: %lld번\n", scans, polls);
+    std::printf("수준 3 MES 요약: 8건\n");
+    std::printf("수준 4 ERP 보고: 1건(양품 %lld개, 불량 %lld개)\n", good, bad);
+}
+```
+
+```text
+1시: 가동률 100%, 성능  93%, 품질  98%, OEE  91%
+2시: 가동률  86%, 성능  93%, 품질  97%, OEE  77%
+3시: 가동률  95%, 성능  93%, 품질  97%, OEE  86%
+4시: 가동률  88%, 성능  93%, 품질  97%, OEE  79%
+5시: 가동률  90%, 성능  93%, 품질  98%, OEE  81%
+6시: 가동률  91%, 성능  93%, 품질  96%, OEE  81%
+7시: 가동률  90%, 성능  93%, 품질  97%, OEE  81%
+8시: 가동률  86%, 성능  93%, 품질  97%, OEE  77%
+
+수준 1 센서 신호 변화: 24268번
+수준 2 PLC 스캔: 2880000번, SCADA 읽기: 28800번
+수준 3 MES 요약: 8건
+수준 4 ERP 보고: 1건(양품 11765개, 불량 369개)
+```
+
+- **수준 2의 PLC**는 10밀리초마다 입력을 읽고 프로그램을 한 바퀴 돌립니다. 8시간에 288만 번입니다. 병이 지나가는 순간을 놓치지 않으려면 이 정도로 자주 보아야 합니다
+- **SCADA**는 PLC의 카운터를 1초마다 읽습니다. 사람이 화면으로 보기에는 이것으로 충분합니다
+- **수준 3의 MES**는 시간마다 **OEE**(설비 종합 효율)를 계산합니다. 멈추지 않은 시간의 비율(가동률), 설계 속도 대비 실제 속도(성능), 양품의 비율(품질)을 곱한 값으로, 공장에서 가장 흔히 보는 지표입니다
+- **수준 4의 ERP**가 받는 것은 하루 한 줄입니다. 수백만 건의 신호가 몇 개의 숫자가 되었습니다
+
+C++는 주로 수준 1과 2에서 쓰입니다. 드라이브와 센서의 펌웨어, PLC의 실행 환경, HMI와 SCADA, 비전 검사 장비가 그 예입니다. 이 층의 프로그램은 늦으면 틀린 것이 되고, 멈추면 라인이 멈춥니다. 이 책의 내용 대부분이 그 두 가지를 막는 방법입니다.
+
+## 납작해지는 피라미드
+
+예전의 공장에서는 데이터가 한 층씩만 올라갔습니다. 센서는 PLC에만, PLC는 SCADA에만 말했습니다. 요즘은 "인더스트리 4.0"이나 산업용 IoT라는 이름으로 이 벽이 낮아지는 중입니다. 장비가 [「OPC UA」](#/read/cpp-industrial/fb-opcua)나 [「MQTT와 Sparkplug」](#/read/cpp-industrial/data-mqtt)로 자기 데이터를 직접 내놓고, MES나 클라우드가 필요한 것을 바로 구독합니다.
+
+그래도 시간 단위의 차이는 사라지지 않습니다. 10밀리초마다 도는 제어는 여전히 현장 가까이에 있어야 하고, 하루치 통계는 멀리 있어도 됩니다. 1밀리초 단위의 원자료를 하루 단위로 생각하는 시스템에 그대로 밀어 넣는 것은 연동이 실패하는 흔한 원인입니다. 데이터를 어디서 요약할지를 먼저 정하는 것이 설계의 시작입니다.
+
+<Note>
+비슷하게 생긴 퍼듀(Purdue) 모델도 자주 보게 됩니다. 수준을 나누는 방식은 닮았지만, 주로 네트워크를 구역으로 나누어 공장을 지키는 보안 설계에서 쓰입니다. [「보안」](#/read/cpp-industrial/depl-security)에서 다시 봅니다.
+</Note>
+
+## 정리
+
+- ISA-95는 공장 소프트웨어를 물리 공정(0)부터 ERP(4)까지 다섯 수준으로 나누며, 위로 갈수록 시간 단위가 길어지고 데이터는 요약된다
+- PLC는 밀리초 단위로 돌고, SCADA는 초 단위로 읽으며, MES는 OEE 같은 지표를 시간과 교대 단위로, ERP는 하루 단위로 다룬다
+- C++는 주로 수준 1과 2에서 쓰이며, 장비가 데이터를 직접 내놓는 시대에도 데이터를 어디서 요약할지가 설계의 핵심이다

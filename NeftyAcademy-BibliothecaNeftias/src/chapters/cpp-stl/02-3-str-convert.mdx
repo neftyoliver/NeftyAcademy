@@ -1,0 +1,212 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'stoi의 함정, 로캘이 바꾸는 소수점, from_chars와 to_chars, 고르는 기준';
+export const terms = ['from_chars', 'to_chars', 'std::to_string', 'std::stoi', 'std::stod'];
+
+센서가 보낸 `"23.5"`를 `double`로, 계산한 값을 다시 글로 바꾸는 일은 어디에나 있습니다. 표준에는 그 길이 여럿이고, 오류를 알리는 법과 치르는 값이 다릅니다.
+
+## 네 가지 길
+
+| 방법 | 오류를 알리는 법 | 특징 |
+| --- | --- | --- |
+| `std::stoi`, `std::stod` | 예외 | `std::string`을 받는다. 로캘을 따른다 |
+| `std::to_string` | 없음 | 서식을 고를 수 없다 |
+| `std::from_chars`, `std::to_chars` | 오류 코드 | 할당, 예외, 로캘이 없다 |
+| `std::format` | 컴파일 오류 | 숫자를 글로 바꾸는 쪽만. 서식을 고른다 |
+
+스트림(`>>`, `<<`)으로도 되지만 가장 느리고, [「stringstream과 spanstream」](#/read/cpp-stl/io-string)에서 따로 봅니다.
+
+## stoi의 함정
+
+```cpp
+#include <print>
+#include <stdexcept>
+#include <string>
+
+int main()
+{
+    std::size_t used = 0;
+    int n = std::stoi("12abc", &used);
+    std::println("stoi(\"12abc\") = {}, 읽은 글자 {}", n, used);
+
+    try {
+        std::stoi("abc");
+    } catch (const std::invalid_argument&) {
+        std::println("\"abc\": invalid_argument");
+    }
+    try {
+        std::stoi("99999999999");
+    } catch (const std::out_of_range&) {
+        std::println("\"99999999999\": out_of_range");
+    }
+
+    std::println("to_string(0.1) = {}", std::to_string(0.1));
+    std::println("to_string(1e-7) = {}", std::to_string(1e-7));
+}
+```
+
+```text
+stoi("12abc") = 12, 읽은 글자 2
+"abc": invalid_argument
+"99999999999": out_of_range
+to_string(0.1) = 0.100000
+to_string(1e-7) = 0.000000
+```
+
+- `std::stoi("12abc")`는 **성공**합니다. 읽을 수 있는 데까지 읽고 멈춥니다. 전부 숫자였는지 알려면 둘째 인자로 받은 글자 수를 길이와 견줘야 합니다.
+- 실패는 예외로 옵니다. 사용자가 친 글이나 통신으로 받은 글처럼 틀린 입력이 흔한 자리에서는, 흔한 일을 예외로 처리하게 됩니다.
+- `std::to_string`은 실수를 언제나 소수점 아래 여섯 자리로 찍습니다. 0.0000001이 `0.000000`이 되어 값이 사라집니다. C++26에서 "다시 읽었을 때 같은 값이 되는 가장 짧은 글"로 바뀌었고, GCC 14에 `-std=c++26`을 주면 `0.1`과 `1e-07`이 나옵니다.
+
+## 로캘이 바꾸는 소수점
+
+`std::stod`는 C의 `strtod`를 부르고, `strtod`는 **지금 로캘의 소수점 글자**를 따릅니다.
+
+```cpp
+#include <charconv>
+#include <clocale>
+#include <print>
+#include <string>
+
+int main()
+{
+    std::println("기본 로캘: stod(\"3.14\") = {}", std::stod("3.14"));
+
+    if (!std::setlocale(LC_ALL, "de_DE.UTF-8")) {
+        std::println("de_DE.UTF-8 로캘이 설치되어 있지 않습니다");
+        return 0;
+    }
+    std::println("독일 로캘: stod(\"3.14\") = {}", std::stod("3.14"));
+    std::println("독일 로캘: stod(\"3,14\") = {}", std::stod("3,14"));
+
+    double value = 0;
+    const char text[] = "3.14";
+    std::from_chars(text, text + 4, value);
+    std::println("독일 로캘: from_chars(\"3.14\") = {}", value);
+}
+```
+
+```text
+기본 로캘: stod("3.14") = 3.14
+독일 로캘: stod("3.14") = 3
+독일 로캘: stod("3,14") = 3.14
+독일 로캘: from_chars("3.14") = 3.14
+```
+
+독일어 로캘에서는 소수점이 쉼표입니다. 설정 파일의 `3.14`가 조용히 3이 됩니다. 프로그램이 `setlocale`을 부른 적이 없어도 안심할 수 없습니다. GTK나 Qt 같은 GUI 라이브러리는 시작할 때 시스템 로캘을 적용합니다. 한국어 로캘은 소수점이 마침표라서, 개발하는 동안에는 드러나지 않다가 다른 나라에 설치한 기기에서 터집니다.
+
+<Note>
+위 출력은 `de_DE.UTF-8` 로캘을 만들어 둔 리눅스에서 얻은 것입니다. 없으면 `sudo locale-gen de_DE.UTF-8`로 만들 수 있습니다. 기계가 읽고 쓰는 글(설정 파일, 통신 프로토콜, JSON)은 로캘과 무관한 `std::from_chars`와 `std::to_chars`로 다룹니다.
+</Note>
+
+## from_chars: 글에서 숫자로
+
+`std::from_chars(처음, 끝, 값)`은 포인터 두 개 사이를 읽어 `값`에 넣고, 멈춘 자리와 오류 코드를 돌려줍니다. "전부 읽었고 오류가 없을 때만 성공"으로 감싸 두면 쓰기 편합니다.
+
+```cpp
+#include <charconv>
+#include <optional>
+#include <print>
+#include <string_view>
+#include <system_error>
+#include <type_traits>
+
+template <typename T>
+std::optional<T> parse(std::string_view text, int base = 10)
+{
+    T value{};
+    const char* last = text.data() + text.size();
+    std::from_chars_result result{};
+    if constexpr (std::is_integral_v<T>)
+        result = std::from_chars(text.data(), last, value, base);
+    else
+        result = std::from_chars(text.data(), last, value);
+    // 숫자가 아니다, 범위를 넘었다, 뒤에 글자가 남았다
+    if (result.ec != std::errc{} || result.ptr != last)
+        return std::nullopt;
+    return value;
+}
+
+int main()
+{
+    const std::string_view inputs[] = {"42",  "-7",  "42abc",
+                                       " 42", "+42", "99999999999"};
+    for (std::string_view text : inputs) {
+        if (auto n = parse<int>(text))
+            std::println("{:14} -> {}", text, *n);
+        else
+            std::println("{:14} -> 실패", text);
+    }
+    std::println("{:14} -> {}", "ff (16진)", *parse<int>("ff", 16));
+    std::println("{:14} -> {}", "3.14e2", *parse<double>("3.14e2"));
+}
+```
+
+```text
+42             -> 42
+-7             -> -7
+42abc          -> 실패
+ 42            -> 실패
++42            -> 실패
+99999999999    -> 실패
+ff (16진)      -> 255
+3.14e2         -> 314
+```
+
+`from_chars`는 깐깐합니다. 앞의 공백을 건너뛰지 않고, `+` 기호와 `0x` 머리말을 받지 않습니다. 필요하면 부르는 쪽에서 [떼어 내고](#/read/cpp-stl/str-string) 넘깁니다. 오류 코드는 숫자가 아니면 `std::errc::invalid_argument`, 타입의 범위를 넘으면 `std::errc::result_out_of_range`입니다.
+
+## to_chars: 숫자에서 글로
+
+```cpp
+#include <charconv>
+#include <print>
+#include <string_view>
+#include <system_error>
+
+int main()
+{
+    char buffer[32];
+    char* const last = buffer + sizeof buffer;
+    auto show = [&](const char* label, std::to_chars_result r) {
+        std::println("{:16} {}", label, std::string_view(buffer, r.ptr));
+    };
+
+    show("0.1", std::to_chars(buffer, last, 0.1));
+    show("1.0 / 3.0", std::to_chars(buffer, last, 1.0 / 3.0));
+    auto fixed = std::chars_format::fixed;
+    show("고정 소수 2자리", std::to_chars(buffer, last, 3.14159, fixed, 2));
+    show("255를 16진으로", std::to_chars(buffer, last, 255, 16));
+    show("5를 2진으로", std::to_chars(buffer, last, 5, 2));
+
+    auto small = std::to_chars(buffer, buffer + 2, 12345);     // 2바이트뿐이다
+    bool too_large = small.ec == std::errc::value_too_large;
+    std::println("{:16} {}", "버퍼가 작으면", too_large);
+}
+```
+
+```text
+0.1              0.1
+1.0 / 3.0        0.3333333333333333
+고정 소수 2자리  3.14
+255를 16진으로   ff
+5를 2진으로      101
+버퍼가 작으면    true
+```
+
+- 결과는 내가 준 버퍼에 쓰입니다. 힙을 쓰지 않습니다. 끝에 `\0`을 붙이지 않으므로 돌려받은 `ptr`까지가 글입니다.
+- 실수는 서식을 주지 않으면 **다시 읽었을 때 같은 값이 되는 가장 짧은 글**로 나옵니다. 값을 저장했다 읽을 때 한 비트도 잃지 않습니다.
+- 버퍼가 모자라면 `std::errc::value_too_large`입니다. `double`의 가장 짧은 표기는 24글자 안에 들어갑니다.
+
+## 고르는 기준
+
+| 하는 일 | 쓰는 것 |
+| --- | --- |
+| 설정, 프로토콜, 로그를 읽는다 | `std::from_chars` |
+| 숫자를 저장하거나 보낼 글로 바꾼다 | `std::to_chars` |
+| 사람에게 보일 글을 만든다 | `std::format`, `std::print` |
+| 믿을 수 있는 입력을 빨리 한 번 바꾼다 | `std::stoi`, `std::to_string` |
+
+## 정리
+
+- `std::stoi`는 앞부분만 읽고도 성공하고, 실패는 예외로 알린다
+- `std::stod`는 로캘의 소수점을 따른다. 기계가 읽는 글에는 쓰지 않는다
+- `std::from_chars`와 `std::to_chars`는 할당도 예외도 로캘도 없다. 전부 읽었는지는 `ptr`로 확인한다

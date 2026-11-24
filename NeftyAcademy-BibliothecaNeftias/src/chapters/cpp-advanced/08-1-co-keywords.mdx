@@ -1,0 +1,232 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '멈췄다 이어 도는 함수, 세 낱말이 하는 일, 어웨이터의 세 함수, 프레임으로 가는 인자';
+export const terms = ['~co_await', '~co_yield', '~co_return', 'suspend_always', 'suspend_never'];
+
+[`std::generator`](#/read/cpp-stl/rng-own)로 값을 하나씩 내주는 함수를 써 봤습니다. 그 함수가 **코루틴**입니다. 이 챕터는 그 속을 엽니다. 먼저 코루틴이 보통 함수와 무엇이 다른지, 세 낱말이 각각 무슨 일을 하는지 봅니다.
+
+## 멈췄다가 이어서 도는 함수
+
+```cpp
+#include <generator>
+#include <print>
+
+std::generator<int> countdown(int from)
+{
+    std::println("  [코루틴] 시작");
+    for (int n = from; n > 0; --n) {
+        std::println("  [코루틴] {}을 내준다", n);
+        co_yield n;
+        std::println("  [코루틴] 이어서 돈다");
+    }
+    std::println("  [코루틴] 끝");
+}
+
+int main()
+{
+    std::println("[main] 부른다");
+    auto gen = countdown(2);
+    std::println("[main] 불렀다. 아직 한 줄도 돌지 않았다");
+    for (int n : gen)
+        std::println("[main] {}을 받았다", n);
+    std::println("[main] 끝");
+}
+```
+
+```text
+[main] 부른다
+[main] 불렀다. 아직 한 줄도 돌지 않았다
+  [코루틴] 시작
+  [코루틴] 2을 내준다
+[main] 2을 받았다
+  [코루틴] 이어서 돈다
+  [코루틴] 1을 내준다
+[main] 1을 받았다
+  [코루틴] 이어서 돈다
+  [코루틴] 끝
+[main] 끝
+```
+
+보통 함수는 부르면 끝까지 돌고 돌아옵니다. 코루틴은 **중간에 돌아왔다가, 그 자리에서 이어서** 돕니다. 스레드는 하나뿐이고, 두 흐름이 번갈아 돌 뿐입니다.
+
+멈춘 동안 `n`이 살아 있어야 하므로 지역 변수는 스택에 둘 수 없습니다. 컴파일러는 코루틴마다 **프레임**이라는 덩어리를 만들어 인자, 지역 변수, 멈춘 자리를 거기에 둡니다. 프레임은 대개 힙에 잡힙니다.
+
+C++의 코루틴에는 **자기 스택이 없습니다.** 깨어나면 깨운 쪽의 스택을 빌려 돕니다. 그래서 멈출 수 있는 곳은 코루틴의 본문 안뿐입니다. 코루틴이 부른 보통 함수 속에서는 멈출 수 없습니다.
+
+## 세 낱말
+
+함수 본문에 아래 셋 가운데 하나라도 있으면 그 함수는 코루틴입니다. 선언만 봐서는 알 수 없습니다.
+
+| 낱말 | 뜻 | 컴파일러가 바꾸는 것 |
+| --- | --- | --- |
+| `co_await e` | `e`가 끝날 때까지 멈춘다 | `e`의 세 함수를 차례로 부른다 (아래) |
+| `co_yield v` | 값을 내주고 멈춘다 | `co_await promise.yield_value(v)` |
+| `co_return v` | 값을 내고 끝낸다 | `promise.return_value(v)`. 값이 없으면 `return_void()` |
+
+여기서 `promise`는 프레임 안에 있는 **프라미스 객체**이고, 그 타입은 **반환 타입이 정합니다.** `std::generator<int>`를 돌려주는 코루틴과 직접 만든 타입을 돌려주는 코루틴은 낱말은 같아도 하는 일이 다릅니다. 세 낱말은 틀이고, 뜻은 [반환 타입이 채웁니다](#/read/cpp-advanced/co-promise).
+
+## co_await가 하는 일
+
+`co_await` 뒤에 오는 것을 **어웨이터**라고 합니다. 함수 셋을 가진 객체입니다. 아래의 `Job`은 가장 작은 코루틴 타입이고, 지금은 "부르면 곧바로 돌고, 끝나면 스스로 치운다"로 읽으면 됩니다.
+
+```cpp
+#include <coroutine>
+#include <exception>
+#include <print>
+#include <thread>
+
+struct Job {
+    struct promise_type {
+        Job get_return_object() { return {}; }
+        std::suspend_never initial_suspend() noexcept { return {}; }
+        std::suspend_never final_suspend() noexcept { return {}; }
+        void return_void() {}
+        void unhandled_exception() { std::terminate(); }
+    };
+};
+
+struct Pause {
+    std::coroutine_handle<>& slot;   // 깨울 핸들을 맡겨 둘 곳
+    bool await_ready() const noexcept
+    {
+        std::println("    await_ready");
+        return false;
+    }
+    void await_suspend(std::coroutine_handle<> me) noexcept
+    {
+        std::println("    await_suspend");
+        slot = me;
+    }
+    int await_resume() const noexcept
+    {
+        std::println("    await_resume");
+        return 42;
+    }
+};
+
+Job worker(std::coroutine_handle<>& slot)
+{
+    std::println("  [코루틴] 기다리기 전");
+    int v = co_await Pause{slot};
+    std::println("  [코루틴] 깨어났다. 받은 값 {}", v);
+}
+
+thread_local int who = 0;
+
+Job report(std::coroutine_handle<>& slot)
+{
+    std::println("  멈추기 전 who = {}", who);
+    co_await Pause{slot};
+    std::println("  깨어난 뒤 who = {}", who);
+}
+
+int main()
+{
+    std::coroutine_handle<> waiting;
+    worker(waiting);
+    std::println("[main] 코루틴이 멈춘 채로 돌아왔다");
+    waiting.resume();
+
+    std::println("[main] 다른 스레드에서 깨운다");
+    who = 1;
+    report(waiting);
+    std::jthread other([&] { who = 2; waiting.resume(); });
+}
+```
+
+```text
+  [코루틴] 기다리기 전
+    await_ready
+    await_suspend
+[main] 코루틴이 멈춘 채로 돌아왔다
+    await_resume
+  [코루틴] 깨어났다. 받은 값 42
+[main] 다른 스레드에서 깨운다
+  멈추기 전 who = 1
+    await_ready
+    await_suspend
+    await_resume
+  깨어난 뒤 who = 2
+```
+
+| 함수 | 불리는 때 | 돌려주는 것 |
+| --- | --- | --- |
+| `await_ready()` | 멈추기 전 | `true`면 멈추지 않고 곧장 `await_resume`으로 간다 |
+| `await_suspend(h)` | 멈춘 직후. `h`가 이 코루틴의 핸들이다 | 없음, `bool`, 또는 [다른 핸들](#/read/cpp-advanced/co-transfer) |
+| `await_resume()` | 깨어난 직후 | `co_await` 식의 값이 된다 |
+
+`await_suspend`가 받은 핸들을 **누군가에게 맡기는 것**이 요점입니다. 핸들은 멈춘 코루틴을 가리키는 포인터입니다. 타이머, 소켓, 스레드 풀이 그것을 들고 있다가 때가 되면 `resume()`을 부릅니다. 예제에서는 `main`의 변수가 맡았습니다. 표준에는 늘 멈추는 `std::suspend_always`와 멈추지 않는 `std::suspend_never`가 있습니다.
+
+둘째 부분은 [`thread_local`의 함정](#/read/cpp-advanced/thr-local)입니다. 코루틴은 `resume()`을 부른 스레드에서 이어 돕니다. 멈추기 전과 뒤의 스레드가 다르면 `thread_local` 변수는 다른 사본입니다. 같은 까닭으로 **뮤텍스를 잠근 채 `co_await`를 넘으면 안 됩니다.** 다른 스레드가 풀게 됩니다.
+
+## 인자는 프레임으로 복사된다
+
+코루틴은 부른 쪽이 돌아간 뒤에도 살아 있으므로, 인자를 프레임에 따로 담아 둡니다.
+
+```cpp
+#include <coroutine>
+#include <exception>
+#include <print>
+
+struct Job {
+    struct promise_type {
+        Job get_return_object() { return {}; }
+        std::suspend_never initial_suspend() noexcept { return {}; }
+        std::suspend_never final_suspend() noexcept { return {}; }
+        void return_void() {}
+        void unhandled_exception() { std::terminate(); }
+    };
+};
+
+struct Tracer {
+    static inline int copies = 0;
+    static inline int moves = 0;
+    Tracer() = default;
+    Tracer(const Tracer&) { ++copies; }
+    Tracer(Tracer&&) noexcept { ++moves; }
+};
+
+Job by_value(Tracer) { co_return; }
+Job by_ref(const Tracer&) { co_return; }
+
+void show(const char* what)
+{
+    std::println("{}: 복사 {}번, 옮김 {}번", what, Tracer::copies, Tracer::moves);
+    Tracer::copies = Tracer::moves = 0;
+}
+
+int main()
+{
+    Tracer t;
+    by_value(Tracer{});
+    show("값으로 받고 임시 객체를 넘김");
+    by_value(t);
+    show("값으로 받고 변수를 넘김");
+    by_ref(t);
+    show("참조로 받음");
+}
+```
+
+```text
+값으로 받고 임시 객체를 넘김: 복사 0번, 옮김 1번
+값으로 받고 변수를 넘김: 복사 1번, 옮김 1번
+참조로 받음: 복사 0번, 옮김 0번
+```
+
+값 인자는 프레임으로 한 번 더 **옮겨집니다.** 참조 인자는 참조만 담깁니다. 가리키던 것이 코루틴보다 먼저 사라지면 매달린 참조가 됩니다.
+
+| 함정 | 생기는 일 | 피하는 법 |
+| --- | --- | --- |
+| `const std::string&` 인자에 임시 객체 | 첫 멈춤 뒤에 임시 객체가 사라진다 | 값으로 받는다 |
+| 캡처가 있는 람다 코루틴 | 캡처한 것은 프레임이 아니라 **람다 객체**에 있다. 람다가 먼저 사라진다 | 캡처하지 말고 인자로 넘긴다 |
+| `std::string_view`, `std::span` 인자 | 보고 있던 것이 사라진다 | 가진 타입(`std::string`)으로 받는다 |
+
+<Note kind="warn">
+코루틴이 될 수 없는 함수가 있습니다. `main`, 생성자와 소멸자, `constexpr` 함수, 반환 타입을 `auto`로 미룬 함수, C 방식의 가변 인자(`...`) 함수입니다. 코루틴 안에서는 `return`을 쓸 수 없고, `catch` 블록 안에서는 `co_await`와 `co_yield`를 쓸 수 없습니다. 모두 컴파일 오류로 알려 줍니다.
+</Note>
+
+## 정리
+
+- 코루틴은 멈췄다가 그 자리에서 이어 도는 함수다. 지역 변수와 멈춘 자리는 프레임에 있고, 자기 스택은 없다
+- `co_await`는 어웨이터의 `await_ready`, `await_suspend`, `await_resume`을 부른다. `co_yield`와 `co_return`은 프라미스 객체의 함수를 부른다
+- 인자는 프레임으로 복사된다. 참조 인자와 람다의 캡처는 코루틴보다 오래 살아야 한다

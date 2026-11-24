@@ -1,0 +1,109 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '스타일시트: CSS를 닮은 QSS, 타입·이름·클래스·속성 선택자, 다시 적용하기, 우선순위와 Fusion';
+export const terms = ['QPalette', 'QStyle'];
+
+위젯의 기본 모양은 플랫폼 스타일을 따릅니다. Windows에서는 Windows답게, macOS에서는 macOS답게 보입니다. 하지만 브랜드 색을 입히거나, 위험한 동작의 버튼을 빨갛게 하거나, 바쁜 상태를 회색으로 보여 주고 싶을 때가 있습니다. Qt는 웹의 CSS를 닮은 **스타일시트**(QSS)로 이것을 합니다.
+
+## 색을 입히고 확인하기
+
+스타일이 정말 적용되었는지 눈 대신 코드로 확인하려고, 위젯을 그림으로 그린 뒤 한 점의 색을 읽었습니다.
+
+```cpp qt=Widgets
+#include <QApplication>
+#include <QImage>
+#include <QLabel>
+#include <QPushButton>
+#include <QStyle>
+#include <QVBoxLayout>
+#include <cstdio>
+
+// 위젯을 그림으로 그려 가운데 근처 한 점의 색을 읽는다(글자를 피해 왼쪽 위)
+QString colorAt(QWidget* w) {
+    QImage img = w->grab().toImage();
+    return img.pixelColor(4, img.height() / 2).name();
+}
+
+int main(int argc, char** argv) {
+    QApplication app(argc, argv);
+    app.setStyle("Fusion");                    // 플랫폼과 상관없이 같은 기본 모양
+
+    // 앱 전체 스타일시트: CSS와 비슷한 선택자 문법
+    app.setStyleSheet(R"(
+        QPushButton            { background: #3b82f6; color: white;
+                                 border: none; padding: 6px 12px; }
+        QPushButton#danger     { background: #dc2626; }
+        QPushButton[busy="true"] { background: #9ca3af; }
+        QLabel.hint            { color: #6b7280; }
+    )");
+
+    QWidget win;
+    auto* layout = new QVBoxLayout(&win);
+    auto* save = new QPushButton("저장");
+    auto* remove = new QPushButton("삭제");
+    remove->setObjectName("danger");           // #danger 선택자
+    auto* hint = new QLabel("도움말");
+    hint->setProperty("class", "hint");        // .hint 선택자
+    auto* plain = new QLabel("보통 라벨");
+    layout->addWidget(save);
+    layout->addWidget(remove);
+    layout->addWidget(hint);
+    layout->addWidget(plain);
+    win.show();
+    win.resize(200, 160);
+
+    std::printf("저장 버튼 %s, 삭제 버튼 %s\n",
+                qPrintable(colorAt(save)), qPrintable(colorAt(remove)));
+    std::printf("도움말 글자색 %s, 보통 라벨 글자색 %s\n",
+                qPrintable(hint->palette().color(QPalette::WindowText).name()),
+                qPrintable(plain->palette().color(QPalette::WindowText).name()));
+
+    // 동적 속성으로 상태를 바꾸면 스타일을 다시 적용시켜야 한다
+    save->setProperty("busy", true);
+    std::printf("busy=true 직후 %s", qPrintable(colorAt(save)));
+    save->style()->unpolish(save);
+    save->style()->polish(save);
+    std::printf(" -> 다시 적용한 뒤 %s\n", qPrintable(colorAt(save)));
+
+    // 위젯 하나에만 거는 스타일시트가 앱 전체보다 우선한다
+    save->setStyleSheet("background: #16a34a;");
+    std::printf("위젯 자신의 스타일시트 뒤 %s\n", qPrintable(colorAt(save)));
+}
+```
+
+```text
+저장 버튼 #3b82f6, 삭제 버튼 #dc2626
+도움말 글자색 #6b7280, 보통 라벨 글자색 #000000
+busy=true 직후 #3b82f6 -> 다시 적용한 뒤 #9ca3af
+위젯 자신의 스타일시트 뒤 #16a34a
+```
+
+## 선택자
+
+| 선택자 | 고르는 것 |
+| --- | --- |
+| `QPushButton` | 그 클래스와 하위 클래스의 모든 위젯 |
+| `QPushButton#danger` | `objectName`이 `danger`인 것 |
+| `QLabel.hint` | `class` 속성이 `hint`인 것 |
+| `QPushButton[busy="true"]` | 동적 속성 `busy`가 참인 것 |
+
+이 밖에 `:hover`, `:pressed`, `:disabled`, `:checked` 같은 **상태 의사 선택자**와, `QComboBox::drop-down`, `QScrollBar::handle`처럼 위젯 안의 부품을 고르는 **하위 컨트롤** 문법이 있습니다. 상태 의사 선택자 덕분에 마우스를 올렸을 때의 색을 코드 없이 정할 수 있습니다.
+
+## 상태를 바꿨는데 색이 그대로라면
+
+`busy` 속성을 `true`로 바꾼 직후에는 색이 그대로 파랑이었습니다. 스타일시트는 위젯을 처음 꾸밀 때(polish) 선택자를 맞춰 보고, 동적 속성이 바뀌었다고 저절로 다시 맞춰 보지는 않습니다. `unpolish`와 `polish`를 불러 다시 적용하자 회색이 되었습니다. 상태를 속성으로 표시하는 방식을 쓸 때 꼭 필요한 한 쌍입니다.
+
+## 우선순위
+
+- 앱 전체(`QApplication::setStyleSheet`)에 건 규칙보다 **위젯 자신**에 건 규칙이 이깁니다. 마지막 줄에서 저장 버튼이 초록이 되었습니다. 부모 위젯에 건 스타일시트는 그 자식들에게도 적용됩니다
+- 같은 위젯을 여러 규칙이 고르면 더 구체적인 선택자(`#danger`가 `QPushButton`보다)가 이깁니다. CSS의 명시도 규칙과 같습니다
+
+<Note>
+스타일시트는 강력하지만, 위젯의 일부만 바꾸면 나머지가 플랫폼 스타일과 섞여 어색해질 수 있습니다. 예를 들어 버튼의 `background`만 바꾸면 테두리를 그리는 방식이 바뀌어, 그 플랫폼에서는 테두리까지 직접 지정해야 하는 경우가 생깁니다. 예제처럼 `app.setStyle("Fusion")`으로 모든 플랫폼에서 같은 기본 스타일을 쓰고 그 위에 스타일시트를 얹으면 결과가 예측 가능해집니다. 다크 모드처럼 색 전체를 바꾸는 일은 스타일시트보다 `QPalette`로 하는 편이 위젯 전체에 고르게 적용됩니다.
+</Note>
+
+## 정리
+
+- 스타일시트는 CSS를 닮은 문법으로 위젯의 색, 테두리, 여백을 정하며, 타입·이름·클래스·속성 선택자와 상태 의사 선택자를 쓴다
+- 동적 속성을 바꾼 뒤에는 unpolish와 polish로 스타일을 다시 적용해야 한다
+- 위젯 자신의 규칙과 더 구체적인 선택자가 이기며, Fusion 스타일 위에 얹으면 플랫폼마다 결과가 같다

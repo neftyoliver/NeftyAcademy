@@ -1,0 +1,141 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '전처리와 include: GLSL 전처리기, VULKAN 매크로, GL_GOOGLE_include_directive, 포함 콜백과 가드';
+export const terms = [
+  'shaderc_compile_into_preprocessed_text', 'shaderc_compile_options_add_macro_definition',
+  'shaderc_compile_options_set_include_callbacks', 'shaderc_include_result',
+];
+
+GLSL에도 C와 비슷한 전처리기가 있어서 `#define`, `#if`, `#ifdef`, `#error`, `#line`을 씁니다. 벌칸 GLSL에는 `VULKAN` 매크로가 정의되어 있어, OpenGL과 함께 쓰는 셰이더를 가를 수 있습니다. 표준 GLSL에는 `#include`가 없고 glslang과 shaderc가 GL_GOOGLE_include_directive 확장으로 지원하는데, shaderc 라이브러리는 파일을 직접 읽지 않고 프로그램이 넘긴 콜백에게서 받습니다.
+
+```cpp pkg=shaderc
+#include <cstdio>
+#include <cstring>
+#include <map>
+#include <string>
+#include <shaderc/shaderc.h>
+
+// 셰이더 쪽 파일들. 실제 프로그램은 디스크에서 읽는다
+const std::map<std::string, std::string> files = {
+    {"common.glsl",   // 포함 가드: 두 번째부터는 내용이 비게 된다
+     "#ifndef COMMON_GLSL\n#define COMMON_GLSL\n#define TAU 6.2831853\n"
+     "float turns(float t) { return t * TAU * SCALE; }\n#endif\n"},
+    {"once.glsl", "#pragma once\nfloat one() { return 1.0; }\n"},
+};
+
+struct Found {   // shaderc에 돌려줄 결과와 그 문자열을 함께 붙들어 둔다
+    shaderc_include_result result;
+    std::string name, text;
+};
+
+// #include "이름"을 만나면 shaderc가 부른다. 못 찾으면 이름을 비우고 까닭을 준다
+shaderc_include_result* open_file(void*, const char* want, int, const char*,
+                                  size_t) {
+    auto* f = new Found;
+    auto it = files.find(want);
+    if (it != files.end()) {
+        f->name = want;
+        f->text = it->second;
+    } else {
+        f->text = std::string(want) + "을(를) 찾지 못함";
+    }
+    f->result = {f->name.c_str(), f->name.size(), f->text.c_str(), f->text.size(),
+                 f};
+    return &f->result;
+}
+void close_file(void*, shaderc_include_result* r) {
+    delete static_cast<Found*>(r->user_data);
+}
+
+// 전처리만 하거나(preprocess) SPIR-V까지 번역해, 결과나 오류문을 찍는다
+void run(shaderc_compiler_t compiler, const char* name, const char* src,
+         bool preprocess) {
+    shaderc_compile_options_t opts = shaderc_compile_options_initialize();
+    shaderc_compile_options_set_target_env(opts, shaderc_target_env_vulkan,
+                                           shaderc_env_version_vulkan_1_3);
+    shaderc_compile_options_set_include_callbacks(opts, open_file, close_file,
+                                                  nullptr);
+    shaderc_compile_options_add_macro_definition(opts, "SCALE", 5, "2.0", 3);  // -D
+    size_t n = std::strlen(src);
+    auto kind = shaderc_vertex_shader;
+    auto r = preprocess ? shaderc_compile_into_preprocessed_text(
+                              compiler, src, n, kind, name, "main", opts)
+                        : shaderc_compile_into_spv(compiler, src, n, kind, name,
+                                                   "main", opts);
+    bool ok = shaderc_result_get_compilation_status(r) ==
+              shaderc_compilation_status_success;
+    if (!ok) {
+        std::printf("%s", shaderc_result_get_error_message(r));
+    } else if (preprocess) {   // 줄 번호를 지키려고 남긴 빈 줄은 빼고 찍는다
+        std::string text = shaderc_result_get_bytes(r), line;
+        for (char c : text) {
+            if (c != '\n') { line += c; continue; }
+            if (!line.empty()) std::puts(line.c_str());
+            line.clear();
+        }
+    }
+    shaderc_result_release(r);
+    shaderc_compile_options_release(opts);
+}
+
+int main() {
+    shaderc_compiler_t compiler = shaderc_compiler_initialize();
+    std::puts("--- main.vert 전처리 결과 ---");
+    run(compiler, "main.vert", R"(#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+#include "common.glsl"
+#ifdef VULKAN
+const int api = VULKAN;
+#endif
+void main() { gl_Position = vec4(turns(0.25)); }
+)", true);
+    std::puts("--- twice.vert 번역 ---");
+    run(compiler, "twice.vert", R"(#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "once.glsl"
+#include "once.glsl"
+void main() {}
+)", false);
+    shaderc_compiler_release(compiler);
+}
+```
+
+```text
+--- main.vert 전처리 결과 ---
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#line 1 "main.vert"
+#extension GL_GOOGLE_include_directive : require
+#line 1 "common.glsl"
+float turns(float t) { return t * 6.2831853 * 2.0; }
+#line 4 "main.vert"
+#line 1 "common.glsl"
+#line 5 "main.vert"
+const int api = 100;
+void main() { gl_Position = vec4(turns(0.25)); }
+--- twice.vert 번역 ---
+once.glsl:1: warning: '#pragma once' : not implemented
+once.glsl:1: warning: '#pragma once' : not implemented
+once.glsl:2: error: 'one' : function already has a body
+once.glsl:2: error: 'return' : void function cannot return a value
+```
+
+- **포함 콜백**: `#include "이름"`을 만날 때마다 shaderc가 `open_file`을 부르고, 내용을 다 쓰면 `close_file`로 돌려줍니다(따옴표는 포함하는 파일 기준, `<이름>`은 정해 둔 경로 기준이라는 구분이 콜백에 넘어옵니다). 찾지 못하면 이름을 비우고 내용에 까닭을 담습니다. 명령줄의 `glslc`는 이 일을 파일 시스템과 `-I` 경로로 합니다
+- **매크로 넘기기**: `add_macro_definition`은 glslc의 `-DSCALE=2.0`과 같습니다. `TAU`와 `SCALE`이 숫자로 바뀌었고, `#ifdef VULKAN` 덕분에 `api = 100`이 남았습니다
+- **#line**: 포함한 자리마다 `#line 1 "common.glsl"`처럼 원래 파일과 줄 번호를 남기므로, 오류문이 `once.glsl:2`처럼 제자리를 가리킵니다
+- **#pragma once는 안 된다**: glslang은 `#pragma once`를 구현하지 않아 경고만 내고 무시하므로, 두 번 포함하면 함수가 두 번 정의됩니다(이 기계의 shaderc 2023.8, glslang 15.1에서 확인). 그래서 `common.glsl`처럼 `#ifndef`·`#define`·`#endif`로 포함 가드를 둡니다
+
+## 변형이 늘어날 때
+
+매크로로 기능을 켜고 끄면 셰이더 하나의 변형(permutation)이 곱으로 늘어납니다. 켜고 끌 기능이 열 개면 변형은 1024개이고, 변형마다 SPIR-V와 파이프라인이 따로 생깁니다. 값만 다른 변형이라면 SPIR-V 하나에 특수화 상수를 두고 파이프라인을 만들 때 값을 정하는 편이 낫습니다([「특수화 상수」](#/read/cpp-vulkan/spv-spec-const)).
+
+<Note>
+셰이더를 실행 중에 번역하면, 파일을 고치자마자 다시 불러오는 개발 도구(핫 리로드)를 만들 수 있습니다. 배포할 때는 빌드 단계에서 glslc로 미리 번역해 SPIR-V만 싣는 것이 보통입니다([「glslang과 shaderc」](#/read/cpp-vulkan/spv-compile)).
+</Note>
+
+## 정리
+
+- GLSL 전처리기는 C와 비슷하고, 벌칸 GLSL에는 `VULKAN` 매크로가 있으며, 매크로는 번역기 옵션(`-D`)으로도 넘긴다
+- `#include`는 GL_GOOGLE_include_directive 확장이고, shaderc 라이브러리에서는 프로그램이 포함 콜백으로 파일을 건네며, `#line`이 원래 위치를 지킨다
+- glslang은 `#pragma once`를 무시하므로 포함 가드를 쓰고, 값만 다른 변형이 늘면 특수화 상수를 쓴다

@@ -1,0 +1,110 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '내 타입을 다른 타입으로, explicit operator bool, 암시적 변환의 위험';
+
+[「explicit과 변환 생성자」](#/read/cpp-syntax/class-explicit)의 생성자는 "다른 타입 → 내 타입"의 길이었습니다. 반대 방향인 "내 타입 → 다른 타입"은 **변환 연산자**로 엽니다.
+
+## 변환 연산자
+
+```cpp
+#include <print>
+
+class Celsius {
+public:
+    explicit Celsius(double v) : value_(v) {}
+
+    explicit operator double() const { return value_; }         // 적어야만 바뀐다
+    explicit operator bool() const { return value_ > -273.15; } // 말이 되는 값인가
+
+private:
+    double value_;
+};
+
+int main()
+{
+    Celsius t(21.5);
+    double raw = static_cast<double>(t);
+    // double bad = t;              // 오류: explicit
+    if (t)                          // 조건 자리에서는 explicit이어도 bool로 바뀐다
+        std::println("{}", raw);
+    std::println("{}", !Celsius(-300.0));
+}
+```
+
+```text
+21.5
+true
+```
+
+`operator 타입() const`가 변환 연산자입니다. 반환 타입을 따로 적지 않습니다. 이름이 곧 반환 타입입니다.
+
+## explicit operator bool
+
+"이 객체가 쓸 만한 상태인가"를 `if (obj)`로 묻게 하는 것은 흔한 관례입니다. `std::unique_ptr`, `std::optional`, `std::fstream`이 모두 그렇습니다.
+
+여기에 `explicit`을 붙이는 까닭이 있습니다. `bool`은 정수로 승격되므로, `explicit`이 없으면 이런 코드가 컴파일됩니다.
+
+```cpp nocheck
+int n = sensor + 1;         // sensor → bool → int. 뜻 없는 계산
+if (sensor_a == sensor_b)   // 둘 다 bool로 바뀌어 비교된다
+```
+
+`explicit operator bool`은 **조건을 묻는 자리**에서만 저절로 쓰입니다.
+
+| 자리 | `explicit operator bool`이 쓰이나 |
+| --- | --- |
+| `if (x)`, `while (x)`, `for (; x; )` | 쓰인다 |
+| `!x`, `x && y`, <code>x \|\| y</code>, `x ? a : b` | 쓰인다 |
+| `bool b = x;`, `return x;` (반환 타입 `bool`) | 안 쓰인다. `static_cast<bool>(x)`나 `bool(x)` |
+| `int n = x;`, `x + 1` | 안 쓰인다 |
+
+`bool`로의 변환에는 언제나 `explicit`을 붙입니다.
+
+## 암시적 변환 연산자
+
+`explicit` 없는 변환 연산자는 컴파일러가 필요하다고 판단하면 알아서 끼워 넣습니다. 조용히 일어나는 만큼 사고도 조용합니다.
+
+```cpp nocheck
+struct Path {
+    std::string text;
+    operator std::string() const { return text; }       // 암시적
+    operator const char*() const { return text.c_str(); }
+};
+
+void open(const std::string& name);
+void open(const char* name);
+
+Path p{"/dev/ttyAMA0"};
+open(p);            // 오류: 두 변환이 같은 순위라 모호하다
+```
+
+변환 연산자가 둘이면 오버로드와 만났을 때 모호해지기 쉽고, 하나뿐이어도 생각지 못한 함수가 후보에 오릅니다. 암시적 변환 연산자는 다음 정도에만 씁니다.
+
+| 쓸 만한 경우 | 예 |
+| --- | --- |
+| 소유하는 타입 → 그것을 보는 뷰 | `std::string` → `std::string_view` |
+| 감싼 것을 투명하게 꺼내야 하는 타입 | `std::reference_wrapper<T>` → `T&` |
+| 원소 하나를 흉내 내는 대리 객체 | `std::vector<bool>`의 원소 |
+
+그 밖에는 이름 있는 함수가 낫습니다. `t.value()`, `path.string()`, `p.c_str()`는 읽는 사람이 변환이 일어나는 자리를 볼 수 있습니다.
+
+## 두 방향을 나란히
+
+| | 변환 생성자 | 변환 연산자 |
+| --- | --- | --- |
+| 방향 | 다른 타입 → 내 타입 | 내 타입 → 다른 타입 |
+| 적는 곳 | 내 클래스의 생성자 | 내 클래스의 멤버 함수 |
+| 쓰는 때 | 상대 타입을 내가 고칠 수 없을 때도 된다 | 상대가 `int`, `bool`처럼 생성자를 달 수 없는 타입일 때 |
+| `explicit` | 기본으로 붙인다 | 기본으로 붙인다 |
+
+두 타입이 서로에게 암시적 변환을 열어 두면 `a + b` 같은 식에서 어느 쪽으로 맞출지 정할 수 없어 모호해집니다. 암시적인 길은 한 방향으로만 둡니다.
+
+<Note>
+컴파일러가 스스로 끼워 넣는 사용자 정의 변환은 식 하나에 한 번뿐입니다. 변환 생성자와 변환 연산자를 이어 붙여 두 단계를 건너가 주지는 않습니다.
+</Note>
+
+## 정리
+
+- `operator 타입() const`로 내 타입에서 다른 타입으로 가는 길을 연다
+- `bool`로의 변환은 `explicit operator bool`. 조건 자리에서만 저절로 쓰인다
+- 암시적 변환 연산자는 뷰나 대리 객체 같은 좁은 경우에만. 나머지는 이름 있는 함수

@@ -1,0 +1,138 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'GPIO 핀의 0과 1, 풀업과 active-low, 리눅스 문자 장치와 libgpiod v2로 LED 깜빡이고 버튼 읽기';
+export const terms = [
+  'gpiod', 'gpiod_chip_open', 'gpiod_line_request', 'gpiod_line_request_set_value',
+  'gpiod_line_request_get_value',
+];
+
+**GPIO**(General-Purpose Input/Output)는 이름 그대로 정해진 쓰임이 없는 핀입니다. 프로그램이 출력으로 정하면 전압을 올리거나 내리고, 입력으로 정하면 바깥 전압이 높은지 낮은지 읽습니다. 「컴퓨터의 입문」의 [「마이크로컨트롤러와 라즈베리파이」](#/read/basics/modern-mcu-sbc)에서 본 라즈베리파이의 40핀 머리가 대부분 이것입니다. 이 쪽은 리눅스에서 C로 GPIO를 다루는 지금의 방법을 봅니다.
+
+## 0과 1은 전압이다
+
+| 개념 | 뜻 |
+| --- | --- |
+| 높음(1) / 낮음(0) | 라즈베리파이는 3.3V 가까이를 1, 0V 가까이를 0으로 본다 |
+| 풀업 / 풀다운 | 아무것도 연결되지 않은 입력이 떠다니지 않게 약하게 1 또는 0으로 당겨 두는 저항 |
+| active-low | "켜짐"이 0V인 연결. 풀업에 버튼을 땅(GND)으로 달면 누를 때 0이 된다 |
+| 떨림(bounce) | 기계식 버튼은 누르는 순간 몇 ms 동안 0과 1을 오간다 |
+
+<Note kind="warn">
+라즈베리파이의 GPIO는 3.3V로 동작합니다. 5V 신호를 직접 넣거나 핀에서 큰 전류를 뽑지 마세요. LED는 반드시 저항(보통 수백 Ω)과 함께 달고, 모터나 릴레이처럼 전류가 큰 것은 트랜지스터나 드라이버 칩을 거칩니다. 회로를 바꿀 때는 전원을 끕니다.
+</Note>
+
+## 리눅스에서 GPIO를 만지는 길
+
+예전에는 `/sys/class/gpio`에 숫자를 써 넣는 sysfs 방식을 많이 썼지만, 이것은 오래전에 낡은 방식으로 정해졌습니다. 지금은 **GPIO 문자 장치**(`/dev/gpiochipN`)를 엽니다. 리눅스 4.8에서 들어왔고, 5.10에서 지금의 v2 인터페이스가 되었습니다. 이 장치는 줄(line)을 **요청**한 프로세스만 바꿀 수 있고, 프로세스가 끝나면 줄이 자동으로 풀립니다. 두 프로그램이 같은 핀을 몰래 다투는 일을 막습니다.
+
+ioctl을 직접 부를 수도 있지만 보통은 이것을 감싼 **libgpiod**를 씁니다. 함정이 하나 있습니다. libgpiod는 1.x와 2.x의 함수가 완전히 다릅니다.
+
+| 배포판 | libgpiod | 도구 쓰는 법 |
+| --- | --- | --- |
+| Debian 12 Bookworm, Ubuntu 24.04 | 1.6.3 | `gpioset gpiochip0 17=1` |
+| Debian 13 Trixie | 2.2.1 | `gpioset -c gpiochip0 17=1` |
+
+인터넷의 예제가 컴파일되지 않는다면 대개 이 차이입니다. 이 쪽은 앞으로 쓸 2.x로 씁니다.
+
+## libgpiod v2로 깜빡이기
+
+BCM 번호 17번에 LED, 27번에 버튼(다른 쪽은 GND)을 단 모양입니다. 번호는 40핀 머리의 **핀 순서가 아니라** 칩 안의 줄 번호(BCM 번호)입니다.
+
+```c nocheck
+#include <stdio.h>
+#include <time.h>
+#include <gpiod.h>
+
+enum { LED = 17, BUTTON = 27 };   // BCM 번호(핀 번호가 아님)
+
+static void sleep_ms(long ms)
+{
+    struct timespec t = {ms / 1000, (ms % 1000) * 1000000L};
+    nanosleep(&t, nullptr);
+}
+
+int main(void)
+{
+    struct gpiod_chip *chip = gpiod_chip_open("/dev/gpiochip0");
+    if (!chip) {
+        perror("gpiod_chip_open");
+        return 1;
+    }
+
+    // 줄마다 성질을 정한다: LED는 출력, 버튼은 입력 + 풀업
+    struct gpiod_line_settings *out = gpiod_line_settings_new();
+    gpiod_line_settings_set_direction(out, GPIOD_LINE_DIRECTION_OUTPUT);
+    struct gpiod_line_settings *in = gpiod_line_settings_new();
+    gpiod_line_settings_set_direction(in, GPIOD_LINE_DIRECTION_INPUT);
+    gpiod_line_settings_set_bias(in, GPIOD_LINE_BIAS_PULL_UP);
+
+    struct gpiod_line_config *cfg = gpiod_line_config_new();
+    unsigned led = LED, button = BUTTON;
+    gpiod_line_config_add_line_settings(cfg, &led, 1, out);
+    gpiod_line_config_add_line_settings(cfg, &button, 1, in);
+
+    struct gpiod_request_config *req_cfg = gpiod_request_config_new();
+    gpiod_request_config_set_consumer(req_cfg, "blink");
+
+    // 요청: 이제부터 이 두 줄은 이 프로세스의 것
+    struct gpiod_line_request *req =
+        gpiod_chip_request_lines(chip, req_cfg, cfg);
+    if (!req) {
+        perror("gpiod_chip_request_lines");
+        return 1;
+    }
+
+    for (int i = 0; i < 10; i++) {
+        enum gpiod_line_value v = (i % 2) ? GPIOD_LINE_VALUE_ACTIVE
+                                          : GPIOD_LINE_VALUE_INACTIVE;
+        gpiod_line_request_set_value(req, LED, v);
+        int pressed = gpiod_line_request_get_value(req, BUTTON)
+                      == GPIOD_LINE_VALUE_INACTIVE;   // 풀업이라 누르면 0
+        printf("LED %d, 버튼 %s\n", v == GPIOD_LINE_VALUE_ACTIVE,
+               pressed ? "눌림" : "떼짐");
+        sleep_ms(500);
+    }
+
+    gpiod_line_request_release(req);
+    gpiod_request_config_free(req_cfg);
+    gpiod_line_config_free(cfg);
+    gpiod_line_settings_free(in);
+    gpiod_line_settings_free(out);
+    gpiod_chip_close(chip);
+    return 0;
+}
+```
+
+```text nocheck
+LED 0, 버튼 떼짐
+LED 1, 버튼 떼짐
+LED 0, 버튼 눌림
+...
+```
+
+v2의 흐름은 네 단계입니다.
+
+1. `gpiod_chip_open`으로 칩을 연다
+2. 설정(**settings**)으로 줄의 성질(방향, 풀업, active-low, 떨림 거르기)을 정한다
+3. 줄 설정(**line config**)에 "어느 줄에 어떤 설정"을 모으고, `gpiod_chip_request_lines`로 한꺼번에 요청한다
+4. 받은 요청(`request`)으로 값을 쓰고 읽은 뒤, 다 쓰면 풀어 준다
+
+설정과 요청을 나눈 덕분에 여러 줄을 한 번에 요청하고, 값을 여러 줄에 동시에 쓸 수 있습니다.
+
+<Note>
+이 검사용 컴퓨터에는 GPIO 칩이 없고(`/dev/gpiochip*`가 없음), 설치된 libgpiod도 1.6.3이라 위 예제를 실행해 보지는 못했습니다. 대신 libgpiod 2.2.4 소스의 머리 파일로 gcc 14와 clang 18에서 경고 없이 컴파일되는 것까지 확인했습니다. 출력은 버튼을 세 번째 깜빡임에 눌렀을 때 나올 모양을 그린 것입니다. 도구 쓰는 법은 같은 소스의 `gpioset` 도움말과, 설치된 1.6.3의 도움말에서 확인했습니다.
+</Note>
+
+## 칩 이름 찾기
+
+라즈베리파이 5는 GPIO 칩이 여러 개입니다. `gpiodetect`로 목록을 보고 `pinctrl-rp1`이라 적힌 칩(54줄)을 씁니다. 처음 나왔을 때의 커널에서는 이것이 `gpiochip4`였는데, 커널이 바뀌면서 `gpiochip0`으로 옮겨졌습니다. 그래서 칩 번호를 코드에 박아 두기보다 `gpioinfo`로 이름을 확인하거나, v2 도구처럼 줄 이름(예: `GPIO17`)으로 찾는 편이 오래 갑니다.
+
+## 계속 읽지 말고 기다리기
+
+위 예제는 500ms마다 버튼을 읽습니다(폴링). 짧게 누르면 놓칠 수 있고, 자주 읽으면 CPU를 씁니다. 입력 설정에 `gpiod_line_settings_set_edge_detection`으로 **가장자리(edge) 감지**를 켜면, 값이 바뀌는 순간 커널이 사건(event)을 쌓아 두고, `gpiod_line_request_wait_edge_events`로 잠들어 기다리다 깨어날 수 있습니다. 사건에는 커널이 잰 시각이 붙어 있습니다. 버튼의 떨림은 `gpiod_line_settings_set_debounce_period_us`로 거를 수 있는데, 칩 드라이버가 지원하지 않으면 커널이 소프트웨어로 대신합니다.
+
+## 정리
+
+- GPIO는 프로그램이 전압을 올리고 내리거나 읽는 핀이며, 라즈베리파이는 3.3V이고 풀업·active-low 연결을 자주 쓴다
+- 리눅스에서는 낡은 sysfs가 아니라 `/dev/gpiochipN` 문자 장치를 쓰며, libgpiod 1.x와 2.x는 함수와 도구 쓰는 법이 다르다
+- v2는 설정, 줄 설정, 요청의 순서로 줄을 얻고, 폴링 대신 가장자리 감지로 사건을 기다릴 수 있다

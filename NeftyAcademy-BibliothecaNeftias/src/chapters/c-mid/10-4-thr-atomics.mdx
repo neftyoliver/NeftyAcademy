@@ -1,0 +1,134 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'stdatomic.h: 잠금 없이 세기, 비교 후 바꾸기, release·acquire로 건네기, CPU 명령';
+export const terms = [
+  'atomic_int', 'atomic_load', 'atomic_fetch_add', 'atomic_compare_exchange_weak', '~_Atomic',
+  'atomic_bool', 'atomic_load_explicit', 'atomic_store_explicit',
+];
+
+[「뮤텍스와 경쟁 상태」](#/read/c-mid/thr-mutex)에서 원자적 덧셈은 뮤텍스보다 몇 배 빨랐습니다(23~29ns 대 84~110ns). 원자적 연산은 CPU가 **끊기지 않는 한 덩어리로** 해 주는 읽기·고치기·쓰기입니다. 자물쇠 없이도 경쟁 상태가 생기지 않습니다. 이 쪽은 C11의 `stdatomic.h`로 원자적 연산 세 가지를 써 보고, 그것이 기계어로 어떻게 되는지 봅니다.
+
+## 세 가지 쓰임
+
+```c
+#include <stdatomic.h>
+#include <stdio.h>
+#include <threads.h>
+
+static atomic_int highest = 0;
+
+// 지금 값보다 크면 바꾼다. 그 사이 남이 바꿨으면 다시 해 본다
+static void update_max(int v)
+{
+    int seen = atomic_load(&highest);
+    while (v > seen && !atomic_compare_exchange_weak(&highest, &seen, v))
+        ;   // 실패하면 seen에 최신 값이 들어와 있다
+}
+
+static int scan(void *arg)
+{
+    int base = *(int *)arg;
+    for (int i = 0; i < 100000; i++) {
+        long long v = (long long)base * 7919 + (long long)i * 104729;
+        update_max((int)(v % 1000003));     // 0~1000002 사이의 흩어진 수
+    }
+    return 0;
+}
+
+// 준비 깃발로 데이터 건네기
+static int payload;
+static atomic_bool ready = false;
+
+static int producer(void *arg)
+{
+    (void)arg;
+    payload = 42;                                            // 1. 데이터를 쓰고
+    atomic_store_explicit(&ready, true, memory_order_release);  // 2. 깃발을 든다
+    return 0;
+}
+
+static int consumer(void *arg)
+{
+    (void)arg;
+    while (!atomic_load_explicit(&ready, memory_order_acquire))  // 깃발을 볼 때까지
+        thrd_yield();
+    // 깃발 앞의 쓰기가 보인다
+    printf("받은 값 %d\n", payload);
+    return 0;
+}
+
+int main(void)
+{
+    int bases[4] = {1, 2, 3, 4};
+    thrd_t t[4];
+    for (int k = 0; k < 4; k++)
+        thrd_create(&t[k], scan, &bases[k]);
+    for (int k = 0; k < 4; k++)
+        thrd_join(t[k], NULL);
+    printf("가장 큰 값 %d\n", atomic_load(&highest));
+
+    thrd_t p, c;
+    thrd_create(&c, consumer, NULL);
+    thrd_create(&p, producer, NULL);
+    thrd_join(p, NULL);
+    thrd_join(c, NULL);
+    printf("atomic_int는 잠금 없이 되는가: %d\n", atomic_is_lock_free(&highest));
+    return 0;
+}
+```
+
+```text
+가장 큰 값 999998
+받은 값 42
+atomic_int는 잠금 없이 되는가: 1
+```
+
+## 1. 잠금 없이 세기
+
+`atomic_int`, `atomic_long` 같은 원자적 타입(또는 `_Atomic int`)에 `atomic_fetch_add`를 쓰면, 여러 스레드가 동시에 더해도 하나도 잃지 않습니다. 「컴퓨터의 입문」의 [「스레드의 개념」](#/read/basics/threads)에서 200만을 정확히 센 쪽이 이것이었습니다. 원자적 타입에 `++`나 `+=`를 써도 원자적으로 됩니다.
+
+## 2. 비교 후 바꾸기
+
+더하기처럼 CPU가 바로 해 주는 연산이 아니라 "지금 값보다 크면 바꾸기" 같은 일은 **비교 후 바꾸기**(CAS, compare-and-swap)로 만듭니다. `atomic_compare_exchange_weak(&변수, &기대값, 새값)`은 "변수가 아직 기대값이면 새값으로 바꾸고 `true`, 그 사이 누가 바꿔서 다르면 기대값에 지금 값을 넣고 `false`"를 한 덩어리로 합니다.
+
+`update_max`는 읽은 값(`seen`)보다 내 값이 크면 바꿔 보고, 실패하면 최신 값으로 다시 비교합니다. 다른 스레드가 더 큰 값을 먼저 넣었다면 `v > seen`이 거짓이 되어 멈춥니다. 네 스레드가 40만 개의 수를 훑어 가장 큰 999,998을 정확히 찾았습니다. 이름의 `weak`은 가끔 까닭 없이 실패할 수 있다는 뜻인데, 어차피 반복문 안에서 부르므로 문제없고 일부 CPU에서는 더 빠릅니다.
+
+## 3. release와 acquire로 건네기
+
+한 스레드가 데이터(`payload`)를 준비하고 깃발(`ready`)을 들면, 다른 스레드가 깃발을 보고 데이터를 읽는 모양입니다. 여기에는 함정이 있습니다. 컴파일러와 CPU는 빠르게 하려고 **메모리 쓰기의 순서를 바꿀 수** 있어서, 다른 코어에서는 깃발이 먼저 보이고 데이터는 아직 옛 값으로 보일 수 있습니다.
+
+| 순서 표시 | 약속 |
+| --- | --- |
+| `memory_order_release` (쓰는 쪽) | 이 쓰기 **앞의** 모든 쓰기가 먼저 끝난 것으로 보이게 한다 |
+| `memory_order_acquire` (읽는 쪽) | 이 읽기 **뒤의** 읽기가 앞당겨지지 않게 한다 |
+| `memory_order_relaxed` | 이 연산 하나만 원자적이면 된다. 순서 약속은 없다 |
+| `memory_order_seq_cst` | 모든 스레드가 같은 순서로 본다. `_explicit`이 없는 함수의 기본값 |
+
+깃발을 release로 쓰고 acquire로 읽으면, 깃발이 든 것을 본 스레드에게는 그 앞의 `payload = 42`가 반드시 보입니다. 그래서 `payload`는 보통 변수인데도 경쟁 없이 42를 받았습니다. 순서 표시를 잘 모르겠으면 기본값(`seq_cst`)을 쓰는 것이 안전합니다. 조금 느릴 수 있지만 틀리지는 않습니다.
+
+<Note kind="warn">
+깃발을 기다리는 반복문(바쁜 기다림)은 깃발이 금방 설 때만 씁니다. 오래 기다릴 수 있다면 [「조건 변수와 작업 줄 세우기」](#/read/c-mid/thr-condvar)처럼 잠들어 기다리는 것이 CPU를 아낍니다. 이 예제의 `thrd_yield`는 기다리는 동안 다른 스레드에게 CPU를 양보하는 정도입니다.
+</Note>
+
+## 기계어로 보면
+
+원자적 덧셈 하나와 보통 덧셈을 `-O2`로 컴파일해 견줬습니다.
+
+```text nocheck
+x86-64 (gcc-14)                          ARM64 (aarch64-linux-gnu-gcc-14)
+inc:          lock add QWORD PTR c[rip], 1   inc:   bl __aarch64_ldadd8_acq_rel
+inc_relaxed:  lock add QWORD PTR c[rip], 1   inc_relaxed: bl __aarch64_ldadd8_relax
+inc_plain:    add QWORD PTR plain[rip], 1    (읽고, 더하고, 쓰는 세 명령)
+```
+
+- x86-64에서는 보통 `add`에 `lock` 머리를 붙인 한 명령이 됩니다. `lock`이 "이 명령이 끝날 때까지 이 캐시 줄을 다른 코어가 못 건드리게 하라"는 뜻입니다. x86-64는 원래 순서 약속이 강한 CPU라 `relaxed`와 기본값이 같은 명령이 됐습니다
+- ARM64에서는 GCC가 작은 도우미 함수를 부릅니다. 이 도우미는 실행할 때 CPU가 원자적 덧셈 명령(ARMv8.1의 `ldadd`)을 갖고 있는지 보고 고릅니다. 라즈베리파이 5(Cortex-A76)처럼 그 명령이 있는 CPU만 쓸 거라면 `-march=armv8.1-a` 이상으로 컴파일해 `ldaddal` 한 명령으로 만들 수 있습니다
+- 순서 약속의 강도에 따라 ARM64는 다른 도우미(`_acq_rel`, `_relax`)를 고릅니다. 순서 약속이 약한 CPU에서는 순서 표시가 실제 명령을 바꿉니다
+
+`atomic_is_lock_free`가 1이면 그 타입은 진짜 원자적 명령으로 되는 것입니다. 크기가 큰 구조체를 `_Atomic`으로 만들면 0이 나오고, 속에서 몰래 자물쇠를 씁니다.
+
+## 정리
+
+- 원자적 연산은 CPU가 끊기지 않게 해 주는 읽기·고치기·쓰기이고, `atomic_fetch_add`로 자물쇠 없이 정확히 셀 수 있다
+- 바로 되는 연산이 없는 일은 비교 후 바꾸기(`atomic_compare_exchange_weak`)를 반복문으로 감싸 만든다
+- 데이터를 건넬 때는 깃발을 release로 쓰고 acquire로 읽어야 앞의 쓰기가 보이며, 확신이 없으면 기본값 `seq_cst`를 쓴다

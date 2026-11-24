@@ -1,0 +1,236 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '계층의 모양, 무엇이 무엇을 던지나, 내 예외 만들기, exception_ptr로 옮기기, 문맥을 덧붙이는 중첩';
+export const terms = [
+  'std::exception', 'std::runtime_error', '~runtime_error', 'std::logic_error', '~logic_error',
+  'std::out_of_range', '~out_of_range', 'std::invalid_argument', '~invalid_argument',
+  'std::bad_alloc', '~bad_alloc', 'exception_ptr', 'current_exception', 'rethrow_exception',
+  'std::terminate', 'throw_with_nested', 'rethrow_if_nested', 'std::length_error',
+  'std::domain_error', 'std::overflow_error', 'std::range_error', 'std::underflow_error',
+  'bad_cast', 'bad_typeid', 'bad_array_new_length',
+];
+
+[「throw, try, catch」](#/read/cpp-syntax/exc-basic)에서 예외를 던지고 받는 문법과 표준 예외 몇 가지를 봤습니다. 여기서는 계층 전체와, 라이브러리가 예외를 다루라고 준 도구를 봅니다.
+
+## 계층
+
+```text nocheck
+std::exception
+├─ logic_error
+│  ├─ invalid_argument, domain_error, length_error, out_of_range
+│  └─ future_error
+├─ runtime_error
+│  ├─ range_error, overflow_error, underflow_error
+│  ├─ system_error ── filesystem_error, ios_base::failure
+│  ├─ format_error, regex_error
+│  └─ nonexistent_local_time, ambiguous_local_time
+├─ bad_alloc ── bad_array_new_length
+├─ bad_cast ── bad_any_cast
+├─ bad_typeid, bad_function_call, bad_weak_ptr
+└─ bad_optional_access, bad_variant_access, bad_expected_access
+```
+
+맨 위의 `std::exception`이 가진 것은 가상 함수 `what()` 하나입니다. 그래서 `catch (const std::exception& e)` 한 줄이 표준 라이브러리가 던지는 모든 것을 받습니다.
+
+`logic_error`는 "부르기 전에 막을 수 있었던 잘못", `runtime_error`는 "실행해 봐야 아는 일"이라는 구분입니다. 실제로는 깔끔하게 나뉘지 않습니다. `std::stoi`에 사용자가 친 글자를 넣었다가 받는 `invalid_argument`는 `logic_error` 쪽입니다. 받는 쪽에서 이 두 갈래로 나눠 처리하는 일은 드물고, **구체적인 타입 하나**를 받거나 **`std::exception` 전체**를 받습니다.
+
+## 무엇이 무엇을 던지나
+
+GCC 14에서 실제로 던지게 해 보고 타입과 `what()`을 적은 것입니다.
+
+| 한 일 | 던져진 타입 | `what()` |
+| --- | --- | --- |
+| `v.at(3)` (빈 `vector`) | `out_of_range` | `vector::_M_range_check: __n (which is 3) >= ...` |
+| `std::stoi("abc")` | `invalid_argument` | `stoi` |
+| `std::stoi("99999999999")` | `out_of_range` | `stoi` |
+| `v.reserve(v.max_size() + 1)` | `length_error` | `vector::reserve` |
+| 빈 `optional`의 `.value()` | `bad_optional_access` | `bad optional access` |
+| 다른 타입으로 `std::get(variant)` | `bad_variant_access` | `std::get: wrong index for variant` |
+| 빈 `std::function` 부르기 | `bad_function_call` | `bad_function_call` |
+| 너무 큰 `new` | `bad_alloc` | `std::bad_alloc` |
+| `std::regex("(")` | `regex_error` | `Mismatched '(' and ')' in regular expression` |
+| `thread`를 두 번 `join` | `system_error` | `Invalid argument` |
+| 틀린 서식으로 `std::vformat` | `format_error` | `format error: failed to parse format-spec` |
+
+`what()`의 글은 **구현마다 다릅니다.** `stoi`처럼 함수 이름뿐인 것도 있습니다. 로그에 남기는 데 쓰고, 글의 내용으로 분기하지 않습니다. 사용자에게 보여 줄 말은 받는 쪽에서 타입을 보고 직접 만듭니다.
+
+## 내 예외
+
+내 예외는 `std::runtime_error`(또는 `logic_error`)를 상속해 만듭니다. `what()`의 글을 보관하는 일을 부모가 해 주고, `catch (const std::exception&)`에 함께 걸립니다.
+
+```cpp
+#include <exception>
+#include <format>
+#include <print>
+#include <stdexcept>
+#include <string>
+
+class SensorError : public std::runtime_error {
+public:
+    SensorError(int address, const std::string& what)
+        : std::runtime_error(std::format("센서 0x{:02x}: {}", address, what)),
+          address_(address)
+    {
+    }
+    int address() const noexcept { return address_; }
+
+private:
+    int address_;
+};
+
+class SensorTimeout : public SensorError {
+public:
+    explicit SensorTimeout(int address) : SensorError(address, "응답 없음") {}
+};
+
+double read_sensor(int address)
+{
+    if (address == 0x76)
+        throw SensorTimeout(address);
+    if (address == 0x10)
+        throw SensorError(address, "체크섬이 맞지 않는다");
+    if (address == 0)
+        throw std::invalid_argument("주소 0 은 쓸 수 없다");
+    return 21.5;
+}
+
+int main()
+{
+    for (const int address : {0x40, 0x76, 0x10, 0}) {
+        try {
+            std::println("{}", read_sensor(address));
+        } catch (const SensorTimeout& e) {          // 좁은 것부터
+            std::println("다시 시도할 것: {}", e.what());
+        } catch (const SensorError& e) {
+            std::println("센서 오류(주소 {}): {}", e.address(), e.what());
+        } catch (const std::exception& e) {         // 넓은 것은 마지막에
+            std::println("그 밖의 오류: {}", e.what());
+        }
+    }
+}
+```
+
+```text
+21.5
+다시 시도할 것: 센서 0x76: 응답 없음
+센서 오류(주소 16): 센서 0x10: 체크섬이 맞지 않는다
+그 밖의 오류: 주소 0 은 쓸 수 없다
+```
+
+| 지킬 것 | 까닭 |
+| --- | --- |
+| `std::exception`의 자식으로 만든다 | 맨 위의 `catch (const std::exception&)`가 놓치지 않는다 |
+| 판단에 쓸 정보는 멤버로 둔다 | `what()`의 글을 뜯어 읽지 않게 |
+| 타입은 **받는 쪽이 다르게 처리할 것**만 나눈다 | 오류 하나마다 클래스를 만들면 아무도 구분해 받지 않는다 |
+| `const` 참조로 받는다 | 값으로 받으면 [자식 부분이 잘린다](#/read/cpp-syntax/inh-slicing) |
+
+## exception_ptr
+
+`catch` 블록을 벗어나면 예외는 사라집니다. 나중에, 또는 다른 스레드에서 처리하려면 `std::current_exception()`으로 **값처럼 붙잡아** 둡니다.
+
+```cpp
+#include <exception>
+#include <print>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+double read_sensor(int address)
+{
+    if (address % 2 == 0)
+        throw std::runtime_error("응답 없음: " + std::to_string(address));
+    return 20.0 + address;
+}
+
+int main()
+{
+    std::vector<std::exception_ptr> failures;
+    for (const int address : {1, 2, 3, 4}) {
+        try {
+            const double value = read_sensor(address);
+            std::println("{} -> {}", address, value);
+        } catch (...) {
+            failures.push_back(std::current_exception());
+        }
+    }
+
+    std::println("실패 {}건", failures.size());
+    for (const std::exception_ptr& failure : failures) {
+        try {
+            std::rethrow_exception(failure);    // 붙잡아 둔 것을 다시 던진다
+        } catch (const std::exception& e) {
+            std::println("  {}", e.what());
+        }
+    }
+}
+```
+
+```text
+1 -> 21
+3 -> 23
+실패 2건
+  응답 없음: 2
+  응답 없음: 4
+```
+
+`std::exception_ptr`는 포인터 하나 크기이고, 복사하면 같은 예외를 함께 가리킵니다. 하나가 실패해도 나머지를 끝까지 돌리고 마지막에 모아 보고하는 위와 같은 코드에 쓰고, 일꾼 스레드에서 난 예외를 부른 스레드로 옮기는 데 씁니다. [`std::future`](#/read/cpp-stl/conc-future)가 안에서 하는 일이 이것입니다.
+
+## 문맥을 덧붙이기
+
+깊은 곳에서 올라온 `stoi`라는 예외만 보고는 무엇을 하다 실패했는지 알 수 없습니다. 중간 단계에서 받아 **자기 문맥을 덧붙여** 다시 던질 수 있습니다.
+
+```cpp
+#include <cstddef>
+#include <exception>
+#include <format>
+#include <print>
+#include <stdexcept>
+#include <string>
+
+int load_rate(const std::string& file, const std::string& line)
+{
+    try {
+        return std::stoi(line);
+    } catch (...) {
+        // 지금 처리 중인 예외를 속에 품은 새 예외를 던진다
+        std::throw_with_nested(
+            std::runtime_error(std::format("{} 을 읽지 못했다", file)));
+    }
+}
+
+void print_chain(const std::exception& e, std::size_t depth = 0)
+{
+    std::println("{}{}", std::string(depth * 2, ' '), e.what());
+    try {
+        std::rethrow_if_nested(e);      // 속에 품은 것이 있으면 던진다
+    } catch (const std::exception& inner) {
+        print_chain(inner, depth + 1);
+    }
+}
+
+int main()
+{
+    try {
+        load_rate("config.txt", "fast");
+    } catch (const std::exception& e) {
+        print_chain(e);
+    }
+}
+```
+
+```text
+config.txt 을 읽지 못했다
+  stoi
+```
+
+바깥 예외만 보는 코드에는 보통의 `runtime_error`로 보이고, 원인이 궁금한 코드는 `rethrow_if_nested`로 한 겹씩 벗깁니다. 단계마다 문맥을 붙이면 로그 한 덩어리에 "무엇을 하다, 무엇 때문에"가 다 남습니다.
+
+<Note kind="warn">
+예외가 **넘어가면 안 되는 경계**가 있습니다. 스레드의 시작 함수 밖으로 나가면 프로그램이 `std::terminate`로 끝납니다. C 라이브러리가 부르는 콜백(시그널 핸들러, `qsort`의 비교 함수, GPIO 라이브러리의 인터럽트 콜백) 밖으로 나가는 것은 정의되지 않은 동작입니다. 소멸자 밖으로 나가는 것도 `terminate`입니다. 이 경계의 함수는 `try { ... } catch (...) { }`로 감싸고, 안에서 `std::current_exception()`으로 붙잡아 안전한 쪽으로 넘깁니다.
+</Note>
+
+## 정리
+
+- 표준 예외는 모두 `std::exception`의 자식이다. `what()`의 글은 구현마다 다르므로 로그에만 쓰고, 판단은 타입과 멤버로 한다
+- 내 예외는 `std::runtime_error`를 상속하고, 받는 쪽이 달리 처리할 것만 타입으로 나눈다. 좁은 타입부터 `const` 참조로 받는다
+- `exception_ptr`로 예외를 붙잡아 나중에나 다른 스레드에서 다시 던지고, `throw_with_nested`로 문맥을 덧붙인다

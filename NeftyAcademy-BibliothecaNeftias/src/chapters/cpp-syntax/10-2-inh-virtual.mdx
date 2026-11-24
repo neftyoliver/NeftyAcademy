@@ -1,0 +1,112 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '실제 타입의 함수가 불리게 하기, 가상 함수 표, override와 final';
+export const terms = ['~override', '~final'];
+
+부모 타입의 참조로 자식 객체를 가리킬 때, 멤버 함수를 부르면 어느 쪽 것이 불릴까요. 기본은 **참조의 타입**(부모)을 따르고, `virtual`을 붙인 함수는 **객체의 실제 타입**(자식)을 따릅니다. 이것이 다형성입니다.
+
+## virtual
+
+```cpp
+#include <memory>
+#include <print>
+#include <vector>
+
+class Sensor {
+public:
+    virtual ~Sensor() = default;
+    virtual double read() const { return 0; }       // 자식이 바꿔 쓸 수 있다
+    const char* kind() const { return "sensor"; }   // virtual 아님
+};
+
+class Thermometer : public Sensor {
+public:
+    double read() const override { return 23.5; }
+    const char* kind() const { return "thermometer"; }  // 가릴 뿐이다
+};
+
+class Barometer final : public Sensor {
+public:
+    double read() const override { return 1013.2; }
+};
+
+int main()
+{
+    std::vector<std::unique_ptr<Sensor>> all;
+    all.push_back(std::make_unique<Thermometer>());
+    all.push_back(std::make_unique<Barometer>());
+
+    for (const auto& s : all)
+        std::println("{} {}", s->kind(), s->read());
+
+    std::println("{} {}", sizeof(Sensor), sizeof(Thermometer));
+}
+```
+
+```text
+sensor 23.5
+sensor 1013.2
+8 8
+```
+
+`s`의 타입은 둘 다 `Sensor`의 포인터입니다. `kind()`는 `virtual`이 아니어서 컴파일할 때 `Sensor::kind`로 정해졌습니다. `read()`는 `virtual`이어서 실행 중에 객체가 무엇인지 보고 `Thermometer::read`, `Barometer::read`가 불렸습니다.
+
+서로 다른 타입의 객체를 한 컨테이너에 담아 같은 방식으로 다루는 것. 가상 함수의 쓸모는 이것입니다.
+
+## 가상 함수 표
+
+`Sensor`에는 데이터 멤버가 없는데 `sizeof`가 8입니다. 가상 함수가 하나라도 있는 클래스의 객체에는 **포인터 하나가 숨어** 있습니다.
+
+- 컴파일러는 클래스마다 **가상 함수 표**(vtable)를 하나 만든다. 그 클래스의 가상 함수들의 주소가 적힌 배열이다
+- 객체는 맨 앞에 자기 클래스의 표를 가리키는 포인터(vptr)를 가진다. 생성자가 이것을 채운다
+- `s->read()`는 "객체의 vptr을 읽고 → 표의 `read` 칸을 읽고 → 그 주소를 부른다"가 된다
+
+C에서 함수 포인터가 든 구조체를 만들어 장치마다 다른 함수를 꽂아 쓰던 것과 같은 기법입니다([「함수 포인터」](#/read/c-basic/ptr-function)). 리눅스 커널의 `file_operations`가 그 꼴입니다. C++은 표를 만들고 채우는 일을 컴파일러가 합니다.
+
+| 비용 | 크기 |
+| --- | --- |
+| 객체마다 포인터 하나 | 8바이트 (64비트) |
+| 호출마다 메모리를 두 번 더 읽고 간접 호출 | 보통은 미미하다. 다만 컴파일러가 호출을 본문으로 바꿔 넣지 못한다 |
+
+아주 작은 함수를 수백만 번 부르는 안쪽 루프가 아니라면 걱정할 비용이 아닙니다.
+
+## override
+
+`override`는 "이 함수는 부모의 가상 함수를 다시 정의한 것"이라는 표시이고, **그렇지 않으면 컴파일 오류**가 납니다.
+
+```cpp nocheck
+class Thermometer : public Sensor {
+    double read() override;         // 오류: 부모의 read는 const인데 이것은 아니다
+    double raed() const override;   // 오류: 부모에 raed라는 가상 함수가 없다
+};
+```
+
+`override`가 없으면 위 두 줄은 조용히 **새 함수**가 되고, 부모의 `read`는 다시 정의되지 않은 채 남습니다. 다시 정의하는 함수에는 반드시 `override`를 붙입니다. 자식 쪽에는 `virtual`을 또 적지 않습니다. `override`가 이미 그 뜻을 품고 있습니다.
+
+## final
+
+| 자리 | 뜻 |
+| --- | --- |
+| `class Barometer final : …` | 이 클래스를 더 상속할 수 없다 |
+| `double read() const final;` | 이 함수를 자식이 다시 정의할 수 없다 |
+
+설계의 뜻을 밝히는 용도이고, 덤으로 컴파일러가 "더 내려갈 곳이 없으니 이 호출은 이 함수가 확실하다"며 간접 호출을 직접 호출로 바꿀 수 있게 됩니다.
+
+## 알아 둘 규칙
+
+| 규칙 | 까닭 |
+| --- | --- |
+| 생성자와 소멸자 안에서 부른 가상 함수는 **그 클래스의 것**이 불린다 | 부모의 생성자가 도는 동안 자식 부분은 아직 없다 |
+| 가상 함수에 기본 인자를 주지 않는다 | 기본 인자는 참조의 타입으로 정해져서 함수와 어긋난다 |
+| 가상 함수가 있으면 [소멸자도 `virtual`](#/read/cpp-syntax/inh-dtor) | 부모 포인터로 지울 때 자식의 소멸자가 불려야 한다 |
+| 다형적으로 쓸 객체는 값이 아니라 포인터나 참조로 다룬다 | 값으로 복사하면 [잘린다](#/read/cpp-syntax/inh-slicing) |
+
+<Note>
+어느 타입들이 올지 컴파일할 때 이미 안다면 가상 함수 없이 템플릿으로 같은 일을 할 수 있습니다. 호출이 컴파일할 때 정해져 간접 호출이 없습니다. 가상 함수는 "실행 중에 정해지는 다형성", 템플릿은 "컴파일할 때 정해지는 다형성"입니다. [콘셉트](#/read/cpp-syntax/con-own)에서 견줘 봅니다.
+</Note>
+
+## 정리
+
+- `virtual` 함수는 객체의 실제 타입에 따라 불린다. 그 장치가 가상 함수 표
+- 다시 정의할 때는 반드시 `override`. 컴파일러가 서명이 맞는지 확인해 준다
+- 더 내려가지 못하게 하려면 `final`

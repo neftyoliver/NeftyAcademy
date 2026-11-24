@@ -1,0 +1,130 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '컴파일할 때 갈라지는 if, 버려진 갈래는 만들어지지 않는다, #if와의 차이';
+
+템플릿 안에서 "타입이 정수면 이렇게, 문자열이면 저렇게" 하고 싶을 때가 있습니다. 보통의 `if`로는 안 됩니다. 두 갈래가 **모두** 그 타입에 대해 컴파일되어야 하기 때문입니다. `if constexpr`은 조건을 컴파일할 때 판단하고, 고르지 않은 갈래를 **버립니다.**
+
+## 타입에 따라 갈라지기
+
+```cpp
+#include <concepts>
+#include <format>
+#include <print>
+#include <string>
+
+template <typename T>
+std::string to_text(const T& value)
+{
+    if constexpr (std::integral<T>)
+        return std::to_string(value) + " (정수)";
+    else if constexpr (std::floating_point<T>)
+        return std::format("{:.2f} (실수)", value);
+    else if constexpr (requires { value.size(); })
+        return std::format("길이 {}", value.size());
+    else
+        return "모르는 타입";
+}
+
+constexpr bool has_display = false;
+
+void show_status()
+{
+    if constexpr (has_display)
+        std::println("화면에 그린다");
+    else
+        std::println("로그에 적는다");
+}
+
+int main()
+{
+    std::println("{}", to_text(42));
+    std::println("{}", to_text(3.14159));
+    std::println("{}", to_text(std::string("gpio")));
+    std::println("{}", to_text(nullptr));
+    show_status();
+}
+```
+
+```text
+42 (정수)
+3.14 (실수)
+길이 4
+모르는 타입
+로그에 적는다
+```
+
+`to_text(42)`에서 `T`는 `int`입니다. `value.size()`는 `int`에 대해 컴파일되지 않는 코드이지만 문제없습니다. 그 갈래는 **인스턴스화되지 않았습니다.** `if constexpr`을 보통의 `if`로 바꾸면 `int`에는 `size()`가 없다는 오류가 납니다.
+
+조건에는 [콘셉트](#/read/cpp-syntax/con-standard), [타입 특성](#/read/cpp-syntax/ct-assert), [`requires` 식](#/read/cpp-syntax/con-requires), `sizeof` 등 컴파일할 때의 `bool`이면 무엇이든 옵니다.
+
+## 버려진다는 것
+
+| | 고른 갈래 | 버려진 갈래 |
+| --- | --- | --- |
+| 템플릿 안, 조건이 `T`에 달렸다 | 인스턴스화된다 | 인스턴스화되지 **않는다.** `T`에 대해 틀린 코드여도 된다 |
+| 템플릿 밖 (`show_status`) | 컴파일된다 | 문법과 타입 검사는 **받는다.** 기계어는 만들어지지 않는다 |
+
+버려진 갈래도 **문법은 맞아야** 합니다. 괄호가 안 맞거나 선언되지 않은 이름을 쓰면 오류입니다. `T`에 달린 부분만 검사를 면합니다.
+
+반환 타입 추론에도 영향이 있습니다. `auto`를 돌려주는 함수에서 갈래마다 다른 타입을 `return`해도 됩니다. 버려진 갈래의 `return`은 추론에 끼지 않기 때문입니다.
+
+```cpp nocheck
+template <typename T>
+auto unwrap(T value)
+{
+    if constexpr (std::is_pointer_v<T>)
+        return *value;          // T가 int*면 int를 돌려준다
+    else
+        return value;           // 아니면 T 그대로
+}
+```
+
+## #if와 견주기
+
+`show_status`는 C였다면 `#if HAS_DISPLAY`로 썼을 코드입니다.
+
+| | `#if` | `if constexpr` |
+| --- | --- | --- |
+| 꺼진 쪽의 코드 | 컴파일러가 **보지 않는다** | 문법과 타입을 검사한다 |
+| 꺼 둔 사이 코드가 낡으면 | 켜는 날에야 오류가 쏟아진다 | 바로 오류가 난다 |
+| 조건 | 전처리기 매크로만 | 타입, `constexpr` 값, `sizeof` 등 |
+| 쓸 수 있는 자리 | 어디든 (선언, `#include`도 가른다) | 함수 본문 안의 문장만 |
+| 헤더가 없는 플랫폼 | 가를 수 있다 | 가를 수 없다. `#include`는 이미 지나갔다 |
+
+"이 플랫폼에는 그 헤더가 없다"는 여전히 `#if`의 일입니다. "같은 헤더와 타입 위에서 동작만 다르다"는 `if constexpr`이 낫습니다. 꺼진 쪽이 썩지 않습니다.
+
+## 오버로딩과 견주기
+
+같은 일을 [제약이 달린 오버로드](#/read/cpp-syntax/con-requires)로도 할 수 있습니다.
+
+| | 오버로드 여럿 | `if constexpr` 하나 |
+| --- | --- | --- |
+| 갈래를 나중에 덧붙이기 | 다른 파일에서도 된다 | 그 함수를 고쳐야 한다 |
+| 갈래끼리 코드를 나누기 | 어렵다 | 쉽다. 앞뒤의 공통 부분을 한 번만 쓴다 |
+| 읽기 | 갈래가 흩어진다 | 한눈에 보인다 |
+
+갈래가 두셋이고 공통 부분이 많으면 `if constexpr`, 다른 사람이 자기 타입에 대한 갈래를 덧붙일 수 있어야 하면 오버로드나 [특수화](#/read/cpp-syntax/tpl-special)입니다.
+
+## 가변 인자와 함께
+
+[묶음](#/read/cpp-syntax/tpl-variadic)을 하나씩 처리하는 재귀를 `if constexpr`이 간단하게 만듭니다. "인자가 없을 때"를 위한 오버로드를 따로 둘 필요가 없습니다.
+
+```cpp nocheck
+template <typename T, typename... Rest>
+void show(const T& first, const Rest&... rest)
+{
+    std::println("{}", first);
+    if constexpr (sizeof...(rest) > 0)
+        show(rest...);          // 남은 것이 없으면 이 줄은 만들어지지 않는다
+}
+```
+
+<Note kind="warn">
+`if constexpr (조건)`의 조건은 **컴파일할 때의 상수**여야 합니다. 함수의 인자는 `constexpr` 함수 안에서도 상수가 아니므로 `if constexpr (n > 0)`은 오류입니다. 실행 중의 값으로 가르는 것은 보통의 `if`입니다. "지금 컴파일할 때 계산되고 있는가"로 가르려면 [`if consteval`](#/read/cpp-syntax/ct-consteval)을 씁니다.
+</Note>
+
+## 정리
+
+- `if constexpr`은 컴파일할 때 갈라지고, 고르지 않은 갈래는 인스턴스화되지 않는다
+- 템플릿에서 타입에 따라 다른 코드를 한 함수 안에 쓸 수 있다
+- `#if`와 달리 꺼진 쪽도 문법 검사를 받는다. 헤더가 없는 경우만 `#if`를 쓴다

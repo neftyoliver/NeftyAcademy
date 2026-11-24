@@ -1,0 +1,135 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '스레드 모드: 단일, 다중, 직렬화, 스레드마다 연결, WAL에서 함께 읽고 쓰기, 스냅숏과 BUSY_SNAPSHOT';
+export const terms = [
+  'SQLITE_BUSY_SNAPSHOT', 'SQLITE_OPEN_FULLMUTEX', 'SQLITE_OPEN_NOMUTEX', 'SQLITE_THREADSAFE',
+  'sqlite3_threadsafe',
+];
+
+SQLite는 여러 스레드에서 쓸 수 있지만, 어떻게 쓸 수 있는지는 라이브러리를 빌드한 방식과 연결을 여는 방식, 그리고 연결을 스레드 사이에서 나눠 쓰는지에 달려 있습니다.
+
+## 세 가지 모드
+
+- **단일 스레드**: 내부 잠금을 모두 뺀 빌드(`SQLITE_THREADSAFE=0`)입니다. 스레드 하나에서만 써야 합니다
+- **다중 스레드**: 여러 스레드가 동시에 써도 되지만, 연결 하나나 문장 하나를 두 스레드가 동시에 쓰면 안 됩니다
+- **직렬화**: 연결 하나를 여러 스레드가 나눠 써도 됩니다. SQLite가 연결마다 뮤텍스로 차례를 지킵니다
+
+배포판의 SQLite는 보통 직렬화로 빌드되어 있고(`sqlite3_threadsafe()`가 1), 연결을 열 때 `SQLITE_OPEN_NOMUTEX`를 주면 그 연결은 다중 스레드 모드로, `SQLITE_OPEN_FULLMUTEX`를 주면 직렬화 모드로 돕니다. 직렬화 모드에서 연결 하나를 나눠 쓰는 것이 안전하다고 해서 좋은 것은 아닙니다. 트랜잭션은 연결에 속하므로 한 스레드의 `BEGIN`이 다른 스레드의 문장까지 감싸 버리고, `sqlite3_errmsg`나 마지막에 넣은 행 번호도 다른 스레드의 것이 될 수 있습니다. 그래서 **스레드마다 연결 하나**를 두고, 연결이 많아지면 한 번에 한 스레드만 빌려 쓰는 풀로 관리합니다([「연결 풀」](#/read/cpp-database/pool-pool)).
+
+## WAL에서 함께 읽고 쓰기
+
+[「트랜잭션」](#/read/cpp-database/sqlite-tx)의 WAL 방식에서는 읽는 쪽이 쓰는 쪽을 막지 않고 쓰는 쪽도 읽는 쪽을 막지 않습니다. 읽기 트랜잭션은 시작할 때의 스냅숏을 보고, 쓰는 쪽은 여전히 한 번에 하나입니다. 쓰는 스레드 하나와 읽는 스레드 셋에 각자 연결을 주고 돌려 보았습니다.
+
+```cpp flags=-lsqlite3
+#include <sqlite3.h>
+#include <atomic>
+#include <cstdio>
+#include <filesystem>
+#include <string>
+#include <thread>
+#include <vector>
+
+std::string path;
+
+sqlite3* open_conn() {                         // 스레드마다 자기 연결을 연다
+    sqlite3* db;
+    sqlite3_open_v2(path.c_str(), &db,
+                    SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
+                        SQLITE_OPEN_NOMUTEX,        // 연결을 나눠 쓰지 않는다
+                    nullptr);
+    sqlite3_busy_timeout(db, 2000);
+    return db;
+}
+
+long long one(sqlite3* db, const char* sql) {  // 결과 첫 칸, 오류면 -확장 코드
+    sqlite3_stmt* st;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, nullptr) != SQLITE_OK) return -1;
+    int rc = sqlite3_step(st);
+    long long v = rc == SQLITE_ROW ? sqlite3_column_int64(st, 0)
+                : rc == SQLITE_DONE ? 0 : -sqlite3_extended_errcode(db);
+    sqlite3_finalize(st);
+    return v;
+}
+
+int main() {
+    std::printf("컴파일 때 스레드 안전 수준: %d (1이면 직렬화)\n",
+                sqlite3_threadsafe());
+    path = (std::filesystem::temp_directory_path() / "academy-wal.db").string();
+    for (auto ext : {"", "-wal", "-shm"}) std::filesystem::remove(path + ext);
+    sqlite3* setup = open_conn();
+    one(setup, "PRAGMA journal_mode=WAL");
+    one(setup, "CREATE TABLE ledger (v INTEGER)");
+
+    std::atomic<bool> done = false;
+    std::atomic<int> broken = 0, reads = 0;
+    std::thread writer([&] {                   // 트랜잭션마다 +k와 -k를 함께 넣는다
+        sqlite3* db = open_conn();
+        for (int k = 1; k <= 200; ++k) {
+            one(db, "BEGIN IMMEDIATE");
+            for (int v : {k, -k}) {
+                auto sql = "INSERT INTO ledger VALUES (" + std::to_string(v) + ")";
+                one(db, sql.c_str());
+            }
+            one(db, "COMMIT");
+        }
+        done = true;
+        sqlite3_close(db);
+    });
+    std::vector<std::thread> readers;
+    for (int r = 0; r < 3; ++r)
+        readers.emplace_back([&] {             // 반쯤 커밋된 모습을 보는지 감시
+            sqlite3* db = open_conn();
+            while (!done) {
+                long long n = one(db, "SELECT count(*) FROM ledger");
+                long long s = one(db, "SELECT sum(v) FROM ledger");
+                if (n % 2 != 0 || s != 0) ++broken;  // 반쪽 트랜잭션이면 어긋남
+                ++reads;
+            }
+            sqlite3_close(db);
+        });
+    writer.join();
+    for (auto& t : readers) t.join();
+    std::printf("쓰기 200번 동안 읽기 스레드 3개가 %s, 어긋난 모습 %d번\n",
+                reads > 0 ? "계속 읽었고" : "읽지 못했고", broken.load());
+    std::printf("행 %lld개, 합 %lld\n", one(setup, "SELECT count(*) FROM ledger"),
+                one(setup, "SELECT sum(v) FROM ledger"));
+
+    sqlite3 *reader = open_conn(), *writer2 = open_conn();
+    one(reader, "BEGIN");
+    const char* count = "SELECT count(*) FROM ledger";
+    std::printf("읽는 쪽 스냅숏: %lld행\n", one(reader, count));
+    one(writer2, "INSERT INTO ledger VALUES (1000)");    // 읽는 동안 커밋
+    std::printf("다른 연결이 커밋한 뒤에도: %lld행\n", one(reader, count));
+    std::printf("옛 스냅숏에서 쓰기: 코드 %lld\n",
+                -one(reader, "INSERT INTO ledger VALUES (-1000)"));
+    one(reader, "ROLLBACK");
+    std::printf("새 트랜잭션: %lld행\n", one(reader, count));
+    for (sqlite3* db : {reader, writer2, setup}) sqlite3_close(db);
+    for (auto ext : {"", "-wal", "-shm"}) std::filesystem::remove(path + ext);
+}
+```
+
+```text
+컴파일 때 스레드 안전 수준: 1 (1이면 직렬화)
+쓰기 200번 동안 읽기 스레드 3개가 계속 읽었고, 어긋난 모습 0번
+행 400개, 합 0
+읽는 쪽 스냅숏: 400행
+다른 연결이 커밋한 뒤에도: 400행
+옛 스냅숏에서 쓰기: 코드 517
+새 트랜잭션: 401행
+```
+
+- **스레드마다 연결**: 네 스레드가 각자 연결을 열었고, 연결을 나눠 쓰지 않으니 `SQLITE_OPEN_NOMUTEX`로 연결의 뮤텍스를 뺐습니다
+- **반쪽은 보이지 않는다**: 쓰는 쪽은 트랜잭션마다 +k와 -k를 함께 넣었습니다. 읽는 쪽 셋이 쉬지 않고 행 수와 합을 읽었지만 홀수 개나 0이 아닌 합, 곧 반만 커밋된 모습은 한 번도 보지 못했습니다
+- **스냅숏**: 읽기 트랜잭션을 연 연결은 다른 연결이 한 행을 커밋한 뒤에도 400행을 보았고, 트랜잭션을 새로 열자 401행을 보았습니다
+- **옛 스냅숏에서 쓰기**: 낡은 스냅숏을 본 채로 쓰려 하자 517(`SQLITE_BUSY_SNAPSHOT`)이 났습니다. 기다려도 스냅숏이 새로워지지 않으므로 `busy_timeout`도 소용없고, 트랜잭션을 끝내고 처음부터 다시 해야 합니다. 쓸 트랜잭션을 `BEGIN IMMEDIATE`로 시작하는 이유가 여기서도 나옵니다
+
+<Note>
+WAL은 같은 기계의 프로세스들이 공유 메모리 파일(`-shm`)로 조율하는 방식이라 네트워크 파일 시스템 위의 데이터베이스에서는 쓰지 않습니다. 또 오래 열린 읽기 트랜잭션이 있으면 체크포인트가 그 스냅숏 이후의 내용을 데이터베이스 파일로 옮기지 못해 WAL 파일이 계속 커집니다. 읽기 트랜잭션도 필요한 만큼만 짧게 엽니다.
+</Note>
+
+## 정리
+
+- SQLite에는 단일, 다중, 직렬화 스레드 모드가 있고, 연결을 열 때 NOMUTEX와 FULLMUTEX로 연결마다 정할 수 있다
+- 트랜잭션은 연결에 속하므로 연결을 스레드끼리 나눠 쓰지 않고 스레드마다 연결 하나를 두거나 풀로 빌려 쓴다
+- WAL에서는 읽기와 쓰기가 서로 막지 않고 읽기 트랜잭션은 스냅숏을 보며, 낡은 스냅숏에서 쓰면 BUSY_SNAPSHOT이 나므로 처음부터 다시 한다

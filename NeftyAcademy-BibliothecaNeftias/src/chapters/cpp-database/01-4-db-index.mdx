@@ -1,0 +1,131 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '인덱스: 훑기와 찾기, B-트리, 계산을 씌운 열, 두 열 인덱스와 정렬, 공간과 쓰기 비용';
+
+인덱스가 없으면 데이터베이스는 "손님 1234의 주문"을 찾으려고 모든 행을 처음부터 끝까지 읽습니다(**전체 훑기**). **인덱스**는 책 뒤의 찾아보기처럼, 열의 값을 정렬해 두고 그 값이 있는 행의 위치를 적어 둔 별도의 구조입니다. 행이 많을수록 차이가 커집니다.
+
+## B-트리
+
+대부분의 데이터베이스는 인덱스를 **B-트리**(정확히는 B+트리)로 만듭니다. 정렬된 키를 디스크 쪽(페이지) 단위로 담고, 위층의 쪽이 아래층 쪽들의 범위를 가리킵니다. 쪽 하나에 키가 수백 개 들어가므로 행이 수백만 개여도 서너 층이면 끝까지 닿고, 키가 정렬되어 있어 범위 검색과 정렬에도 그대로 씁니다. SQLite는 테이블 자체도 행 번호(rowid)를 키로 하는 B-트리이고, 인덱스는 (열 값, 행 번호) 쌍을 정렬해 담은 B-트리입니다.
+
+행 10만 개짜리 주문 테이블에서 SQLite의 질의 계획(`EXPLAIN QUERY PLAN`)과 실제로 한 일을 세어 보았습니다. `sqlite3_stmt_status`는 문장 하나가 전체 훑기로 넘긴 행과 내부 가상 기계가 실행한 명령의 수를 알려 주므로, 시간을 재지 않아도 일의 양을 비교할 수 있습니다.
+
+```cpp flags=-lsqlite3
+#include <sqlite3.h>
+#include <cstdio>
+#include <string>
+
+sqlite3* db;
+void exec(const char* sql) { sqlite3_exec(db, sql, nullptr, nullptr, nullptr); }
+
+// 질의 계획과, 실제로 한 일(전체 훑기로 넘긴 행, 가상 기계 명령 수)을 찍는다
+void probe(const char* title, const char* sql) {
+    std::printf("[%s]\n", title);
+    sqlite3_stmt* st;
+    std::string plan = std::string("EXPLAIN QUERY PLAN ") + sql;
+    sqlite3_prepare_v2(db, plan.c_str(), -1, &st, nullptr);
+    while (sqlite3_step(st) == SQLITE_ROW)
+        std::printf("  계획: %s\n", sqlite3_column_text(st, 3));
+    sqlite3_finalize(st);
+    sqlite3_prepare_v2(db, sql, -1, &st, nullptr);
+    std::string rows;
+    while (sqlite3_step(st) == SQLITE_ROW)
+        rows += (rows.empty() ? "" : ", ") +
+                std::to_string(sqlite3_column_int(st, 0));
+    std::printf("  결과 %s, 훑은 행 %d, 명령 %d\n", rows.c_str(),
+                sqlite3_stmt_status(st, SQLITE_STMTSTATUS_FULLSCAN_STEP, 0),
+                sqlite3_stmt_status(st, SQLITE_STMTSTATUS_VM_STEP, 0));
+    sqlite3_finalize(st);
+}
+
+int insert_cost() {                      // 행 하나를 넣는 데 드는 명령 수
+    sqlite3_stmt* st;
+    sqlite3_prepare_v2(db, "INSERT INTO orders (customer_id, created, total) "
+                           "VALUES (77, 100001, 500)", -1, &st, nullptr);
+    sqlite3_step(st);
+    int n = sqlite3_stmt_status(st, SQLITE_STMTSTATUS_VM_STEP, 0);
+    sqlite3_finalize(st);
+    return n;
+}
+
+int main() {
+    sqlite3_open(":memory:", &db);
+    exec("CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INT, "
+         "created INT, total INT)");
+    exec("BEGIN");
+    exec("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n "
+         "WHERE i < 100000) INSERT INTO orders (customer_id, created, total) "
+         "SELECT (i * 7919) % 5000, i, (i * 31) % 1000 FROM n");
+    exec("COMMIT");
+    const char* by_customer =
+        "SELECT count(*) FROM orders WHERE customer_id = 1234";
+    const char* latest = "SELECT created FROM orders WHERE customer_id = 1234 "
+                         "ORDER BY created DESC LIMIT 3";
+    std::printf("행 10만 개, 인덱스 없이 넣기: 명령 %d\n", insert_cost());
+
+    probe("인덱스 없음", by_customer);
+    exec("CREATE INDEX idx_cust ON orders(customer_id)");
+    probe("customer_id 인덱스", by_customer);
+    probe("열에 계산을 씌우면", "SELECT count(*) FROM orders "
+                                "WHERE customer_id + 0 = 1234");
+    probe("최근 주문 3개: 한 열 인덱스", latest);
+    exec("CREATE INDEX idx_cust_created ON orders(customer_id, created)");
+    probe("최근 주문 3개: 두 열 인덱스", latest);
+
+    std::printf("[크기]\n");
+    sqlite3_stmt* st;
+    sqlite3_prepare_v2(db, "SELECT name, count(*) FROM dbstat GROUP BY name "
+                           "ORDER BY name", -1, &st, nullptr);
+    while (sqlite3_step(st) == SQLITE_ROW)
+        std::printf("  %s: %d쪽\n", sqlite3_column_text(st, 0),
+                    sqlite3_column_int(st, 1));
+    sqlite3_finalize(st);
+    std::printf("인덱스 둘로 넣기: 명령 %d\n", insert_cost());
+    sqlite3_close(db);
+}
+```
+
+```text
+행 10만 개, 인덱스 없이 넣기: 명령 12
+[인덱스 없음]
+  계획: SCAN orders
+  결과 20, 훑은 행 100000, 명령 300034
+[customer_id 인덱스]
+  계획: SEARCH orders USING COVERING INDEX idx_cust (customer_id=?)
+  결과 20, 훑은 행 0, 명령 71
+[열에 계산을 씌우면]
+  계획: SCAN orders USING COVERING INDEX idx_cust
+  결과 20, 훑은 행 100000, 명령 400036
+[최근 주문 3개: 한 열 인덱스]
+  계획: SEARCH orders USING INDEX idx_cust (customer_id=?)
+  계획: USE TEMP B-TREE FOR ORDER BY
+  결과 95886, 90886, 85886, 훑은 행 0, 명령 231
+[최근 주문 3개: 두 열 인덱스]
+  계획: SEARCH orders USING COVERING INDEX idx_cust_created (customer_id=?)
+  결과 95886, 90886, 85886, 훑은 행 0, 명령 22
+[크기]
+  idx_cust: 261쪽
+  idx_cust_created: 353쪽
+  orders: 427쪽
+  sqlite_schema: 1쪽
+인덱스 둘로 넣기: 명령 24
+```
+
+- **훑기와 찾기**: 인덱스가 없을 때는 손님 한 명의 주문을 세려고 10만 행을 모두 넘겼고(SCAN), 인덱스를 만들자 넘긴 행이 0, 명령이 30만에서 71로 줄었습니다(SEARCH). COVERING INDEX는 인덱스만으로 답이 나와 테이블은 들르지도 않았다는 뜻입니다
+- **열에 계산을 씌우면**: `customer_id + 0`은 인덱스에 정렬된 값이 아니어서 인덱스를 처음부터 끝까지 훑었습니다. 열에 함수를 씌우거나 형을 바꾸거나 `LIKE '%볼트'`처럼 앞이 정해지지 않은 조건도 같습니다. 그런 조건이 자주 쓰이면 식 자체에 인덱스를 만듭니다([「인덱스 설계」](#/read/cpp-database/dbperf-index))
+- **두 열 인덱스와 정렬**: (customer_id, created) 인덱스는 손님별로 날짜순으로 정렬되어 있어, 최근 주문 3개를 따로 정렬하지 않고 끝에서 세 개만 읽었습니다(명령 231 → 22). 열의 순서가 중요해서, 이 인덱스는 created만으로 찾을 때는 거의 도움이 되지 않습니다
+- **공짜가 아니다**: 인덱스 둘이 테이블보다 큰 자리를 차지했고(614쪽 대 427쪽), 행 하나를 넣는 명령이 12에서 24로 늘었습니다. 행을 넣고 고치고 지울 때마다 인덱스도 함께 고치기 때문입니다
+
+## 언제 만드나
+
+`WHERE`, `JOIN`, `ORDER BY`에 자주 나오고 값의 종류가 많아 조건이 행을 크게 줄이는 열에 만듭니다. 행이 몇백 개뿐인 테이블이나 참과 거짓처럼 값이 두어 가지뿐인 열에는 효과가 적습니다. 인덱스를 쓸지는 데이터베이스의 옵티마이저가 통계를 보고 정하므로, 만든 뒤에는 실행 계획으로 실제로 쓰는지 확인합니다([「실행 계획 읽기」](#/read/cpp-database/dbperf-plan)).
+
+<Note>
+기본 키와 `UNIQUE`에는 인덱스가 저절로 생기지만, 외래 키 열에는 생기지 않는 데이터베이스가 많습니다(PostgreSQL과 SQLite. MySQL의 InnoDB는 만들어 줍니다). 외래 키 열에 인덱스가 없으면 부모 행을 지우거나 고칠 때마다 자식 테이블을 전부 훑고, 그동안 잠금도 오래 잡습니다. 외래 키를 걸었으면 그 열의 인덱스도 함께 만드는 것을 기본으로 합니다.
+</Note>
+
+## 정리
+
+- 인덱스는 열의 값을 정렬해 행의 위치와 함께 담은 B-트리이며, 전체 훑기 대신 몇 층만 내려가 행을 찾게 한다
+- 열에 계산이나 함수를 씌운 조건은 인덱스를 쓰지 못하고, 두 열 인덱스는 열 순서대로 찾기와 정렬을 함께 돕는다
+- 인덱스는 공간과 쓰기 비용이 들므로 자주 거르는 열에 만들고 실행 계획으로 쓰임을 확인하며, 외래 키 열에는 따로 만들어 둔다

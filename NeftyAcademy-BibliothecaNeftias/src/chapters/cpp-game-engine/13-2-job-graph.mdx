@@ -1,0 +1,133 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '의존 그래프: 프레임의 일을 작업과 화살표로 적고, 진입 차수로 실행하기, 임계 경로가 정하는 한계';
+
+[「작업 큐와 워커 스레드」](#/read/cpp-game-engine/job-queue)에서는 일을 쪼개 워커에 나눠 줬지만, 순서는 카운터와 `wait`로 코드 곳곳에서 맞췄습니다. 프레임 하나에는 "물리가 끝나야 컬링", "애니메이션을 섞어야 스키닝" 같은 순서가 수십 개 있습니다. 이것을 코드 흐름에 묻어 두지 않고 **그래프**로 적어 두면, 스케줄러가 알아서 가능한 만큼 동시에 실행하고, 무엇이 프레임 시간을 정하는지도 계산할 수 있습니다.
+
+## 한 프레임의 그래프
+
+```cpp
+#include <algorithm>
+#include <print>
+#include <queue>
+#include <string>
+#include <vector>
+
+struct Task { std::string name; double ms; std::vector<int> deps; };
+
+// 진입 차수가 0이 된 작업을 놀고 있는 워커에 주는 모의 스케줄러
+double simulate(const std::vector<Task>& g, int workers, bool show) {
+    int n = int(g.size());
+    std::vector<int> waiting(n);
+    std::vector<std::vector<int>> next(n);
+    for (int i = 0; i < n; ++i)
+        for (int d : g[i].deps) { ++waiting[i]; next[d].push_back(i); }
+    std::vector<int> ready;
+    for (int i = 0; i < n; ++i) if (!waiting[i]) ready.push_back(i);
+
+    using Ev = std::pair<double, int>;            // (끝나는 시각, 작업)
+    std::priority_queue<Ev, std::vector<Ev>, std::greater<>> running;
+    double now = 0;
+    int idle = workers, done = 0;
+    while (done < n) {
+        while (idle > 0 && !ready.empty()) {      // 긴 작업부터 먼저 준다
+            auto it = std::ranges::max_element(
+                ready, {}, [&](int i) { return g[i].ms; });
+            int t = *it; ready.erase(it); --idle;
+            if (show) std::println("  {:5.1f}ms 시작 {}", now, g[t].name);
+            running.push({now + g[t].ms, t});
+        }
+        if (running.empty()) { std::println("  순환이 있어 멈춤"); return -1; }
+        auto [end, t] = running.top(); running.pop();
+        now = end; ++idle; ++done;
+        for (int s : next[t]) if (--waiting[s] == 0) ready.push_back(s);
+    }
+    return now;
+}
+
+// 의존 순서대로 적혀 있다고 가정
+double critical_path(const std::vector<Task>& g) {
+    std::vector<double> finish(g.size());
+    for (std::size_t i = 0; i < g.size(); ++i) {
+        double start = 0;
+        for (int d : g[i].deps) start = std::max(start, finish[d]);
+        finish[i] = start + g[i].ms;
+    }
+    return *std::ranges::max_element(finish);
+}
+
+int main() {
+    enum { Input, AI, Physics, AnimSample, AnimBlend, Skin, Audio, Particles,
+           Cull, Prep };
+    std::vector<Task> frame = {
+        {"입력", 0.3, {}},
+        {"AI", 2.0, {Input}},
+        {"물리", 3.0, {Input}},
+        {"애니 표본", 1.5, {AI}},
+        {"애니 섞기", 1.0, {AnimSample, Physics}},
+        {"스키닝", 2.0, {AnimBlend}},
+        {"소리", 0.8, {Physics}},
+        {"입자", 2.5, {Input}},
+        {"컬링", 1.2, {Physics}},
+        {"그리기 준비", 1.0, {Skin, Cull, Particles}},
+    };
+    double total = 0;
+    for (auto& t : frame) total += t.ms;
+    std::println("일의 총량 {:.1f}ms, 임계 경로 {:.1f}ms",
+                 total, critical_path(frame));
+    std::println("워커 4개일 때 일정:");
+    simulate(frame, 4, true);
+    for (int w : {1, 2, 3, 4, 8})
+        std::println("워커 {}개: 프레임 {:.1f}ms", w, simulate(frame, w, false));
+
+    frame[Input].deps.push_back(Prep);            // 실수로 순환을 만들면
+    simulate(frame, 4, false);
+}
+```
+
+```text
+일의 총량 15.3ms, 임계 경로 7.8ms
+워커 4개일 때 일정:
+    0.0ms 시작 입력
+    0.3ms 시작 물리
+    0.3ms 시작 입자
+    0.3ms 시작 AI
+    2.3ms 시작 애니 표본
+    3.3ms 시작 컬링
+    3.3ms 시작 소리
+    3.8ms 시작 애니 섞기
+    4.8ms 시작 스키닝
+    6.8ms 시작 그리기 준비
+워커 1개: 프레임 15.3ms
+워커 2개: 프레임 10.3ms
+워커 3개: 프레임 7.8ms
+워커 4개: 프레임 7.8ms
+워커 8개: 프레임 7.8ms
+  순환이 있어 멈춤
+```
+
+## 진입 차수로 실행하기
+
+작업마다 "아직 끝나지 않은 선행 작업 수"(`waiting`, 진입 차수)를 셉니다. 0인 작업은 바로 실행할 수 있고, 작업이 끝나면 그 뒤를 잇는 작업들의 수를 하나씩 줄여 0이 된 것을 준비 목록에 넣습니다. 입력이 끝나자 AI, 물리, 입자가 한꺼번에 준비되어 0.3ms에 동시에 시작한 것이 그 결과입니다. 실제 작업 시스템에서는 이 카운터를 원자 변수로 두고, 작업이 끝날 때 0이 된 후속 작업을 큐에 넣습니다. 누구도 `wait`로 묶여 있지 않습니다.
+
+예제는 준비된 작업 중 **긴 것부터** 줬습니다. 짧은 것부터 주면 긴 작업이 늦게 시작해 프레임 끝까지 혼자 남는 경우가 많기 때문입니다.
+
+## 임계 경로
+
+워커를 3개에서 8개로 늘려도 프레임은 7.8ms에서 줄지 않았습니다. 입력 → AI → 애니 표본 → 애니 섞기 → 스키닝 → 그리기 준비로 이어지는 사슬이 7.8ms이고, 이 사슬은 앞이 끝나야 뒤가 시작하므로 워커가 아무리 많아도 나란히 할 수 없습니다. 이 가장 긴 사슬이 **임계 경로**이고, 프레임 시간의 하한입니다. 일의 총량은 15.3ms이니 이상적으로는 2배 남짓이 최대 속도 향상이었습니다.
+
+그래서 멀티코어 최적화는 "임계 경로 위의 작업을 줄이거나 쪼개기"가 됩니다. 소리(0.8ms)를 빠르게 해도 프레임은 그대로이지만, 스키닝을 캐릭터별로 쪼개 나란히 돌리면 바로 줄어듭니다. [「엔진 안의 프로파일러」](#/read/cpp-game-engine/ed-profiler)로 실제 프레임의 작업 막대를 보면 임계 경로가 눈에 보입니다.
+
+## 순환 막기
+
+마지막 줄은 입력이 그리기 준비를 기다리게 만들어 **순환**을 넣은 경우입니다. 진입 차수가 0인 작업이 하나도 없어서 아무것도 시작하지 못합니다. 그래프는 프레임마다 실행하기 전에, 개발 중에는 만들 때 한 번 위상 정렬로 순환을 검사해 어느 작업들이 고리를 이루는지 알려 줘야 합니다. [「시스템과 실행 순서」](#/read/cpp-game-engine/ecs-systems)에서 시스템이 읽고 쓰는 컴포넌트로 순서를 정할 때도 같은 검사를 합니다.
+
+<Note>
+그래프는 매 프레임 거의 같으므로, 프레임마다 새로 만들지 않고 한 번 만들어 두고 카운터만 초기화해 다시 씁니다. 다음 프레임의 앞부분(입력, AI)을 이번 프레임의 뒷부분(그리기 준비)과 겹쳐 실행하면 임계 경로를 넘어설 수도 있는데, 그러려면 두 프레임의 데이터를 따로 두어야 합니다. 렌더링을 한 프레임 늦게 따라오게 하는 파이프라인 구조가 그 예입니다.
+</Note>
+
+## 정리
+
+- 프레임의 일을 작업과 의존 화살표로 적고, 진입 차수가 0이 된 작업부터 실행하면 기다림 없이 최대한 동시에 돈다
+- 가장 긴 의존 사슬인 임계 경로가 프레임 시간의 하한이고, 최적화는 그 위의 작업을 줄이거나 쪼개는 것이다
+- 그래프는 순환을 검사해 두고, 매 프레임 다시 쓰며, 프레임을 겹치려면 데이터를 나눠야 한다

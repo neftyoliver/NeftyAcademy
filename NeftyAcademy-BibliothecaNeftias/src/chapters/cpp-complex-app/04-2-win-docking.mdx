@@ -1,0 +1,208 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '도킹 배치를 트리로: 붙이기는 잎을 가지로, 닫기는 접기, 크기는 몫으로, 놓을 자리 판정, 실제 모델';
+export const terms = ['DockSpace', 'ImGuiConfigFlags_DockingEnable'];
+
+속성, 레이어, 콘솔 같은 패널을 사용자가 끌어다 붙이고, 겹치고, 떼어 냅니다. 화면에서는 복잡한 창 조작으로 보이지만 데이터로는 작은 트리 하나입니다. 잎은 탭으로 겹친 패널들이고, 가지는 가로나 세로로 나눈 자리와 자식마다의 몫입니다.
+
+```cpp
+// 도킹 배치는 트리다: 잎은 탭으로 겹친 패널들, 가지는 가로나 세로로 나눈 것
+#include <algorithm>
+#include <format>
+#include <memory>
+#include <print>
+#include <string>
+#include <utility>
+#include <vector>
+
+enum class Side { Left, Right, Top, Bottom, Center };
+struct Rect {
+    int x, y, w, h;
+};
+
+struct Node {
+    std::vector<std::string> tabs;               // 잎: 겹쳐 놓은 패널들
+    bool row = true;                             // 가지: 자식을 옆으로 늘어놓는가
+    std::vector<std::unique_ptr<Node>> kids;
+    std::vector<double> share;                   // 가지: 자식마다의 몫, 합은 1
+};
+using Ptr = std::unique_ptr<Node>;
+
+Ptr leaf(std::string name) {
+    auto n = std::make_unique<Node>();
+    n->tabs.push_back(std::move(name));
+    return n;
+}
+
+Ptr* find(Ptr& n, const std::string& name) {     // name이 든 잎을 쥔 자리
+    if (n->kids.empty()) return std::ranges::contains(n->tabs, name) ? &n : nullptr;
+    for (Ptr& k : n->kids)
+        if (Ptr* hit = find(k, name)) return hit;
+    return nullptr;
+}
+
+void dock(Ptr& root, const std::string& target, std::string name, Side side,
+          double part = 0.25) {
+    Ptr& at = *find(root, target);
+    if (side == Side::Center) return at->tabs.push_back(std::move(name));  // 탭으로
+    auto split = std::make_unique<Node>();       // 잎이 있던 자리에 가지를 끼운다
+    split->row = side == Side::Left || side == Side::Right;
+    split->kids.push_back(leaf(std::move(name)));
+    split->kids.push_back(std::move(at));
+    split->share = {part, 1 - part};
+    if (side == Side::Right || side == Side::Bottom) {  // 새 패널이 뒤에 온다
+        std::ranges::reverse(split->kids);
+        std::ranges::reverse(split->share);
+    }
+    at = std::move(split);
+}
+
+bool close(Ptr& n, const std::string& name) {    // 참: n이 빈 잎이 되었다
+    if (n->kids.empty()) return std::erase(n->tabs, name) && n->tabs.empty();
+    for (std::size_t i = 0; i < n->kids.size(); ++i) {
+        if (!close(n->kids[i], name)) continue;
+        double gone = n->share[i];               // 남은 자식이 이 몫을 나눠 갖는다
+        n->kids.erase(n->kids.begin() + i);
+        n->share.erase(n->share.begin() + i);
+        for (double& s : n->share) s /= 1 - gone;
+        break;
+    }
+    if (n->kids.size() == 1) {                   // 자식이 하나면 가지가 필요 없다
+        Ptr only = std::move(n->kids[0]);
+        n = std::move(only);
+    }
+    return false;
+}
+
+using Cells = std::vector<std::pair<Rect, const Node*>>;
+void layout(const Node& n, Rect r, Cells& out) {
+    if (n.kids.empty()) return out.push_back({r, &n});
+    int total = n.row ? r.w : r.h, used = 0;
+    for (std::size_t i = 0; i < n.kids.size(); ++i) {
+        bool last = i + 1 == n.kids.size();      // 반올림에서 남은 칸은 마지막에게
+        int len = last ? total - used : static_cast<int>(total * n.share[i] + 0.5);
+        Rect part = n.row ? Rect{r.x + used, r.y, len, r.h}
+                          : Rect{r.x, r.y + used, r.w, len};
+        layout(*n.kids[i], part, out);
+        used += len;
+    }
+}
+
+std::string text(const Node& n) {                // 트리를 한 줄로 적는다
+    std::string s;
+    if (n.kids.empty()) {
+        for (const auto& t : n.tabs) s += (s.empty() ? "" : "+") + t;
+        return s;
+    }
+    for (std::size_t i = 0; i < n.kids.size(); ++i)
+        s += std::format("{}{} {:.0f}", i ? ", " : "", text(*n.kids[i]),
+                         n.share[i] * 100);
+    return (n.row ? "row(" : "col(") + s + ")";
+}
+
+void draw(const Node& root, int w, int h) {
+    std::println("{}", text(root));
+    Cells cells;
+    layout(root, {0, 0, w, h}, cells);
+    std::vector<std::string> grid(h, std::string(w, ' '));
+    for (const auto& [r, n] : cells)
+        for (int y = r.y; y < r.y + r.h; ++y)
+            for (int x = r.x; x < r.x + r.w; ++x) grid[y][x] = n->tabs[0][0];
+    for (const auto& line : grid) std::println("  {}", line);
+}
+
+Side zone(Rect r, int x, int y) {                // 놓는 곳이 잎의 어느 쪽인가
+    double fx = double(x - r.x) / r.w, fy = double(y - r.y) / r.h;
+    if (fx < 0.25) return Side::Left;
+    if (fx > 0.75) return Side::Right;
+    if (fy < 0.25) return Side::Top;
+    return fy > 0.75 ? Side::Bottom : Side::Center;
+}
+
+int main() {
+    Ptr root = leaf("Editor");
+    dock(root, "Editor", "Files", Side::Left);
+    dock(root, "Editor", "Inspector", Side::Right);
+    dock(root, "Editor", "Console", Side::Bottom, 0.3);
+    dock(root, "Console", "Problems", Side::Center);
+    draw(*root, 48, 7);
+
+    close(root, "Console"), close(root, "Problems");
+    draw(*root, 48, 4);
+    draw(*root, 24, 3);                          // 창을 줄여도 트리는 그대로다
+
+    const char* names[] = {"왼쪽", "오른쪽", "위", "아래", "가운데(탭)"};
+    Rect r{12, 0, 27, 4};
+    for (auto [x, y] : {std::pair{13, 2}, {25, 0}, {25, 2}, {37, 2}})
+        std::println("({}, {})에 놓으면 {}", x, y, names[int(zone(r, x, y))]);
+}
+```
+
+```text
+row(Files 25, row(col(Editor 70, Console+Problems 30) 75, Inspector 25) 75)
+  FFFFFFFFFFFFEEEEEEEEEEEEEEEEEEEEEEEEEEEIIIIIIIII
+  FFFFFFFFFFFFEEEEEEEEEEEEEEEEEEEEEEEEEEEIIIIIIIII
+  FFFFFFFFFFFFEEEEEEEEEEEEEEEEEEEEEEEEEEEIIIIIIIII
+  FFFFFFFFFFFFEEEEEEEEEEEEEEEEEEEEEEEEEEEIIIIIIIII
+  FFFFFFFFFFFFEEEEEEEEEEEEEEEEEEEEEEEEEEEIIIIIIIII
+  FFFFFFFFFFFFCCCCCCCCCCCCCCCCCCCCCCCCCCCIIIIIIIII
+  FFFFFFFFFFFFCCCCCCCCCCCCCCCCCCCCCCCCCCCIIIIIIIII
+row(Files 25, row(Editor 75, Inspector 25) 75)
+  FFFFFFFFFFFFEEEEEEEEEEEEEEEEEEEEEEEEEEEIIIIIIIII
+  FFFFFFFFFFFFEEEEEEEEEEEEEEEEEEEEEEEEEEEIIIIIIIII
+  FFFFFFFFFFFFEEEEEEEEEEEEEEEEEEEEEEEEEEEIIIIIIIII
+  FFFFFFFFFFFFEEEEEEEEEEEEEEEEEEEEEEEEEEEIIIIIIIII
+row(Files 25, row(Editor 75, Inspector 25) 75)
+  FFFFFFEEEEEEEEEEEEEEIIII
+  FFFFFFEEEEEEEEEEEEEEIIII
+  FFFFFFEEEEEEEEEEEEEEIIII
+(13, 2)에 놓으면 왼쪽
+(25, 0)에 놓으면 위
+(25, 2)에 놓으면 가운데(탭)
+(37, 2)에 놓으면 오른쪽
+```
+
+- **붙이기는 잎을 가지로 바꾸는 일**: 대상 잎이 있던 자리에 가지를 끼우고, 새 패널과 원래 잎을 그 자식으로 둡니다. 가운데에 놓으면 가지를 만들지 않고 탭으로 겹칩니다
+- **닫기는 거꾸로 접는 일**: 빈 잎을 없애고 남은 자식들이 그 몫을 나눠 갖습니다. 자식이 하나만 남은 가지는 그 자식으로 바꿉니다. Console과 Problems를 닫자 `col`이 사라지고 Editor가 그 자리를 다시 채웠습니다
+- **크기는 몫으로 적는다**: 픽셀이 아니라 비율이므로 창을 48칸에서 24칸으로 줄여도 트리는 그대로입니다. 반올림에서 남는 칸은 마지막 자식에게 주어 틈도 겹침도 없게 합니다
+- **트리가 원본이고 사각형은 결과다**: 화면의 창을 직접 옮기지 않습니다. 트리를 고친 다음 `layout`으로 사각형을 다시 셈합니다. 배치를 저장할 때 적는 것도 트리입니다([「작업 공간 저장」](#/read/cpp-complex-app/win-workspace))
+- **놓을 자리는 사각형 안의 위치로 정한다**: 가장자리 4분의 1은 그쪽에 붙이기, 가운데는 탭입니다. 끄는 동안 이 판정으로 붙을 자리를 미리 그려 보입니다
+
+## 더 챙길 것
+
+- **최소 크기**: 몫만으로는 패널이 0칸이 될 수 있습니다. 패널마다 최소 크기를 두고, 가지의 최소 크기는 자식들의 것을 더해 구합니다. 모자랄 때는 여유가 있는 자식부터 줄입니다
+- **같은 방향의 가지는 펴 둔다**: 예제의 `row(Files, row(Editor, Inspector))`는 `row(Files, Editor, Inspector)`와 같은 모양입니다. 펴 두면 경계 하나를 끌 때 양옆의 둘만 바뀝니다
+- **가운데는 비어도 남긴다**: 문서가 놓이는 잎은 패널이 모두 닫혀도 없애지 않습니다. 없애면 다음 문서가 열릴 자리가 사라집니다
+- **떠 있는 패널**: 트리 밖의 창이고, 그 창이 자기 트리를 가질 수도 있습니다. 문서 창의 초점을 가져가지 않아야 합니다([「여러 창과 탭」](#/read/cpp-complex-app/win-multi))
+
+## 실제 프로그램
+
+| 프로그램 | 배치의 모델 |
+| --- | --- |
+| Visual Studio | 붙이고, 탭으로 넣고, 띄우고, 가장자리에 숨기는 도구 창 |
+| Blender | 겹치지 않는 영역으로 창 전체를 나눔 |
+| VS Code | 정해진 자리의 보기들과 편집기 묶음의 격자 |
+| Dear ImGui | 도킹 공간 안에서 노드를 쪼개고 창을 넣음 |
+
+- **Visual Studio**: 도구 창을 끌면 안내 마름모가 나타나고, 화살표 위에 올리면 붙을 자리가 음영으로 보입니다. Ctrl을 누른 채 끌면 붙지 않고 옮겨지기만 합니다. 자동 숨김을 켠 도구 창은 가장자리의 탭으로 접힙니다
+- **Blender**: 영역의 모서리를 끌어 나누거나 합치고, 다른 영역의 가운데로 끌면 그 영역을 바꿔 넣습니다. 경계를 끌어 크기를 바꿉니다. 영역은 서로 겹치지 않습니다
+- **VS Code**: 편집기 묶음은 가로세로 격자로 나뉘고 경계를 끌어 크기를 조절합니다. 탐색기 같은 보기는 사이드 바와 패널 사이를 끌어 옮길 수 있습니다
+- **Dear ImGui**: `ImGuiConfigFlags_DockingEnable`을 켜고 `DockSpace`를 두면 그 안에 창을 붙일 수 있습니다. 창을 다른 창이나 노드에 넣거나, 노드를 쪼개 넣거나, 떼어 냅니다
+- **Qt**: 메인 윈도우의 가장자리에 `QDockWidget`을 붙입니다. Qt 책의 [「메인 윈도우, 메뉴, 도구 모음, 도킹」](#/read/cpp-qt/wid-mainwindow)에서 다뤘습니다
+
+<Note>
+패널을 닫는 것과 없애는 것은 다릅니다. 닫은 패널을 다시 열면 닫기 전의 자리로 돌아와야 합니다. 그래서 닫을 때 그 패널이 있던 자리를 적어 둡니다. 어느 패널 옆의 어느 쪽이었는지, 몫이 얼마였는지입니다. Visual Studio가 Ctrl을 누르고 제목 줄을 두 번 눌렀을 때 창을 마지막으로 붙어 있던 자리로 되돌리는 것도 같은 기억입니다.
+</Note>
+
+## 정리
+
+- 도킹 배치는 탭 묶음인 잎과 가로세로로 나눈 가지의 트리이고, 붙이기와 닫기는 이 트리를 고치는 일이다
+- 크기는 자식마다의 몫으로 적고, 창 크기가 바뀌면 트리에서 사각형을 다시 셈한다
+- 최소 크기, 같은 방향 가지 펴기, 가운데 영역 남기기, 닫은 패널의 자리 기억이 쓸 만한 도킹을 만든다
+
+## 참고 문서
+
+- [Microsoft Learn: Customize window layouts and personalize tabs(도구 창과 문서 창, 안내 마름모, 자동 숨김)](https://learn.microsoft.com/en-us/visualstudio/ide/customizing-window-layouts-in-visual-studio?view=visualstudio)
+- [Blender 설명서: Areas(영역 나누기, 합치기, 바꾸기)](https://docs.blender.org/manual/en/latest/interface/window_system/areas.html)
+- [VS Code 문서: Custom Layout(보기의 자리, 편집기 묶음의 격자)](https://code.visualstudio.com/docs/configure/custom-layout)
+- [Dear ImGui 위키: Docking(도킹 켜기, DockSpace, 붙이고 쪼개고 떼기)](https://github.com/ocornut/imgui/wiki/Docking)

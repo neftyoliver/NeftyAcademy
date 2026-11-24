@@ -1,0 +1,220 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '끝나면 기다리던 코루틴을 깨우는 Task를 만들고, 한 스레드에서 여러 일을 번갈아 돌린다';
+
+[`future`](#/read/cpp-advanced/asy-future)에는 "끝나면 이어서 이것을 하라"가 없었습니다. 코루틴에서는 `co_await`의 **다음 줄**이 그것입니다. 그렇게 쓸 수 있게 해 주는 반환 타입을 흔히 태스크라고 부릅니다. 제너레이터가 값을 여러 번 내주는 타입이라면, 태스크는 **나중에 값 하나**를 내는 타입입니다.
+
+## 태스크가 해야 하는 일
+
+| 할 일 | 어디서 하는가 |
+| --- | --- |
+| 부를 때는 돌지 않고, 누가 기다릴 때 시작한다 | `initial_suspend`가 늘 멈춘다 |
+| 기다리는 코루틴을 기억한다 | `await_suspend`가 받은 핸들을 프라미스 객체에 적는다 |
+| 끝나면 기다리던 코루틴을 깨운다 | `final_suspend`의 어웨이터 |
+| 값이나 예외를 건넨다 | `await_resume`이 꺼내 주거나 다시 던진다 |
+| 프레임을 치운다 | 태스크 객체의 소멸자 |
+
+## Task를 만든다
+
+```cpp
+#include <coroutine>
+#include <deque>
+#include <exception>
+#include <optional>
+#include <print>
+#include <stdexcept>
+#include <string>
+#include <utility>
+
+template <typename T>
+class Task {
+public:
+    struct promise_type {
+        std::optional<T> value;
+        std::exception_ptr error;
+        std::coroutine_handle<> waiter;   // 이 태스크를 기다리는 코루틴
+
+        Task get_return_object() { return Task{Handle::from_promise(*this)}; }
+        std::suspend_always initial_suspend() noexcept { return {}; }
+        void return_value(T v) { value = std::move(v); }
+        void unhandled_exception() { error = std::current_exception(); }
+
+        struct Finish {
+            bool await_ready() const noexcept { return false; }
+            void await_suspend(
+                std::coroutine_handle<promise_type> me) const noexcept
+            {
+                if (auto waiter = me.promise().waiter)
+                    waiter.resume();   // 기다리던 쪽을 깨운다
+            }
+            void await_resume() const noexcept {}
+        };
+        Finish final_suspend() noexcept { return {}; }
+    };
+    using Handle = std::coroutine_handle<promise_type>;
+
+    // co_await task 가 부르는 세 함수
+    bool await_ready() const noexcept { return false; }
+    void await_suspend(std::coroutine_handle<> caller) noexcept
+    {
+        handle_.promise().waiter = caller;
+        handle_.resume();   // 이제야 태스크의 본문이 돈다
+    }
+    T await_resume() { return result(); }
+
+    // 코루틴이 아닌 곳에서 쓰는 두 함수
+    void start() { handle_.resume(); }
+    T result()
+    {
+        if (handle_.promise().error)
+            std::rethrow_exception(handle_.promise().error);
+        return std::move(*handle_.promise().value);
+    }
+
+    explicit Task(Handle h) : handle_(h) {}
+    Task(Task&& other) noexcept : handle_(std::exchange(other.handle_, {})) {}
+    ~Task()
+    {
+        if (handle_)
+            handle_.destroy();
+    }
+
+private:
+    Handle handle_;
+};
+
+// 차례를 기다리는 코루틴들의 줄
+class Loop {
+public:
+    auto later()
+    {
+        struct Awaiter {
+            Loop& loop;
+            bool await_ready() const noexcept { return false; }
+            void await_suspend(std::coroutine_handle<> me)
+            {
+                loop.ready_.push_back(me);
+            }
+            void await_resume() const noexcept {}
+        };
+        return Awaiter{*this};
+    }
+    void run()
+    {
+        while (!ready_.empty()) {
+            auto next = ready_.front();
+            ready_.pop_front();
+            next.resume();
+        }
+    }
+
+private:
+    std::deque<std::coroutine_handle<>> ready_;
+};
+
+Task<int> download(Loop& loop, std::string name, int parts)
+{
+    int bytes = 0;
+    for (int i = 1; i <= parts; ++i) {
+        co_await loop.later();   // 줄 끝에 서서 차례를 넘긴다
+        bytes += 100;
+        std::println("  {} {}번째 조각", name, i);
+    }
+    if (name == "없는 파일")
+        throw std::runtime_error("404");
+    co_return bytes;
+}
+
+Task<int> two_in_a_row(Loop& loop)
+{
+    int a = co_await download(loop, "A", 2);
+    int b = co_await download(loop, "B", 1);
+    co_return a + b;
+}
+
+Task<int> careful(Loop& loop)
+{
+    try {
+        co_return co_await download(loop, "없는 파일", 1);
+    } catch (const std::exception& e) {
+        std::println("  잡았다: {}", e.what());
+        co_return -1;
+    }
+}
+
+int main()
+{
+    Loop loop;
+
+    std::println("차례로");
+    Task<int> sum = two_in_a_row(loop);
+    sum.start();
+    loop.run();
+    std::println("합 {}", sum.result());
+
+    std::println("둘을 함께");
+    Task<int> x = download(loop, "X", 2);
+    Task<int> y = download(loop, "Y", 2);
+    x.start();
+    y.start();
+    loop.run();
+    std::println("{} + {}", x.result(), y.result());
+
+    std::println("예외");
+    Task<int> c = careful(loop);
+    c.start();
+    loop.run();
+    std::println("결과 {}", c.result());
+}
+```
+
+```text
+차례로
+  A 1번째 조각
+  A 2번째 조각
+  B 1번째 조각
+합 300
+둘을 함께
+  X 1번째 조각
+  Y 1번째 조각
+  X 2번째 조각
+  Y 2번째 조각
+200 + 200
+예외
+  없는 파일 1번째 조각
+  잡았다: 404
+결과 -1
+```
+
+`int a = co_await download(loop, "A", 2);` 한 줄에서 일어나는 일입니다.
+
+1. `download`를 부른다. 프레임이 생기고 `Task`가 돌아온다. 본문은 아직 돌지 않았다.
+2. `co_await`가 `Task::await_suspend`를 부른다. 기다리는 쪽(`two_in_a_row`)의 핸들을 적어 두고 `download`를 깨운다.
+3. `download`가 `loop.later()`에서 멈춘다. 제어는 `resume()`을 부른 곳들을 거슬러 `main`으로 돌아가고, `main`은 `loop.run()`으로 줄을 돌린다.
+4. 줄이 `download`를 다시 깨우기를 되풀이하고, `co_return`에 닿으면 `Finish`가 적어 둔 핸들로 `two_in_a_row`를 깨운다.
+5. `await_resume`이 값을 꺼낸다. `two_in_a_row`는 다음 줄부터 이어 돈다.
+
+기다리는 동안 `two_in_a_row`는 스레드를 붙잡고 있지 않습니다. 멈춘 코루틴은 **프레임 하나**일 뿐입니다. `future::get()`으로 기다리는 스레드가 [스택 8 MB의 주소 공간](#/read/cpp-advanced/thr-jthread)을 쥐고 있는 것과 다릅니다.
+
+## 한 스레드에서 번갈아
+
+"둘을 함께"에서 X와 Y가 번갈아 돌았습니다. 스레드는 하나입니다. 각 코루틴이 `co_await loop.later()`에서 스스로 차례를 내놓고, 줄이 다음 코루틴을 깨웁니다. 이것이 이벤트 루프의 뼈대입니다. 실제 루프는 줄에 서는 까닭이 "소켓에 읽을 것이 생겼다"나 "타이머가 울렸다"일 뿐입니다. 네트워크 서버에서 이렇게 쓰는 모습은 [「Asio와 코루틴」](#/read/cpp-service-server/aio-coroutines)에서, 줄을 여러 스레드가 나눠 도는 법은 [「코루틴 스케줄러」](#/read/cpp-parallel/paio-scheduler)에서 봅니다.
+
+| | 스레드 여럿 | 한 스레드의 코루틴 여럿 |
+| --- | --- | --- |
+| 차례가 바뀌는 곳 | 어디서나. 운영체제가 정한다 | `co_await`에서만 |
+| 공유 데이터 | [잠가야 한다](#/read/cpp-advanced/sync-mutex) | `co_await`를 사이에 두지 않으면 잠글 필요가 없다 |
+| 코어 여럿 쓰기 | 된다 | 안 된다. 계산이 긴 일은 루프를 멈춰 세운다 |
+| 맞는 일 | 계산 | 기다림이 대부분인 일 (네트워크, 장치) |
+
+예외도 평범하게 흐릅니다. `download`가 던진 예외를 프라미스 객체가 담아 두었다가, 기다리던 쪽의 `await_resume`에서 다시 던졌습니다. `careful`은 보통 함수를 부를 때와 똑같이 `try`로 받았습니다.
+
+<Note kind="warn">
+이 `Task`는 배우기 위한 뼈대입니다. `Task<void>`가 없고, 스레드를 넘나들 때의 안전도 따지지 않았습니다. 그리고 `await_suspend` 안에서 `resume()`을 부르는 모양에는 약점이 있어서 [다음 페이지](#/read/cpp-advanced/co-transfer)에서 고칩니다. 실제 코드에서는 Boost.Asio의 `awaitable`이나 Boost.Cobalt, folly의 `coro::Task`처럼 다듬어진 것을 씁니다. C++26 초안의 [`std::execution`](#/read/cpp-advanced/asy-execution)에도 `task`가 있습니다.
+</Note>
+
+## 정리
+
+- 태스크는 기다리는 코루틴의 핸들을 적어 두었다가 끝날 때 깨운다. `co_await`의 다음 줄이 "끝나면 이어서"다
+- 기다리는 코루틴은 스레드를 붙잡지 않는다. 한 스레드의 줄 하나로 여러 일이 번갈아 돈다
+- 차례는 `co_await`에서만 바뀐다. 기다림이 대부분인 일에 맞고, 긴 계산은 스레드로 보낸다

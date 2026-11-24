@@ -1,0 +1,125 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '뮤텍스로 경쟁 상태 막기: mtx_lock과 mtx_unlock, 짧은 임계 구역, 뮤텍스의 값, 반대 순서의 교착';
+export const terms = [
+  'mtx_lock', 'mtx_unlock', 'mtx_init', 'mtx_t', 'mtx_destroy', 'mtx_trylock',
+  'pthread_mutex_lock', 'pthread_mutex_unlock', 'mtx_plain',
+];
+
+「컴퓨터의 입문」의 [「스레드의 개념」](#/read/basics/threads)에서 두 스레드가 같은 변수에 1을 백만 번씩 더했더니 결과가 200만에 한참 못 미쳤습니다. `x++`가 읽기, 더하기, 쓰기의 세 단계라 중간에 끼어들 수 있었기 때문입니다. 이 쪽은 그 문제를 **뮤텍스**(mutex, mutual exclusion: 서로 배제)로 막습니다. 뮤텍스는 한 번에 한 스레드만 잡을 수 있는 자물쇠입니다.
+
+## 잡고, 고치고, 놓기
+
+```c
+#include <stdio.h>
+#include <threads.h>
+
+enum { TIMES = 1000000 };
+
+static long counter = 0;
+static mtx_t lock;
+
+static int work(void *arg)
+{
+    (void)arg;
+    for (int i = 0; i < TIMES; i++) {
+        mtx_lock(&lock);        // 한 번에 한 스레드만 들어온다
+        counter++;              // 지켜지는 구간
+        mtx_unlock(&lock);
+    }
+    return 0;
+}
+
+int main(void)
+{
+    if (mtx_init(&lock, mtx_plain) != thrd_success)
+        return 1;
+    thrd_t a, b;
+    thrd_create(&a, work, NULL);
+    thrd_create(&b, work, NULL);
+    thrd_join(a, NULL);
+    thrd_join(b, NULL);
+    printf("counter = %ld (기대한 값 %d)\n", counter, 2 * TIMES);
+    mtx_destroy(&lock);
+    return 0;
+}
+```
+
+```text
+counter = 2000000 (기대한 값 2000000)
+```
+
+한 스레드가 `mtx_lock`으로 자물쇠를 잡으면, 다른 스레드는 자기 `mtx_lock`에서 **멈춰 기다립니다.** 앞의 스레드가 `mtx_unlock`으로 놓아야 들어올 수 있습니다. 그래서 `counter++`의 세 단계가 다른 스레드에게 끊기지 않고, 결과가 정확히 200만이 됩니다. 자물쇠로 지키는 `lock`과 `unlock` 사이를 **임계 구역**이라고 부릅니다.
+
+| C11 `threads.h` | POSIX `pthread.h` | 하는 일 |
+| --- | --- | --- |
+| `mtx_init(&m, mtx_plain)` | `pthread_mutex_init(&m, NULL)` | 자물쇠 준비 |
+| `mtx_lock(&m)` | `pthread_mutex_lock(&m)` | 잡는다. 남이 잡고 있으면 기다린다 |
+| `mtx_trylock(&m)` | `pthread_mutex_trylock(&m)` | 잡아 보고, 안 되면 기다리지 않고 바로 돌아온다 |
+| `mtx_unlock(&m)` | `pthread_mutex_unlock(&m)` | 놓는다 |
+| `mtx_destroy(&m)` | `pthread_mutex_destroy(&m)` | 다 쓴 자물쇠 정리 |
+
+<Note kind="warn">
+자물쇠는 **모든 스레드가 지킬 때만** 효과가 있습니다. 한 함수라도 `counter`를 자물쇠 없이 고치면 보호가 무너집니다. 그래서 자물쇠와 그것이 지키는 데이터는 같은 구조체에 나란히 두고, "이 데이터는 이 자물쇠를 잡고만 만진다"는 규칙을 주석으로 적어 두는 습관이 좋습니다. 또 `mtx_lock`과 `mtx_unlock` 사이에서 `return`하거나 `goto`로 빠져나가며 놓는 것을 잊으면, 다른 스레드들이 영원히 기다리게 됩니다.
+</Note>
+
+## 뮤텍스의 값
+
+자물쇠를 잡고 놓는 데도 시간이 듭니다. 두 스레드가 1,000만 번씩 세는 일을 세 가지 방법으로 해 보고, 한 번에 걸린 시간을 쟀습니다(`gcc -O2`, 코어 2개인 검사 기계, 세 번 돌린 범위).
+
+| 방법 | 한 번에 걸린 시간 |
+| --- | --- |
+| 매번 뮤텍스를 잡고 1 더하기 | 84~110ns |
+| 매번 원자적 덧셈(`atomic_fetch_add`) | 23~29ns |
+| 각자 지역 변수에 세고 마지막에 한 번만 잠가 합치기 | 0.15ns |
+
+세 방법 모두 결과는 정확히 2,000만이었습니다. 그런데 빠르기는 수백 배 차이 납니다. 두 스레드가 같은 자물쇠를 번갈아 잡으려 다투면, 기다리는 쪽은 잠들고 깨어나느라 시간을 쓰고, 자물쇠가 든 [캐시 줄](#/read/basics/arch-memory)이 두 코어 사이를 오가느라 또 시간을 씁니다. 원자적 연산은 다음 쪽의 [「원자적 연산」](#/read/c-mid/thr-atomics)에서 봅니다.
+
+교훈은 이렇습니다. **함께 쓰는 데이터를 줄이고, 임계 구역을 짧게, 드물게.** 마지막 방법처럼 각자 따로 일하다가 끝에 한 번만 합치는 설계가 가장 빠르고 안전합니다. [「스레드 만들고 기다리기」](#/read/c-mid/thr-create)의 예제가 그렇게 짠 것이었습니다.
+
+## 교착: 서로가 서로를 기다리기
+
+자물쇠가 둘 이상이면 새로운 위험이 생깁니다. 계좌 A에서 B로 보내는 스레드는 A를 잡고 B를 잡으려 하고, 동시에 B에서 A로 보내는 스레드는 B를 잡고 A를 잡으려 합니다. 둘 다 첫 자물쇠를 잡은 채 두 번째를 기다리면, **아무도 놓지 않으니 영원히 기다립니다.** 이것을 교착(deadlock)이라고 합니다.
+
+영원히 멈춘 프로그램은 보여 주기 어려우니, 두 번째 자물쇠를 1초까지만 기다리는 `mtx_timedlock`으로 실험했습니다.
+
+```c nocheck
+// first를 잡고, 조금 쉬었다가, second를 1초까지 기다려 본다
+static int transfer(mtx_t *first, mtx_t *second, const char *name)
+{
+    mtx_lock(first);
+    nap(100);                                   // 0.1초 쉰다
+    struct timespec until;
+    timespec_get(&until, TIME_UTC);
+    until.tv_sec += 1;
+    if (mtx_timedlock(second, &until) == thrd_success) {
+        printf("%s: 둘 다 잡았다\n", name);
+        mtx_unlock(second);
+    } else {
+        printf("%s: 1초를 기다려도 못 잡았다\n", name);
+    }
+    mtx_unlock(first);
+    return 0;
+}
+```
+
+한 스레드는 `transfer(&a, &b, …)`, 다른 스레드는 `transfer(&b, &a, …)`로 반대 순서로 잡게 하고, 다음에는 둘 다 `a`부터 잡게 했습니다(자물쇠는 `mtx_init(&a, mtx_timed)`로 만들었습니다).
+
+```text nocheck
+== 서로 반대 순서로 잡을 때
+오른쪽(b→a): 1초를 기다려도 못 잡았다
+왼쪽(a→b): 1초를 기다려도 못 잡았다
+== 둘 다 a부터 잡을 때
+왼쪽(a→b): 둘 다 잡았다
+오른쪽(a→b): 둘 다 잡았다
+```
+
+반대 순서로 잡자 둘 다 1초를 기다려도 두 번째 자물쇠를 얻지 못했습니다. 시간 제한이 없었다면 프로그램이 거기서 영원히 멈췄을 것입니다. 둘 다 같은 순서(`a` 다음 `b`)로 잡게 하자 한쪽이 먼저 둘 다 잡고 일을 마친 뒤 놓아 주어, 다른 쪽도 이어서 둘 다 잡았습니다.
+
+교착을 피하는 가장 단순한 규칙은 **여러 자물쇠는 언제나 정해진 순서로 잡는다**입니다. 계좌라면 계좌 번호가 작은 쪽부터 잡는 식입니다. 「C++ 고급」의 [「교착 상태와 잠금 순서」](#/read/cpp-advanced/sync-deadlock)에서는 여러 자물쇠를 한꺼번에 안전하게 잡아 주는 도구도 봅니다.
+
+## 정리
+
+- 뮤텍스는 한 번에 한 스레드만 잡을 수 있는 자물쇠이고, `mtx_lock`과 `mtx_unlock` 사이의 임계 구역은 끊기지 않고 실행된다
+- 자물쇠를 다투는 일은 비싸서 매번 잠그는 덧셈이 지역 변수 덧셈의 수백 배였으므로, 함께 쓰는 데이터와 임계 구역을 줄여야 한다
+- 두 스레드가 두 자물쇠를 반대 순서로 잡으면 서로를 영원히 기다리는 교착이 생기므로, 여러 자물쇠는 늘 정해진 순서로 잡는다

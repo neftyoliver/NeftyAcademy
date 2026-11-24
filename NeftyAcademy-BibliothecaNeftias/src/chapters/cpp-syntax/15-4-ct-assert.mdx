@@ -1,0 +1,137 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '가정을 컴파일러에게 확인시키기, 구조체 배치 검사, 타입에 대해 묻고 바꾸는 도구';
+export const terms = ['~static_assert'];
+
+"이 구조체는 8바이트다", "이 타입은 `memcpy`로 복사해도 된다". 코드는 이런 가정 위에 서 있습니다. 주석으로 적으면 아무도 확인하지 않습니다. `static_assert`로 적으면 **컴파일러가 매번** 확인합니다.
+
+## 가정을 적어 두기
+
+```cpp
+#include <cstddef>
+#include <cstdint>
+#include <print>
+#include <type_traits>
+
+struct Packet {
+    std::uint8_t kind;
+    std::uint8_t flags;
+    std::uint16_t length;
+    std::uint32_t payload;
+};
+
+static_assert(sizeof(Packet) == 8, "Packet은 8바이트여야 한다");
+static_assert(offsetof(Packet, payload) == 4);
+static_assert(std::is_trivially_copyable_v<Packet>);    // memcpy로 옮겨도 되는가
+static_assert(std::is_standard_layout_v<Packet>);       // C와 배치가 같은가
+
+template <typename T>
+std::make_unsigned_t<T> magnitude(T value)
+{
+    static_assert(std::is_signed_v<T>, "부호 있는 정수만 받는다");
+    using U = std::make_unsigned_t<T>;
+    U u = static_cast<U>(value);
+    return value < 0 ? static_cast<U>(0 - u) : u;
+}
+
+int main()
+{
+    std::println("{}", magnitude(-5));
+    std::println("{}", magnitude(std::int8_t{-128}));
+
+    using Clean = std::remove_cvref_t<const int&>;
+    std::println("{}", std::is_same_v<Clean, int>);
+    std::println("{}", std::is_nothrow_move_constructible_v<Packet>);
+
+    using Word = std::conditional_t<sizeof(void*) == 8, std::int64_t, std::int32_t>;
+    std::println("{}", sizeof(Word));
+}
+```
+
+```text
+5
+128
+true
+true
+8
+```
+
+## static_assert
+
+`static_assert(조건, "메시지");`는 조건이 거짓이면 컴파일을 멈춥니다. 실행 파일에는 아무것도 남지 않습니다.
+
+```text
+error: static assertion failed: 부호 있는 정수만 받는다
+note: 'std::is_signed_v<unsigned int>' evaluates to false
+```
+
+- 조건은 컴파일할 때의 `bool`이어야 한다. [`constexpr` 함수의 결과](#/read/cpp-syntax/ct-constexpr)도 된다
+- 메시지는 C++17부터 생략할 수 있다. GCC는 메시지가 없어도 어느 조건이 왜 거짓인지 알려 준다
+- 전역, 클래스 안, 함수 안 어디에나 쓸 수 있다. 템플릿 안에 쓰면 인스턴스화할 때 검사된다
+- 실행 중의 값을 검사하는 것은 `assert`(`<cassert>`)의 일이다
+
+하드웨어와 통신을 다루는 코드에서 특히 쓸모가 큽니다.
+
+| 가정 | 검사 |
+| --- | --- |
+| 구조체가 프로토콜 문서의 크기와 같다 | `static_assert(sizeof(Packet) == 8);` |
+| 멤버가 문서의 오프셋에 있다 | `static_assert(offsetof(Packet, payload) == 4);` |
+| 바이트로 그대로 보내도 된다 | `static_assert(std::is_trivially_copyable_v<Packet>);` |
+| 리틀 엔디언이다 | `static_assert(std::endian::native == std::endian::little);` |
+| `int`가 32비트다 | `static_assert(sizeof(int) == 4);` |
+| 표의 칸 수가 열거형과 맞다 | `static_assert(names.size() == static_cast<std::size_t>(Mode::count));` |
+
+다른 보드, 다른 컴파일러로 옮기는 날 이 줄들이 가장 먼저 알려 줍니다.
+
+## 타입 특성
+
+`<type_traits>`는 **타입에 대해 묻고, 타입을 바꾸는** 도구 모음입니다. 모두 컴파일할 때 계산됩니다.
+
+묻는 것은 `_v`로 끝나고 `bool`입니다.
+
+| 특성 | 묻는 것 |
+| --- | --- |
+| `std::is_integral_v<T>`, `is_floating_point_v`, `is_pointer_v`, `is_enum_v`, `is_class_v` | 어떤 종류의 타입인가 |
+| `std::is_signed_v<T>`, `is_unsigned_v`, `is_const_v` | 성질 |
+| `std::is_same_v<T, U>`, `is_base_of_v<Base, Derived>`, `is_convertible_v<From, To>` | 두 타입의 관계 |
+| `std::is_trivially_copyable_v<T>` | `memcpy`로 복사해도 되는가 |
+| `std::is_standard_layout_v<T>` | 멤버 배치가 C와 같은가 (`offsetof`를 쓸 수 있는가) |
+| `std::is_nothrow_move_constructible_v<T>` | [이동이 `noexcept`인가](#/read/cpp-syntax/exc-noexcept) |
+| `std::has_unique_object_representations_v<T>` | 채움 바이트가 없는가 (바이트 비교·해시가 안전한가) |
+
+바꾸는 것은 `_t`로 끝나고 타입입니다.
+
+| 특성 | 결과 |
+| --- | --- |
+| `std::remove_const_t<T>`, `remove_reference_t`, `remove_pointer_t` | 하나를 뗀다 |
+| `std::remove_cvref_t<T>` (C++20) | `const`, `volatile`, 참조를 모두 뗀다 |
+| `std::make_unsigned_t<T>`, `make_signed_t` | 같은 크기의 부호 없는(있는) 정수 |
+| `std::underlying_type_t<E>` | 열거형의 바탕 타입 |
+| `std::conditional_t<조건, A, B>` | 조건이 참이면 `A`, 아니면 `B` |
+| `std::common_type_t<A, B>` | 둘을 함께 담을 수 있는 타입 |
+| `std::invoke_result_t<F, Args...>` | `F`를 불렀을 때의 반환 타입 |
+
+`_v`와 `_t`가 붙은 꼴의 내력은 [「별칭 템플릿과 변수 템플릿」](#/read/cpp-syntax/tpl-alias)에서 보았습니다.
+
+## 콘셉트와의 관계
+
+많은 [표준 콘셉트](#/read/cpp-syntax/con-standard)가 타입 특성 위에 만들어져 있습니다. `std::integral<T>`의 정의는 `std::is_integral_v<T>`입니다.
+
+| 하려는 일 | 도구 |
+| --- | --- |
+| 템플릿이 받을 타입을 **제한**한다 | 콘셉트. 오버로드를 고르는 데 끼고, 오류 메시지가 좋다 |
+| 템플릿 안에서 가정을 **확인**한다 | `static_assert` + 특성 |
+| 타입에 따라 **갈라진다** | [`if constexpr`](#/read/cpp-syntax/ct-if) + 특성이나 콘셉트 |
+| 타입을 **계산**한다 | `_t` 특성 |
+
+위 예제의 `magnitude`는 `static_assert` 대신 `template <std::signed_integral T>`로 쓸 수도 있습니다. 차이는 맞지 않는 타입으로 불렀을 때입니다. 콘셉트는 "맞는 함수가 없다"(다른 오버로드를 찾아본다), `static_assert`는 "이 함수를 골랐는데 조건이 틀렸다"(거기서 멈춘다)가 됩니다.
+
+<Note>
+타입 특성 가운데 몇몇은 라이브러리로는 만들 수 없어 컴파일러가 직접 답합니다(`is_trivially_copyable`, `is_standard_layout`, `has_unique_object_representations` 등). 나머지는 [부분 특수화](#/read/cpp-syntax/tpl-special)로 만들어져 있습니다. C++26의 리플렉션은 이런 질문을 훨씬 넓게 열어 줍니다([「C++26」](#/read/cpp-syntax/ver-26)).
+</Note>
+
+## 정리
+
+- `static_assert`는 컴파일할 때의 검사. 크기, 오프셋, 엔디언 같은 가정을 적어 둔다
+- `<type_traits>`의 `_v`는 타입에 대한 질문, `_t`는 타입의 변환
+- 제한은 콘셉트로, 확인은 `static_assert`로, 갈라지기는 `if constexpr`로

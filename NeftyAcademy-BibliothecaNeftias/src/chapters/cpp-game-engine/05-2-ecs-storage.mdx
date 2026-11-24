@@ -1,0 +1,207 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'ECS의 두 저장 방식: 컴포넌트마다의 희소 집합과 조합마다의 아키타입 표, 얻고 잃는 것';
+
+[「객체 모델 견주기」](#/read/cpp-game-engine/ecs-models)에서 ECS가 빠른 까닭은 "같은 컴포넌트를 한 배열에 나란히" 두기 때문이라고 했습니다. 그런데 엔티티마다 가진 컴포넌트가 다르고, 실행 중에 붙었다 떨어지기도 합니다. 이것을 어떻게 촘촘하게 담을까요? 널리 쓰이는 답이 둘 있습니다. EnTT가 쓰는 **희소 집합**과, Unity의 DOTS나 flecs가 쓰는 **아키타입**입니다.
+
+## 희소 집합
+
+컴포넌트 종류마다 집합 하나를 둡니다. 집합 안에는 배열이 셋 있습니다.
+
+- `sparse`: 엔티티 번호로 바로 찾는 표. "이 엔티티의 컴포넌트는 dense의 몇째 자리인가"
+- `dense`: 이 컴포넌트를 가진 엔티티들이 빈틈없이 모인 목록
+- `data`: `dense`와 같은 순서로 놓인 컴포넌트 값들
+
+```cpp
+#include <cstdint>
+#include <print>
+#include <vector>
+
+using Entity = std::uint32_t;
+constexpr std::uint32_t kNone = 0xFFFFFFFF;
+
+// 희소 집합: sparse[엔티티] = dense의 자리, dense에는 엔티티와 컴포넌트가 나란히
+template <typename T>
+class SparseSet {
+public:
+    void add(Entity e, T value)
+    {
+        if (e >= sparse_.size()) sparse_.resize(e + 1, kNone);
+        sparse_[e] = static_cast<std::uint32_t>(dense_.size());
+        dense_.push_back(e);
+        data_.push_back(value);
+    }
+    bool has(Entity e) const { return e < sparse_.size() && sparse_[e] != kNone; }
+    T& get(Entity e) { return data_[sparse_[e]]; }
+    void remove(Entity e)                     // 끝 원소와 바꿔 빼기
+    {
+        std::uint32_t i = sparse_[e];
+        Entity last = dense_.back();
+        dense_[i] = last;
+        data_[i] = data_.back();
+        sparse_[last] = i;
+        dense_.pop_back();
+        data_.pop_back();
+        sparse_[e] = kNone;
+    }
+    std::size_t size() const { return dense_.size(); }
+    const std::vector<Entity>& entities() const { return dense_; }
+
+private:
+    std::vector<std::uint32_t> sparse_;       // 엔티티 번호로 찾는 표(빈칸이 많다)
+    std::vector<Entity> dense_;               // 촘촘한 엔티티 목록
+    std::vector<T> data_;                     // dense_와 같은 순서의 컴포넌트
+};
+
+struct Pos { float x, y; };
+struct Vel { float x, y; };
+
+int main()
+{
+    SparseSet<Pos> pos;
+    SparseSet<Vel> vel;
+    for (Entity e = 0; e < 6; ++e) pos.add(e, {float(e), 0});
+    for (Entity e : {1u, 3u, 4u}) vel.add(e, {1, 2});
+
+    pos.remove(1);                            // 1번은 위치를 잃는다
+    std::print("pos의 촘촘한 목록:");
+    for (Entity e : pos.entities()) std::print(" {}", e);
+    std::println("  (1번 자리에 끝의 5번이 왔다)");
+
+    // 두 컴포넌트를 모두 가진 개체: 작은 쪽을 훑고 큰 쪽에 묻는다
+    auto& small = vel.size() < pos.size() ? vel.entities() : pos.entities();
+    for (Entity e : small) {
+        if (!pos.has(e) || !vel.has(e)) continue;
+        auto& p = pos.get(e);
+        p.x += vel.get(e).x;
+        p.y += vel.get(e).y;
+        std::println("엔티티 {} 움직임 -> ({}, {})", e, p.x, p.y);
+    }
+}
+```
+
+```text
+pos의 촘촘한 목록: 0 5 2 3 4  (1번 자리에 끝의 5번이 왔다)
+엔티티 3 움직임 -> (4, 2)
+엔티티 4 움직임 -> (5, 2)
+```
+
+- 더하기, 찾기, 지우기가 모두 O(1)입니다. 지우기는 [「엔진용 컨테이너」](#/read/cpp-game-engine/mem-containers)의 **바꿔 빼기**에 `sparse` 표 고치기를 더한 것이라, 1번을 지우자 끝의 5번이 그 자리로 왔습니다
+- 컴포넌트 하나만 쓰는 시스템은 `data`를 처음부터 끝까지 훑으면 되어 아주 빠릅니다
+- 둘 이상을 함께 쓰는 시스템은 **작은 쪽을 훑고 큰 쪽에 있는지 묻습니다**. 위에서는 Vel(3개)을 훑으며 Pos가 있는지 확인했고, 위치를 잃은 1번은 건너뛰었습니다. 이때 큰 쪽의 데이터는 엔티티 순서대로 띄엄띄엄 읽게 되어, 여러 컴포넌트를 함께 쓰는 시스템은 덜 촘촘해집니다
+
+## 아키타입
+
+컴포넌트 **조합**마다 표를 하나 둡니다. `{Pos}`를 가진 엔티티들의 표, `{Pos, Vel}`을 가진 엔티티들의 표가 따로 있고, 표 안에서는 컴포넌트마다 열 하나(배열 하나)입니다.
+
+```cpp
+#include <cstdint>
+#include <map>
+#include <print>
+#include <vector>
+
+struct Pos { float x, y; };
+struct Vel { float x, y; };
+enum : std::uint32_t { POS = 1, VEL = 2 };
+
+// 아키타입 하나 = 같은 조합을 가진 개체들의 표. 열마다 배열 하나
+struct Table {
+    std::vector<std::uint32_t> ents;
+    std::vector<Pos> pos;                     // POS가 있는 표만 쓴다
+    std::vector<Vel> vel;                     // VEL이 있는 표만 쓴다
+};
+
+struct World {
+    std::map<std::uint32_t, Table> tables;    // 조합 -> 표
+    struct Where { std::uint32_t mask; std::size_t row; };
+    std::vector<Where> where;                 // 엔티티 -> 어느 표의 몇째 줄
+    int moves = 0;
+
+    std::uint32_t create(Pos p)
+    {
+        auto e = static_cast<std::uint32_t>(where.size());
+        Table& t = tables[POS];
+        t.ents.push_back(e);
+        t.pos.push_back(p);
+        where.push_back({POS, t.ents.size() - 1});
+        return e;
+    }
+    // 컴포넌트를 더하면 개체가 다른 표로 이사한다
+    void add_vel(std::uint32_t e, Vel v)
+    {
+        auto [mask, row] = where[e];
+        Table& from = tables[mask];
+        Table& to = tables[mask | VEL];
+        to.ents.push_back(e);
+        to.pos.push_back(from.pos[row]);
+        to.vel.push_back(v);
+        // 옛 표에서는 바꿔 빼기, 끝에서 온 개체의 자리를 고친다
+        std::uint32_t last = from.ents.back();
+        from.ents[row] = last;
+        from.pos[row] = from.pos.back();
+        from.ents.pop_back();
+        from.pos.pop_back();
+        if (last != e) where[last].row = row;
+        where[e] = {mask | VEL, to.ents.size() - 1};
+        ++moves;
+    }
+};
+
+int main()
+{
+    World w;
+    for (int i = 0; i < 5; ++i) w.create({float(i), 0});
+    w.add_vel(1, {1, 0});
+    w.add_vel(3, {0, 1});
+
+    for (auto& [mask, t] : w.tables) {
+        std::print("표 {{{}{}}} {}줄:", mask & POS ? "Pos" : "",
+                   mask & VEL ? ",Vel" : "", t.ents.size());
+        for (auto e : t.ents) std::print(" e{}", e);
+        std::println();
+    }
+    // 이동 시스템: Pos와 Vel이 모두 있는 표만 통째로 훑는다
+    for (auto& [mask, t] : w.tables) {
+        if ((mask & (POS | VEL)) != (POS | VEL)) continue;
+        for (std::size_t i = 0; i < t.ents.size(); ++i) {
+            t.pos[i].x += t.vel[i].x;
+            t.pos[i].y += t.vel[i].y;
+            std::println("e{} -> ({}, {})", t.ents[i], t.pos[i].x, t.pos[i].y);
+        }
+    }
+    std::println("이사 {}번", w.moves);
+}
+```
+
+```text
+표 {Pos} 3줄: e0 e4 e2
+표 {Pos,Vel} 2줄: e1 e3
+e1 -> (2, 0)
+e3 -> (3, 1)
+이사 2번
+```
+
+- 이동 시스템은 "Pos와 Vel이 모두 있는 표"만 골라 **통째로** 훑습니다. 표 안의 Pos 열과 Vel 열이 같은 순서로 나란히 있어서, 여러 컴포넌트를 쓰는 시스템도 끝까지 촘촘하게 읽습니다
+- 대신 엔티티에 컴포넌트를 **더하거나 빼면 다른 표로 이사**해야 합니다. 1번과 3번에 Vel을 붙이자 두 엔티티가 `{Pos,Vel}` 표로 옮겨 갔고, 옛 표에서는 바꿔 빼기로 빈자리를 메웠습니다(4번이 1번 자리로). 컴포넌트가 열 개면 옮길 때마다 열 개를 모두 복사합니다
+- 조합의 수만큼 표가 생깁니다. 실제 아키타입 ECS는 "이 조합에 Vel을 더하면 어느 표인가"를 표끼리의 연결(그래프)로 기억해 두어 이사를 빠르게 합니다
+
+## 무엇을 고르나
+
+| | 희소 집합 | 아키타입 |
+| --- | --- | --- |
+| 컴포넌트 붙이기·떼기 | O(1), 매우 쌈 | 표를 옮기며 모든 열 복사 |
+| 한 컴포넌트만 훑기 | 매우 빠름 | 표 여러 개를 차례로 |
+| 여러 컴포넌트를 함께 훑기 | 큰 쪽은 띄엄띄엄 | 끝까지 촘촘 |
+| 구조의 단순함 | 단순 | 표와 그 연결 관리가 필요 |
+
+상태 표시(기절, 불붙음, 선택됨)처럼 **자주 붙었다 떨어지는** 컴포넌트가 많으면 희소 집합이, 개체 구성이 대체로 고정되고 **여러 컴포넌트를 함께 쓰는** 무거운 시스템이 많으면 아키타입이 유리합니다. 실제 라이브러리들은 서로의 약점을 보완하는 장치도 갖고 있습니다. EnTT는 자주 함께 쓰는 컴포넌트들을 같은 순서로 정렬해 두는 "그룹"을, flecs는 자주 바뀌는 표시를 따로 다루는 방법을 둡니다.
+
+<Note>
+두 방식 모두 엔티티 번호에 **세대**를 붙여 씁니다. 엔티티를 지우고 같은 번호를 다시 쓸 때, 옛 엔티티를 가리키던 번호로 새 엔티티의 컴포넌트를 건드리지 않도록 하는 것입니다. [「핸들과 세대 인덱스」](#/read/cpp-game-engine/mem-handles)의 방법이 그대로 쓰입니다. 위 예제들은 짧게 하려고 세대를 뺐습니다.
+</Note>
+
+## 정리
+
+- 희소 집합은 컴포넌트마다 sparse 표와 촘촘한 dense·data 배열을 두어, 붙이기·떼기가 O(1)이고 한 컴포넌트를 훑기가 빠르다
+- 아키타입은 같은 조합끼리 표로 모아 여러 컴포넌트를 함께 훑어도 촘촘하지만, 컴포넌트를 붙이고 뗄 때 표를 옮겨야 한다
+- 자주 바뀌는 표시가 많으면 희소 집합, 구성이 고정되고 무거운 시스템이 많으면 아키타입이 유리하며, 엔티티 번호에는 세대를 붙인다

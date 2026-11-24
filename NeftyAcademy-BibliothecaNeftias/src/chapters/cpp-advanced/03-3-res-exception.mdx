@@ -1,0 +1,262 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '던질 수 있는 곳 세기, 모든 지점에서 실패시켜 보는 시험, 순서로 만드는 보장, 예외가 넘지 못하는 경계';
+
+기본 보장과 강한 보장이 무엇인지, 사본에서 일하고 바꿔치기하면 강한 보장이 된다는 것은 [「예외 안전성의 세 단계」](#/read/cpp-syntax/exc-safety)에서 봤습니다. 아는 것과 그렇게 쓰는 것은 다릅니다. 이 쪽은 쓰는 쪽입니다. 어디서 던져질 수 있는지 세고, 정말 그런지 시험하고, 비싸지 않게 보장을 만듭니다.
+
+## 던질 수 있는 곳을 센다
+
+예외에 안전한 코드는 **한 줄씩 "여기서 던지면?"을 묻는** 데서 시작합니다. 묻는 대상은 정해져 있습니다.
+
+| 던질 수 있다 | 던지지 않는다 |
+| --- | --- |
+| 메모리를 얻는 모든 것: `push_back`, 글자열 잇기, `make_unique`, 컨테이너 복사 | 기본 타입의 연산, 포인터 대입 |
+| 내가 만든 타입의 복사와 변환 | `swap`, [`noexcept`인 이동](#/read/cpp-advanced/mv-noexcept) |
+| 넘겨받은 함수와 콜백 호출 | 소멸자, `clear()`, `pop_back()`, 끝에서 지우는 `erase` |
+| 검사하는 함수: `at()`, `std::stoi`, `std::get`, `value()` | `noexcept`가 붙은 함수 |
+
+오른쪽 칸의 연산이 **발판**입니다. 던질 수 있는 일을 모두 끝낸 뒤 오른쪽 칸의 연산만으로 상태를 바꾸면, 실패했을 때 바뀐 것이 없습니다.
+
+## 모든 지점에서 실패시켜 본다
+
+눈으로 센 것은 틀리기 쉽습니다. 원소의 복사가 **n번째에서 던지게** 해 놓고 n을 0부터 올리며 같은 함수를 되풀이하면, 던질 수 있는 지점을 하나도 빠짐없이 지나갑니다.
+
+```cpp
+#include <print>
+#include <stdexcept>
+#include <vector>
+
+struct Bomb : std::runtime_error {
+    Bomb() : std::runtime_error("boom") {}
+};
+
+// 정해 둔 번째의 복사에서 예외를 던지는 원소
+struct Item {
+    static inline int countdown = -1;       // 남은 횟수. -1 이면 던지지 않는다
+    static inline int alive = 0;            // 살아 있는 Item 의 수
+    int value;
+
+    explicit Item(int v) : value(v) { ++alive; }
+    Item(const Item& other) : value(other.value)
+    {
+        if (countdown == 0) throw Bomb();
+        if (countdown > 0) --countdown;
+        ++alive;
+    }
+    Item& operator=(const Item&) = default;
+    ~Item() { --alive; }
+};
+
+using Items = std::vector<Item>;
+
+void append_basic(Items& target, const Items& source)       // 하나씩 넣는다
+{
+    for (const Item& item : source) target.push_back(item);
+}
+
+// 사본에서 일하고 바꿔치기
+void append_copy_swap(Items& target, const Items& source)
+{
+    Items next = target;
+    for (const Item& item : source) next.push_back(item);
+    target.swap(next);
+}
+
+void append_reserve_undo(Items& target, const Items& source)
+{
+    const auto old_size = target.size();
+    target.reserve(old_size + source.size());   // 재할당은 여기서 끝낸다
+    try {
+        for (const Item& item : source) target.push_back(item);
+    } catch (...) {
+        // 넣은 것만 도로 뺀다
+        target.erase(target.begin() + old_size, target.end());
+        throw;
+    }
+}
+
+// 복사가 0번째, 1번째, 2번째 … 에서 실패하게 하며, 끝까지 성공할 때까지 되풀이한다
+template <typename F>
+void test_every_failure(const char* name, F append)
+{
+    int changed = 0, leaked = 0, points = 0;
+    for (;; ++points) {
+        Items target = {Item(1), Item(2), Item(3)};
+        const Items source = {Item(4), Item(5), Item(6)};
+        const int expected = Item::alive - 3;       // target 을 뺀 나머지
+        Item::countdown = points;
+        try {
+            append(target, source);
+            Item::countdown = -1;
+            break;                                  // 한 번도 던지지 않았다
+        } catch (const Bomb&) {
+            Item::countdown = -1;
+            if (target.size() != 3) ++changed;
+            if (Item::alive != expected + static_cast<int>(target.size())) ++leaked;
+        }
+    }
+    std::println("{:<20} 실패 지점 {}곳, 값이 바뀐 채 남음 {}번, 샘 {}번",
+                 name, points, changed, leaked);
+}
+
+int main()
+{
+    test_every_failure("append_basic", append_basic);
+    test_every_failure("append_copy_swap", append_copy_swap);
+    test_every_failure("append_reserve_undo", append_reserve_undo);
+}
+```
+
+```text
+append_basic         실패 지점 6곳, 값이 바뀐 채 남음 2번, 샘 0번
+append_copy_swap     실패 지점 9곳, 값이 바뀐 채 남음 0번, 샘 0번
+append_reserve_undo  실패 지점 6곳, 값이 바뀐 채 남음 0번, 샘 0번
+```
+
+세 함수 모두 새지는 않습니다. `std::vector`가 자원을 쥐고 있으므로 기본 보장은 거저 얻습니다. `append_basic`은 여섯 지점 가운데 둘에서 **일부만 들어간 채** 떠납니다. 첫 `push_back`은 재할당까지 되돌려 주지만(강한 보장), 둘째와 셋째에서 실패하면 앞의 것은 이미 들어가 있습니다. 한 줄 한 줄이 강한 보장이어도 **합친 함수는 아닙니다.**
+
+이 시험은 예외를 던지는 원소 하나와 반복문 하나면 되므로 [단위 테스트](#/read/cpp-advanced/tool-testing)에 그대로 넣을 수 있습니다. 메모리 부족까지 보려면 같은 방법으로 n번째 할당에서 `std::bad_alloc`을 던지는 [할당자](#/read/cpp-advanced/mm-allocator)를 씁니다.
+
+## 순서가 보장을 만든다
+
+| 방법 | 실패 지점 | 실패한 뒤 | 치르는 값 |
+| --- | --- | --- | --- |
+| 하나씩 넣는다 | 6곳 | 일부만 들어가 있다 | 없다 |
+| 사본에서 일하고 바꿔치기 | 9곳 | 그대로다 | 있던 원소를 모두 복사한다 |
+| 자리를 먼저 잡고, 실패하면 뺀다 | 6곳 | 그대로다 | 없다 (용량만 늘어난 채 남는다) |
+
+셋째 방법은 일의 **순서**를 바꿨을 뿐입니다.
+
+1. 던질 수 있고 되돌릴 필요가 없는 일을 맨 앞에 둔다. `reserve`는 실패해도 값이 그대로다
+2. 상태를 바꾸는 일은 그 뒤에 하고, 되돌리는 법이 던지지 않는 연산(`erase`, `pop_back`)이 되게 한다
+3. 파일에 쓰기나 장치에 내보내기처럼 되돌릴 수 없는 일은 맨 끝에 둔다
+
+되돌리는 `catch`는 [스코프 가드](#/read/cpp-advanced/res-guard)로 적어도 같습니다. 걸음이 여럿이면 가드가 읽기 쉽습니다.
+
+## 생성자와 대입에서
+
+```cpp
+#include <print>
+#include <stdexcept>
+#include <vector>
+
+struct Plain {
+    Plain() { throw std::runtime_error("생성자에서 실패"); }
+    ~Plain() { std::println("  소멸자"); }
+};
+
+struct Delegating {
+    Delegating() { std::println("  기본 생성자 끝"); }
+    explicit Delegating(int) : Delegating()     // 다른 생성자에 맡긴 뒤에
+    {
+        throw std::runtime_error("맡긴 뒤에 실패");
+    }
+    ~Delegating() { std::println("  소멸자"); }
+};
+
+struct Item {
+    static inline int countdown = -1;
+    int value;
+    explicit Item(int v) : value(v) {}
+    Item(const Item&) = default;
+    Item& operator=(const Item& other)
+    {
+        if (countdown == 0) throw std::runtime_error("대입 실패");
+        if (countdown > 0) --countdown;
+        value = other.value;
+        return *this;
+    }
+};
+
+template <typename F>
+void attempt(F f)
+{
+    try {
+        f();
+    } catch (const std::exception& error) {
+        std::println("  {}", error.what());
+    }
+}
+
+int main()
+{
+    std::println("보통 생성자");
+    attempt([] { Plain p; });
+    std::println("위임 생성자");
+    attempt([] { Delegating d(1); });
+
+    std::println("vector 의 복사 대입");
+    std::vector<Item> target = {Item(1), Item(2), Item(3)};
+    const std::vector<Item> source = {Item(7), Item(8), Item(9)};
+    Item::countdown = 1;                        // 둘째 원소의 대입에서 던진다
+    attempt([&] { target = source; });
+    std::println("  {} {} {}", target[0].value, target[1].value, target[2].value);
+}
+```
+
+```text
+보통 생성자
+  생성자에서 실패
+위임 생성자
+  기본 생성자 끝
+  소멸자
+  맡긴 뒤에 실패
+vector 의 복사 대입
+  대입 실패
+  7 2 3
+```
+
+생성자가 던지면 [소멸자는 불리지 않습니다](#/read/cpp-syntax/exc-unwind). 예외가 하나 있습니다. **맡긴 생성자가 끝난 순간 객체는 만들어진 것**으로 치므로, 그 뒤에 던지면 소멸자가 불립니다. 위임 생성자를 쓰는 클래스의 소멸자는 반쯤 채워진 객체를 받을 수 있습니다.
+
+`target = source`는 `7 2 3`을 남겼습니다. `std::vector`의 복사 대입은 자리가 넉넉하면 있던 원소에 하나씩 덮어쓰므로 **기본 보장**입니다. 값이 섞였지만 크기는 3이고 새는 것도 없습니다. 강한 보장이 필요한 대입은 `Items next = source; target.swap(next);`라고 적습니다. 있던 메모리를 다시 쓰지 못하는 것이 그 값입니다.
+
+## 예외가 넘지 못하는 경계
+
+| 경계 | 넘으면 | 할 일 |
+| --- | --- | --- |
+| 소멸자, `noexcept` 함수 | `std::terminate` | 안에서 잡는다 |
+| [스레드](#/read/cpp-advanced/thr-jthread)가 시작한 함수 | `std::terminate` | 안에서 잡아 결과로 넘긴다 |
+| C 코드가 부르는 콜백, [C로 내놓은 함수](#/read/cpp-advanced/iop-c-abi) | 정해져 있지 않다 | 잡아서 오류 값으로 바꾼다 |
+
+경계에 선 함수는 **함수 전체를 `try`로 감쌉니다.** 함수 `try` 블록이 그 꼴입니다.
+
+```cpp
+#include <cstdio>
+#include <exception>
+#include <print>
+#include <string>
+
+int run_job(const char* text) noexcept
+try {
+    int count = std::stoi(text);        // 숫자가 아니면 던진다
+    std::println("{}개 처리", count);
+    return 0;
+} catch (const std::exception& error) {
+    std::println(stderr, "실패: {}", error.what());
+    return -1;
+} catch (...) {
+    return -2;
+}
+
+int main()
+{
+    int first = run_job("12");
+    int second = run_job("열둘");
+    std::println("{} {}", first, second);
+}
+```
+
+```text
+12개 처리
+0 -1
+```
+
+<Note>
+경계 안쪽에서는 반대입니다. `catch`는 **오류를 처리할 수 있는 곳**에만 둡니다. 정리는 소멸자와 가드가 하므로, 처리할 줄 모르는 함수가 `catch (...)`로 잡았다가 다시 던지는 코드는 대개 필요 없습니다.
+</Note>
+
+## 정리
+
+- 메모리를 얻는 일, 내 타입의 복사, 콜백은 던질 수 있다. `swap`, 이동, 소멸자, `pop_back`은 던지지 않는 발판이다
+- 복사가 n번째에서 던지게 하고 n을 올려 가며 되풀이하면 모든 실패 지점을 시험할 수 있다
+- 던질 수 있는 일을 앞에, 상태를 바꾸는 일을 뒤에 두면 사본 없이도 강한 보장이 된다

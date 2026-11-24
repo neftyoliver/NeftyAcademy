@@ -1,0 +1,143 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'N+1 문제: 목록 하나에 항목마다 쿼리 하나, sqlite3_trace_v2로 문장 세기, 조인과 목록으로 한꺼번에';
+export const terms = ['SQLITE_TRACE_STMT', 'sqlite3_sql', 'sqlite3_trace_v2', 'PQtrace'];
+
+목록을 쿼리 하나로 가져온 뒤, 항목마다 딸린 데이터를 쿼리 하나씩 더 묻는 모양을 **N+1 문제**라고 부릅니다. 손님 100명을 띄우며 손님마다 주문을 물으면 쿼리가 101번 나갑니다. 코드로는 반복문 안의 함수 호출 하나라서 눈에 잘 띄지 않고, ORM이 `customer.orders()` 같은 접근을 처음 할 때 몰래 쿼리를 보내는 지연 로딩이 흔한 원인입니다. 서버형 데이터베이스에서는 쿼리마다 왕복이 붙어서, localhost에서도 한 번에 0.05ms쯤([「연결 풀」](#/read/cpp-database/pool-pool)), 네트워크를 건너면 그 몇십 배가 항목 수만큼 쌓입니다.
+
+## 문장을 세어 보기
+
+SQLite의 `sqlite3_trace_v2`에 `SQLITE_TRACE_STMT`를 주면 문장이 실행을 시작할 때마다 콜백이 불립니다. 콜백에서 `sqlite3_sql`로 얻는 글자는 값을 채우기 전의 원문이라서, 같은 문장이 몇 번 되풀이됐는지 원문별로 셀 수 있습니다.
+
+```cpp flags=-lsqlite3
+#include <sqlite3.h>
+#include <cstdio>
+#include <map>
+#include <string>
+#include <vector>
+
+struct Tracer {                                  // 실행된 문장을 센다
+    int count = 0;
+    std::map<std::string, int> by_sql;
+};
+
+int on_trace(unsigned type, void* ctx, void* p, void*) {
+    if (type == SQLITE_TRACE_STMT) {
+        auto* t = static_cast<Tracer*>(ctx);
+        ++t->count;
+        ++t->by_sql[sqlite3_sql(static_cast<sqlite3_stmt*>(p))];
+    }
+    return 0;
+}
+
+struct Summary {
+    long long orders = 0, total = 0;
+};
+
+void report(const char* label, Tracer& t, const std::map<int, Summary>& r) {
+    long long orders = 0, total = 0;
+    for (auto& [id, s] : r) orders += s.orders, total += s.total;
+    std::printf("%s: 문장 %d번, 손님 %zu명, 주문 %lld건, 합계 %lld\n", label,
+                t.count, r.size(), orders, total);
+    for (auto& [sql, n] : t.by_sql)
+        if (n > 1) std::printf("  %d번 되풀이: %s\n", n, sql.c_str());
+    t = Tracer{};
+}
+
+int main() {
+    sqlite3* db;
+    sqlite3_open(":memory:", &db);
+    sqlite3_exec(db, "CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT);"
+                     "CREATE TABLE orders (id INTEGER PRIMARY KEY, "
+                     "customer_id INTEGER, total INTEGER);"
+                     "CREATE INDEX orders_customer ON orders (customer_id);"
+                     "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL "
+                     "SELECT i + 1 FROM n WHERE i < 300) "
+                     "INSERT INTO orders (customer_id, total) "
+                     "SELECT 1 + i % 100, i * 10 FROM n;"
+                     "INSERT INTO customers SELECT DISTINCT customer_id, "
+                     "'손님' || customer_id FROM orders",
+                 nullptr, nullptr, nullptr);
+    Tracer t;
+    sqlite3_trace_v2(db, SQLITE_TRACE_STMT, on_trace, &t);
+    sqlite3_stmt* st;
+    const char* all_ids = "SELECT id FROM customers ORDER BY id";
+
+    std::map<int, Summary> r1;                   // 1. 손님마다 주문을 따로 묻는다
+    sqlite3_stmt* per;
+    sqlite3_prepare_v2(db, "SELECT count(*), sum(total) FROM orders "
+                           "WHERE customer_id = ?", -1, &per, nullptr);
+    sqlite3_prepare_v2(db, all_ids, -1, &st, nullptr);
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        int id = sqlite3_column_int(st, 0);
+        sqlite3_bind_int(per, 1, id);            // 준비는 한 번이어도 실행은 매번
+        sqlite3_step(per);
+        r1[id] = {sqlite3_column_int64(per, 0), sqlite3_column_int64(per, 1)};
+        sqlite3_reset(per);
+    }
+    sqlite3_finalize(st);
+    sqlite3_finalize(per);
+    report("손님마다 묻기 (N+1)", t, r1);
+
+    std::map<int, Summary> r2;                   // 2. 조인과 GROUP BY 한 번
+    sqlite3_prepare_v2(db, "SELECT c.id, count(o.id), coalesce(sum(o.total), 0) "
+                           "FROM customers c LEFT JOIN orders o "
+                           "ON o.customer_id = c.id GROUP BY c.id",
+                       -1, &st, nullptr);
+    while (sqlite3_step(st) == SQLITE_ROW)
+        r2[sqlite3_column_int(st, 0)] = {sqlite3_column_int64(st, 1),
+                                         sqlite3_column_int64(st, 2)};
+    sqlite3_finalize(st);
+    report("조인 한 번", t, r2);
+
+    std::map<int, Summary> r3;                   // 3. 손님 목록을 받고, 그 손님들의
+    std::vector<int> ids;                        //    주문을 목록 하나로 한꺼번에
+    sqlite3_prepare_v2(db, all_ids, -1, &st, nullptr);
+    while (sqlite3_step(st) == SQLITE_ROW) ids.push_back(sqlite3_column_int(st, 0));
+    sqlite3_finalize(st);
+    std::string json = "[";
+    for (int id : ids) {
+        json += (json.size() > 1 ? "," : "") + std::to_string(id);
+        r3[id] = {};
+    }
+    json += "]";
+    sqlite3_prepare_v2(db, "SELECT customer_id, total FROM orders "
+                           "WHERE customer_id IN (SELECT value FROM json_each(?))",
+                       -1, &st, nullptr);
+    sqlite3_bind_text(st, 1, json.c_str(), -1, SQLITE_TRANSIENT);
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        Summary& s = r3[sqlite3_column_int(st, 0)];
+        ++s.orders;
+        s.total += sqlite3_column_int64(st, 1);
+    }
+    sqlite3_finalize(st);
+    report("목록으로 한꺼번에", t, r3);
+    sqlite3_close(db);
+}
+```
+
+```text
+손님마다 묻기 (N+1): 문장 101번, 손님 100명, 주문 300건, 합계 451500
+  100번 되풀이: SELECT count(*), sum(total) FROM orders WHERE customer_id = ?
+조인 한 번: 문장 1번, 손님 100명, 주문 300건, 합계 451500
+목록으로 한꺼번에: 문장 2번, 손님 100명, 주문 300건, 합계 451500
+```
+
+- **101번과 1번**: 손님마다 묻는 방식은 같은 문장을 100번 실행했습니다. 문장을 한 번만 준비해 두어도 실행은 매번 따로이고, 서버형이라면 그때마다 왕복입니다. 세 방식의 결과는 모두 같았습니다
+- **조인으로 한 번**: 필요한 것이 손님별 합계라면 `LEFT JOIN`과 `GROUP BY`로 데이터베이스 안에서 계산해 한 번에 받습니다. `LEFT`라서 주문이 없는 손님도 0으로 남고, `coalesce`가 NULL 합계를 0으로 바꿉니다
+- **목록으로 한꺼번에**: 주문 하나하나가 객체로 필요하면, 손님 목록을 받은 뒤 그 손님들의 주문을 목록 하나로 한꺼번에 묻고 C++에서 손님별로 나눕니다. 항목이 몇 개든 쿼리는 2번입니다. ORM에서는 이것을 즉시 로딩이나 일괄 로딩이라고 부릅니다. 목록은 `IN (1, 2, 3, ...)` 글자를 이어 붙이지 말고 값 하나로 묶습니다. SQLite에서는 JSON 배열과 `json_each`, PostgreSQL에서는 배열과 `customer_id = ANY($1::int[])`를 씁니다
+- **테스트에서 세기**: 요청 하나를 처리하는 동안 실행된 문장 수를 테스트에서 세어, 정한 수를 넘으면 실패하게 하면 N+1이 다시 들어오는 것을 막을 수 있습니다([「테스트 DB와 픽스처」](#/read/cpp-database/dbtest-fixtures))
+
+## 운영에서 찾기
+
+PostgreSQL에서는 `pg_stat_statements`가 원문(값을 `$1`로 바꾼 꼴)별로 실행 횟수와 시간을 모읍니다. 실행 횟수가 유난히 많고 한 번의 시간은 아주 짧은 쿼리가 보이면 N+1을 의심합니다([「모니터링」](#/read/cpp-database/dbops-monitor)). 개발 중에는 libpq의 `PQtrace`로 연결이 주고받는 프로토콜 메시지를 파일에 남겨, 어떤 쿼리가 몇 번 나가는지 직접 볼 수도 있습니다.
+
+<Note>
+조인으로 한 번에 가져오는 것이 늘 답은 아닙니다. 손님에 주문과 주소처럼 여러 자식 테이블을 함께 조인하면 행이 곱으로 불어나, 주문 10건과 주소 3개인 손님 한 명이 30행이 됩니다. 이럴 때는 자식 테이블마다 목록 쿼리를 하나씩 보내거나, PostgreSQL의 `json_agg`처럼 자식을 한 행 안에 모아 받습니다.
+</Note>
+
+## 정리
+
+- 목록을 받은 뒤 항목마다 쿼리를 보내면 쿼리가 N+1번 나가고, 서버형 데이터베이스에서는 왕복이 항목 수만큼 쌓인다
+- 합계가 필요하면 조인과 GROUP BY로 한 번에, 자식 행이 필요하면 부모 목록을 값 하나로 묶어 자식을 한꺼번에 가져온다
+- sqlite3_trace_v2나 pg_stat_statements, PQtrace로 실행된 문장을 세고, 테스트에서 요청마다 문장 수의 상한을 검사한다

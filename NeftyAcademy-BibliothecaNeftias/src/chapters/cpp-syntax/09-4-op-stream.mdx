@@ -1,0 +1,116 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '내 타입을 println의 {}에 넣기, 옛 코드를 위한 operator<<';
+export const terms = ['std::formatter', '~formatter', 'format_context'];
+
+`std::println("{}", pin)`에 내가 만든 타입을 넣으면 컴파일 오류가 납니다. 찍는 법을 알려 준 적이 없기 때문입니다. 알려 주는 방법이 둘 있습니다. 요즘 방식인 `std::formatter`와, `std::cout`을 위한 `operator<<`입니다.
+
+## 두 가지 모두
+
+```cpp
+#include <format>
+#include <iostream>
+#include <print>
+#include <string>
+
+struct Pin {
+    int number;
+    bool high;
+};
+
+// std::format, std::println 의 {} 에 들어가게 한다
+template <>
+struct std::formatter<Pin> : std::formatter<std::string> {
+    auto format(const Pin& p, std::format_context& ctx) const
+    {
+        std::string text = std::format("GPIO{}={}", p.number, p.high ? "H" : "L");
+        return std::formatter<std::string>::format(text, ctx);
+    }
+};
+
+// std::cout << pin 이 되게 한다
+std::ostream& operator<<(std::ostream& os, const Pin& p)
+{
+    return os << std::format("{}", p);
+}
+
+int main()
+{
+    Pin led{17, true};
+    std::println("{}", led);
+    std::println("[{:>12}]", led);      // 폭과 정렬은 물려받은 쪽이 처리한다
+    std::cout << led << '\n';
+}
+```
+
+```text
+GPIO17=H
+[    GPIO17=H]
+GPIO17=H
+```
+
+## std::formatter
+
+`std::format`은 `{}` 자리에 올 값의 타입 `T`마다 `std::formatter<T>`라는 클래스를 찾습니다. 그것이 "이 타입은 이렇게 글자로 바꾼다"를 담고 있습니다. `template <> struct std::formatter<Pin>`은 "`Pin`일 때의 `formatter`는 이것"이라고 표준 라이브러리의 틀에 내 것을 끼워 넣는 문법입니다([「특수화와 부분 특수화」](#/read/cpp-syntax/tpl-special)).
+
+가장 쉬운 길은 위처럼 **`std::formatter<std::string>`을 물려받는 것**입니다.
+
+1. 내 값을 먼저 `std::string`으로 만든다
+2. 그것을 물려받은 `format`에 넘긴다
+
+이렇게 하면 `{:>12}`, `{:<8}`, `{:^10}` 같은 폭과 정렬 서식을 문자열용 `formatter`가 대신 처리해 줍니다. `p`나 `x` 같은 나만의 서식 글자를 받으려면 `parse` 함수를 직접 써야 하고, STL 책의 `std::format` 챕터에서 다룹니다.
+
+`format` 함수는 반드시 `const`여야 합니다.
+
+## operator&lt;&lt;
+
+`std::cout << a << b`는 `operator<<(operator<<(std::cout, a), b)`입니다. 그래서 `operator<<`는
+
+- 왼쪽 인자로 `std::ostream&`을 받고
+- 같은 스트림을 **참조로 돌려줘서** 다음 `<<`가 이어지게 합니다
+
+왼쪽 인자가 내 타입이 아니므로 멤버 함수로는 만들 수 없습니다. 타입과 같은 네임스페이스에 바깥 함수로 두거나 [숨은 친구](#/read/cpp-syntax/class-static)로 둡니다. `private` 멤버를 찍어야 하면 `friend`가 필요합니다.
+
+위 예제는 `formatter`를 먼저 만들고 `operator<<`가 그것을 부르게 했습니다. 찍는 방법이 한곳에만 있습니다.
+
+## 어느 쪽을 쓰나
+
+| | `std::formatter` | `operator<<` |
+| --- | --- | --- |
+| 쓰는 곳 | `std::format`, `std::print`, `std::println` | `std::cout`, `std::ostringstream`, 로그 라이브러리 |
+| 서식 | 서식 문자열 안에. 컴파일할 때 검사된다 | `std::setw`, `std::hex` 같은 조작자. 스트림에 상태가 남는다 |
+| 표준 | C++20 | C++98 |
+
+새 코드에서는 `formatter`를 만듭니다. `operator<<`는 그것을 쓰는 기존 코드나 라이브러리와 맞춰야 할 때 더합니다.
+
+스트림의 "상태가 남는다"는 것은 이런 사고를 말합니다.
+
+```cpp nocheck
+std::cout << std::hex << 255;       // ff
+std::cout << 16;                    // 10. 여전히 16진수다
+```
+
+`std::format("{:x}", 255)`의 서식은 그 자리에서 끝납니다.
+
+## 입력 연산자
+
+반대 방향인 `operator>>`도 같은 꼴입니다.
+
+```cpp nocheck
+std::istream& operator>>(std::istream& is, Pin& p)
+{
+    return is >> p.number >> p.high;
+}
+```
+
+읽기에 실패하면 스트림이 실패 상태가 되므로 `if (std::cin >> pin)`으로 확인합니다. 글자에서 값을 읽어 내는 일은 형식이 조금만 복잡해져도 `>>`로는 벅찹니다. 그럴 때는 줄을 통째로 읽어 직접 파싱합니다.
+
+<Note>
+`std::vector<int>`나 `std::pair` 같은 표준 컨테이너를 `{}`로 바로 찍는 기능은 C++23에 들어 있지만 라이브러리 지원이 늦었습니다. libstdc++는 GCC 15부터, libc++는 16부터 됩니다. 그 전 버전에서는 반복문으로 찍습니다.
+</Note>
+
+## 정리
+
+- 내 타입을 `{}`에 넣으려면 `std::formatter<T>`를 특수화한다. `std::formatter<std::string>`을 물려받으면 쉽다
+- `operator<<`는 스트림을 받아 스트림을 돌려주는 바깥 함수
+- 찍는 방법은 한곳에 두고 다른 쪽이 그것을 부르게 한다

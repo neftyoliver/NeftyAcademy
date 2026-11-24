@@ -1,0 +1,99 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '벌칸과 OpenGL 창 넣기: QOpenGLWidget, QVulkanWindow와 창 컨테이너, Qt Quick 안에 그리기';
+export const terms = [
+  'QWindow', 'QVulkanWindow', 'QOpenGLWidget', 'QVulkanInstance', 'QQuickWindow',
+  'QOpenGLFunctions', 'QSurfaceFormat',
+];
+
+CAD 뷰, 의료 영상, 과학 시각화, 게임 엔진의 편집기처럼 이미 OpenGL이나 Vulkan으로 그리는 코드가 있다면, 그것을 Qt 앱의 한 영역에 넣고 둘레를 Qt의 메뉴, 패널, 버튼으로 채우고 싶어집니다. Qt는 위젯 앱과 Qt Quick 앱 각각에 그 방법을 제공합니다.
+
+## 위젯 안의 OpenGL 영역
+
+```cpp qt=OpenGLWidgets xvfb
+#include <QApplication>
+#include <QOpenGLFunctions>
+#include <QOpenGLWidget>
+#include <QTimer>
+#include <QLabel>
+#include <QVBoxLayout>
+#include <cstdio>
+
+// 위젯 화면 안에 OpenGL로 직접 그리는 영역
+class GlView : public QOpenGLWidget, protected QOpenGLFunctions {
+public:
+    int paints = 0;
+protected:
+    void initializeGL() override {             // 문맥이 준비된 뒤 한 번
+        initializeOpenGLFunctions();
+        QSurfaceFormat f = context()->format();
+        std::printf("OpenGL %d.%d 문맥 준비\n", f.majorVersion(), f.minorVersion());
+    }
+    void resizeGL(int w, int h) override { glViewport(0, 0, w, h); }
+    void paintGL() override {                  // 다시 그릴 때마다
+        ++paints;
+        glClearColor(0.1f, 0.1f, 0.15f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glEnable(GL_SCISSOR_TEST);             // 가운데 사각형만 다른 색으로 지운다
+        glScissor(width() / 4, height() / 4, width() / 2, height() / 2);
+        glClearColor(0.9f, 0.3f, 0.2f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDisable(GL_SCISSOR_TEST);
+    }
+};
+
+int main(int argc, char** argv) {
+    QApplication app(argc, argv);
+    QWidget win;
+    auto* layout = new QVBoxLayout(&win);
+    layout->addWidget(new QLabel("아래는 OpenGL 영역"));   // 보통 위젯과 섞인다
+    auto* gl = new GlView;
+    gl->setMinimumSize(160, 120);
+    layout->addWidget(gl);
+    win.show();
+
+    QTimer::singleShot(300, [&] {
+        QImage img = gl->grabFramebuffer();     // GL이 그린 것을 이미지로
+        QColor mid = img.pixelColor(img.width() / 2, img.height() / 2);
+        std::printf("크기 %dx%d, 가운데 %s, 모서리 %s, paintGL %s\n",
+                    img.width(), img.height(), qPrintable(mid.name()),
+                    qPrintable(img.pixelColor(2, 2).name()),
+                    gl->paints > 0 ? "불림" : "안 불림");
+        app.quit();
+    });
+    return app.exec();
+}
+```
+
+```text
+OpenGL 4.5 문맥 준비
+크기 160x120, 가운데 #e64c33, 모서리 #1a1a26, paintGL 불림
+```
+
+이 예제도 가상 X 서버와 Mesa의 소프트웨어 OpenGL(llvmpipe)로 실행했습니다. GL이 그린 결과를 `grabFramebuffer()`로 받아, 가운데는 주황빨강, 모서리는 남색으로 지워진 것을 확인했습니다.
+
+- **QOpenGLWidget**은 보통 위젯처럼 레이아웃에 들어가면서, 안에서는 OpenGL로 그립니다. `initializeGL`(문맥이 생긴 뒤 한 번), `resizeGL`(크기가 바뀔 때), `paintGL`(그릴 때)만 구현합니다. 다시 그리려면 위젯처럼 `update()`를 부릅니다
+- `QOpenGLFunctions`를 상속하면 플랫폼마다 다른 GL 함수 불러오기를 Qt가 맡아 줍니다. 더 높은 판의 함수가 필요하면 `QOpenGLFunctions_4_5_Core` 같은 클래스를 씁니다
+- 내부적으로는 프레임버퍼 객체(FBO)에 그린 뒤 창에 합성하므로, 위젯 위에 다른 위젯을 겹쳐 놓을 수 있습니다. 그 대신 합성 비용이 조금 듭니다
+
+## Vulkan 창 넣기
+
+Vulkan에는 위젯판이 없고 `QVulkanWindow`(또는 직접 관리하는 `QWindow`)를 씁니다. 창을 위젯 화면에 넣을 때는 `QWidget::createWindowContainer(vulkanWindow)`로 감싸 레이아웃에 넣습니다. 컨테이너 방식은 운영체제의 진짜 자식 창을 박아 넣는 것이라 합성 비용이 없지만, 그 위에 다른 위젯을 반투명하게 겹치거나 스타일시트로 꾸미는 일은 잘 안 됩니다. 실행 중에 쓸 Vulkan 인스턴스는 `QVulkanInstance`로 만들어 창에 연결합니다. 앞 장 [「RHI」](#/read/cpp-qt/qgfx-rhi)의 예제가 그 인스턴스 만들기를 보여 줍니다.
+
+## Qt Quick 안에 그리기
+
+QML 화면에 직접 그린 내용을 넣는 방법은 세 가지입니다.
+
+- **바탕이나 덮개로**: `QQuickWindow`의 `beforeRendering`이나 `afterRendering` 시그널에서, Qt Quick이 쓰는 같은 그래픽 API로 장면 뒤나 앞에 그립니다. 전체 화면 3D 위에 QML UI를 얹는 계기판에 흔합니다
+- **항목으로**: Qt 6.7부터 생긴 `QQuickRhiItem`은 RHI로 텍스처에 그리고 그것을 보통 QML 항목처럼 배치합니다. 이전에는 `QQuickFramebufferObject`(OpenGL 전용)를 썼습니다
+- **텍스처로**: 이미 다른 곳에서 만든 GPU 텍스처를 `QSGTexture`로 감싸 장면 그래프에 넣습니다
+
+<Note>
+Qt Quick은 기본으로 별도 **렌더 스레드**에서 그릴 수 있으므로, 이 방법들의 그리기 코드는 GUI 스레드가 아닌 곳에서 불릴 수 있습니다. GUI 스레드의 데이터는 `synchronize()` 같은 정해진 단계에서만 렌더 스레드로 복사해야 합니다. 또 Qt Quick이 Vulkan을 쓰는데 우리 코드가 OpenGL로 그리면 섞을 수 없으므로, `QQuickWindow::setGraphicsApi`로 Qt Quick의 API를 우리 코드에 맞춰 고정해야 합니다.
+</Note>
+
+## 정리
+
+- 위젯 앱에서는 QOpenGLWidget으로 레이아웃 안에 OpenGL 영역을 넣고, initializeGL, resizeGL, paintGL만 구현한다
+- Vulkan은 QVulkanWindow를 createWindowContainer로 위젯에 넣으며, 진짜 자식 창이라 겹치기와 꾸미기에 제약이 있다
+- Qt Quick에는 렌더링 전후 시그널, QQuickRhiItem, 외부 텍스처로 그린 내용을 넣으며, 렌더 스레드와 그래픽 API를 맞춰야 한다

@@ -1,0 +1,156 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '원격 유지보수: 장비에서 바깥으로 여는 연결, 현장 허락과 시간 제한, 보기와 바꾸기 나누기, 감사 기록';
+
+장비는 멀리 팔려 갑니다. 고장이 나면 장비 회사의 엔지니어는 비행기를 타기 전에 먼저 원격으로 로그를 보고, 파라미터를 비교하고, 때로는 업데이트를 하고 싶어 합니다. 원격 유지보수는 이동과 정지 시간을 크게 줄이지만, 동시에 공장 안으로 들어오는 문이기도 합니다. 그래서 문을 어떻게 만들고 누가 여는지가 핵심입니다.
+
+## 길은 장비에서 바깥으로
+
+가장 나쁜 방법은 공장 방화벽에 구멍을 뚫어 인터넷에서 장비의 원격 데스크톱이나 VNC에 바로 들어오게 하는 것입니다. 인터넷을 자동으로 훑는 공격자들은 이런 문을 쉽게 찾아냅니다. 미국 CISA도 2025년에 낸 OT 보안의 첫 대책으로, OT 장비를 공용 인터넷에서 떼어 내고 꼭 필요한 원격 접속은 VPN과 피싱에 강한 다중 인증으로 지키라고 권고했습니다.
+
+그래서 보통은 연결을 장비 쪽에서 바깥으로 엽니다. 장비의 원격 게이트웨이가 장비 회사의 중계 서버로 TLS 연결을 먼저 맺어 두고, 엔지니어도 중계 서버에 접속하면 중계 서버가 둘을 잇습니다. 공장 방화벽은 들어오는 연결을 하나도 받지 않고, 정해진 중계 서버로 나가는 연결 하나만 허락하면 됩니다.
+
+```text nocheck
+엔지니어 --TLS--> 중계 서버 <--TLS-- 원격 게이트웨이 --- 장비
+                              (게이트웨이가 먼저 연결)
+```
+
+Ewon(HMS), Secomea, SINEMA Remote Connect(지멘스) 같은 산업용 원격 접속 서비스가 이런 구조이고, 큰 공장은 자기 망의 경계에 둔 중계 서버(점프 호스트)를 거쳐서만 들어오게 하기도 합니다([「보안」](#/read/cpp-industrial/depl-security)).
+
+## 장비 안의 문지기
+
+연결이 안전해도, 들어온 사람이 무엇을 할 수 있는지는 장비가 정해야 합니다. 아래 문지기는 현장의 허락과 시간 제한, 보기와 바꾸기의 구분, 움직이는 명령의 금지를 지킵니다. 시각은 9시부터 센 분입니다.
+
+```cpp
+#include <cstdio>
+#include <map>
+#include <string>
+
+struct Machine {
+    bool running = true;
+    int alarms = 3, retries = 17;
+    std::map<std::string, double> params{{"axis1.kp", 0.9}, {"axis1.vmax", 250}};
+};
+
+class RemoteGate {                       // 장비 안에서 원격 요청을 거르는 문지기
+public:
+    explicit RemoteGate(Machine& m) : m_(m) {}
+
+    // 현장 HMI에서 하는 일
+    void local_grant(int t, const std::string& op, int minutes) {
+        until_ = t + minutes;
+        log(t, "현장 " + op, "원격 접속 " + std::to_string(minutes) + "분 허락");
+    }
+    void local_stop(int t, const std::string& op) {
+        m_.running = false;
+        log(t, "현장 " + op, "기계 정지");
+    }
+    void local_confirm(int t, const std::string& op) {
+        if (pending_key_.empty()) return;
+        double& v = m_.params[pending_key_];
+        char buf[96];
+        std::snprintf(buf, sizeof buf, "확인 -> %s %.1f에서 %.1f로 바꿈",
+                      pending_key_.c_str(), v, pending_value_);
+        v = pending_value_;
+        pending_key_.clear();
+        log(t, "현장 " + op, buf);
+    }
+
+    // 원격에서 오는 요청
+    void connect(int t, const std::string& user) {
+        if (t >= until_) return log(t, user, "접속 -> 거부: 현장 허락 없음");
+        user_ = user;
+        log(t, user, "접속 -> 허락, " + clock(until_) + "까지");
+    }
+    void read_diag(int t, const std::string& user) {
+        if (!in_session(t, user)) return;
+        log(t, user, "진단 읽기 -> 알람 " + std::to_string(m_.alarms) +
+                     "건, 재시도 " + std::to_string(m_.retries) + "번");
+    }
+    void write_param(int t, const std::string& user, const std::string& key,
+                     double value) {
+        if (!in_session(t, user)) return;
+        std::string what = key + " 쓰기 -> ";
+        if (m_.running) return log(t, user, what + "거부: 기계가 돌고 있음");
+        pending_key_ = key;
+        pending_value_ = value;
+        log(t, user, what + "현장 확인 기다림");
+    }
+    void move_axis(int t, const std::string& user) {
+        if (!in_session(t, user)) return;
+        log(t, user, "축 이동 -> 거부: 움직이는 명령은 현장에서만");
+    }
+
+private:
+    bool in_session(int t, const std::string& user) {
+        if (user != user_) { log(t, user, "거부: 접속하지 않음"); return false; }
+        if (t >= until_) {
+            log(t, user, "거부: 허락 시간이 끝나 접속을 끊음");
+            user_.clear();
+            return false;
+        }
+        return true;
+    }
+    static std::string clock(int t) {    // 9시부터 센 분을 시각으로
+        char buf[16];
+        std::snprintf(buf, sizeof buf, "%02d:%02d", 9 + t / 60, t % 60);
+        return buf;
+    }
+    void log(int t, const std::string& who, const std::string& what) {
+        std::printf("%s %s: %s\n", clock(t).c_str(), who.c_str(), what.c_str());
+    }   // 실제로는 고칠 수 없는 감사 기록으로도 남긴다
+
+    Machine& m_;
+    int until_ = -1;
+    std::string user_, pending_key_;
+    double pending_value_ = 0;
+};
+
+int main() {
+    Machine m;
+    RemoteGate g(m);
+    const std::string kim = "kim@vendor";
+    g.connect(0, kim);
+    g.local_grant(2, "lee", 30);
+    g.connect(3, kim);
+    g.read_diag(5, kim);
+    g.write_param(10, kim, "axis1.kp", 1.2);
+    g.local_stop(14, "lee");
+    g.write_param(15, kim, "axis1.kp", 1.2);
+    g.local_confirm(16, "lee");
+    g.move_axis(20, kim);
+    g.read_diag(33, kim);
+}
+```
+
+```text
+09:00 kim@vendor: 접속 -> 거부: 현장 허락 없음
+09:02 현장 lee: 원격 접속 30분 허락
+09:03 kim@vendor: 접속 -> 허락, 09:32까지
+09:05 kim@vendor: 진단 읽기 -> 알람 3건, 재시도 17번
+09:10 kim@vendor: axis1.kp 쓰기 -> 거부: 기계가 돌고 있음
+09:14 현장 lee: 기계 정지
+09:15 kim@vendor: axis1.kp 쓰기 -> 현장 확인 기다림
+09:16 현장 lee: 확인 -> axis1.kp 0.9에서 1.2로 바꿈
+09:20 kim@vendor: 축 이동 -> 거부: 움직이는 명령은 현장에서만
+09:33 kim@vendor: 거부: 허락 시간이 끝나 접속을 끊음
+```
+
+- **현장이 문을 연다**: 원격 접속은 현장 작업자가 HMI에서 허락해야 열리고, 정한 시간이 지나면 저절로 닫힙니다. 허락 전인 09:00의 접속은 거부되었고, 09:33에는 시간이 끝나 끊겼습니다. 접속 중에는 HMI에 원격 접속 중임을 크게 띄웁니다
+- **보기와 바꾸기를 나눈다**: 진단 읽기는 바로 되지만, 파라미터 쓰기는 기계가 멈춰 있고 현장 사람이 확인해야 반영됩니다. 이전 값과 새 값을 함께 남기므로 되돌리기도 쉽습니다
+- **움직이는 명령은 현장에서만**: 원격 엔지니어는 기계 안에 누가 있는지 볼 수 없습니다. 축 이동이나 시작 같은 명령은 원격에서 받지 않습니다
+- **모두 기록한다**: 누가 언제 무엇을 했는지 남깁니다. 실제로는 이 기록을 [「사용자와 권한」](#/read/cpp-industrial/hmi-users)의 해시 사슬처럼 고칠 수 없게 남깁니다
+
+## 원격으로 하는 일
+
+원격 엔지니어가 가장 먼저 원하는 것은 **진단 꾸러미**입니다. 설치된 판([「업데이트」](#/read/cpp-industrial/depl-update)), 설정 파일의 해시, 최근 로그와 블랙박스, 진단 카운터([「로그와 진단」](#/read/cpp-industrial/rel-diagnostics))를 한 파일로 묶어 두면, 접속 시간을 짧게 하거나 아예 접속 없이 파일만 받아 원인을 찾을 수 있습니다. 파라미터는 출하할 때나 마지막으로 잘 돌던 때의 사본과 비교해 무엇이 바뀌었는지부터 봅니다.
+
+<Note>
+계정은 엔지니어마다 따로 만들고 다중 인증을 쓰며, 여럿이 나눠 쓰는 암호는 두지 않습니다. 쓰지 않는 업체 계정은 꺼 두고, 누가 어떤 장비에 접속할 수 있는지는 유지보수 계약과 함께 정해 둡니다. 원격 접속 장치 자체도 업데이트 대상입니다. 원격 접속 제품의 취약점은 공격자들이 자주 노리는 표적입니다.
+</Note>
+
+## 정리
+
+- 원격 접속은 인터넷에서 장비로 들어오는 구멍을 뚫지 않고, 장비 쪽 게이트웨이가 중계 서버로 먼저 연결을 열어 엔지니어와 잇는 방식으로 만든다
+- 장비 안의 문지기는 현장 작업자의 허락과 시간 제한으로 문을 열고, 읽기는 허락하되 쓰기는 기계가 멈췄을 때 현장 확인을 받고, 움직이는 명령은 받지 않는다
+- 원격 작업은 모두 고칠 수 없는 감사 기록으로 남기고, 진단 꾸러미로 접속 시간을 줄이며, 계정은 사람마다 따로 두고 다중 인증을 쓴다

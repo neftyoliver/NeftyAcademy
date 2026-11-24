@@ -1,0 +1,232 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '멤버가 클래스의 성격을 정한다. 값과 공유와 빌림, 0의 규칙을 깨는 한 줄의 값, 값으로 만드는 재료';
+
+[「0, 3, 5의 규칙」](#/read/cpp-syntax/sm-rules)에서 "다섯을 적지 않는다"를 기본으로 삼았습니다. 적지 않는다는 것은 **멤버에게 맡긴다**는 뜻입니다. 그러면 클래스를 설계하는 일은 멤버를 고르는 일이 됩니다.
+
+## 멤버가 성격을 정한다
+
+```cpp
+#include <concepts>
+#include <memory>
+#include <mutex>
+#include <print>
+#include <string>
+#include <string_view>
+
+// 멤버 하나만 가진 구조체. 다섯 가운데 아무것도 적지 않았다
+template <typename M>
+struct Holder {
+    M member;
+    bool operator==(const Holder&) const = default;
+};
+
+template <typename M>
+void row(const char* member)
+{
+    using H = Holder<M>;
+    std::println("{:<22}{:^6}{:^6}{:^6}  {}", member,
+                 std::copy_constructible<H> ? "O" : "-",
+                 std::assignable_from<H&, const H&> ? "O" : "-",
+                 std::movable<H> ? "O" : "-",
+                 std::regular<H> ? "O" : "-");
+}
+
+int main()
+{
+    std::println("{:<22}{:^6}{:^6}{:^6}  {}", "멤버", "복사", "대입", "이동",
+                 "regular");
+    row<std::string>("std::string");
+    row<std::unique_ptr<int>>("std::unique_ptr<int>");
+    row<std::shared_ptr<int>>("std::shared_ptr<int>");
+    row<int*>("int*");
+    row<std::string_view>("std::string_view");
+    row<const int>("const int");
+    row<int&>("int&");
+    row<std::mutex>("std::mutex");
+}
+```
+
+```text
+멤버                   복사  대입  이동   regular
+std::string             O     O     O     O
+std::unique_ptr<int>    -     -     O     -
+std::shared_ptr<int>    O     O     O     O
+int*                    O     O     O     O
+std::string_view        O     O     O     O
+const int               O     -     -     -
+int&                    O     -     -     -
+std::mutex              -     -     -     -
+```
+
+멤버 하나가 클래스 전체를 정합니다. `unique_ptr`를 넣으면 옮길 수만 있는 타입이, `mutex`를 넣으면 자리를 떠날 수 없는 타입이 됩니다. `const` 멤버와 참조 멤버는 대입을 지웁니다.
+
+눈여겨볼 것은 가운데 세 줄입니다. `shared_ptr`, 포인터, `string_view`를 넣은 구조체도 [`std::regular`](#/read/cpp-syntax/con-standard)를 통과합니다. 콘셉트는 문법만 보기 때문입니다. 복사본이 정말 따로인지는 사람이 정합니다.
+
+## 값, 공유, 빌림
+
+```cpp
+#include <memory>
+#include <print>
+#include <span>
+#include <string>
+#include <vector>
+
+using Songs = std::vector<std::string>;
+
+struct ByValue {                       // 값: 내 것을 품는다
+    Songs songs;
+};
+struct Shared {                        // 공유: 같은 것을 함께 가리킨다
+    std::shared_ptr<Songs> songs;
+};
+struct Borrowed {                      // 빌림: 남의 것을 본다
+    std::span<std::string> songs;
+};
+
+int main()
+{
+    ByValue a{{"아침", "점심"}};
+    ByValue a2 = a;                    // 복사한 뒤 한쪽만 고친다
+    a2.songs[0] = "저녁";
+    std::println("값:   원본 {}, 복사본 {}", a.songs[0], a2.songs[0]);
+
+    Shared b{std::make_shared<Songs>(Songs{"아침", "점심"})};
+    Shared b2 = b;
+    (*b2.songs)[0] = "저녁";
+    std::println("공유: 원본 {}, 복사본 {}", (*b.songs)[0], (*b2.songs)[0]);
+
+    Songs owner{"아침", "점심"};
+    Borrowed c{owner};
+    Borrowed c2 = c;
+    c2.songs[0] = "저녁";
+    std::println("빌림: 원본 {}, 복사본 {}", c.songs[0], c2.songs[0]);
+}
+```
+
+```text
+값:   원본 아침, 복사본 저녁
+공유: 원본 저녁, 복사본 저녁
+빌림: 원본 저녁, 복사본 저녁
+```
+
+| | 복사하면 | 수명 |
+| --- | --- | --- |
+| 값 | 서로 상관없는 둘이 된다 | 내가 살아 있는 동안 |
+| 공유 | 같은 것을 가리키는 둘이 된다. 한쪽에서 고치면 다른 쪽도 바뀐다 | 마지막 하나가 사라질 때까지 |
+| 빌림 | 같은 것을 보는 둘이 된다 | 주인에게 달렸다. 주인이 먼저 사라지면 매달린다 |
+
+**값 의미론**은 첫 줄처럼 구는 타입을 만드는 것입니다. `int`처럼 복사하면 따로 놀고, 같은지 견줄 수 있고, 함수에 넘겨도 원본이 바뀌지 않습니다. 이런 타입은 코드 한 줄만 보고도 무슨 일이 일어나는지 알 수 있습니다. 둘째와 셋째 줄에서는 **다른 곳의 코드**를 알아야 합니다.
+
+공유와 빌림이 틀린 것은 아닙니다. 다만 숨기지 않습니다. 공유하는 멤버는 `shared_ptr<const T>`로 두어 고칠 수 없게 하거나, 타입의 이름과 문서에 드러냅니다([소유권 설계](#/read/cpp-advanced/res-ownership)).
+
+## 0의 규칙을 깨는 한 줄
+
+```cpp
+#include <cstdlib>
+#include <new>
+#include <print>
+#include <string>
+#include <type_traits>
+#include <vector>
+
+static long allocations = 0;
+
+void* operator new(std::size_t size)
+{
+    ++allocations;
+    if (void* p = std::malloc(size)) return p;
+    throw std::bad_alloc();
+}
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+
+struct Plain {                  // 0의 규칙
+    std::string name;
+};
+struct Logged {                 // 소멸자 한 줄을 적었다
+    std::string name;
+    ~Logged() {}
+};
+struct Base {                   // 상속의 바탕이라 가상 소멸자를 적었다
+    std::string name;
+    virtual ~Base() = default;
+};
+struct Restored {               // 적은 김에 다섯을 모두 정했다
+    std::string name;
+    Restored() = default;
+    virtual ~Restored() = default;
+    Restored(const Restored&) = default;
+    Restored& operator=(const Restored&) = default;
+    Restored(Restored&&) noexcept = default;
+    Restored& operator=(Restored&&) noexcept = default;
+};
+
+template <typename T>
+void grow(const char* what)
+{
+    const long before = allocations;
+    {
+        std::vector<T> items;
+        for (int i = 0; i < 1000; ++i) {
+            T item;
+            item.name = "sensor-outdoor-north-0001";   // 할당 한 번
+            items.push_back(std::move(item));
+        }
+    }
+    std::println("{:<9} 예외 없는 이동 {:<5}  할당 {}번", what,
+                 std::is_nothrow_move_constructible_v<T>, allocations - before);
+}
+
+int main()
+{
+    grow<Plain>("Plain");
+    grow<Logged>("Logged");
+    grow<Base>("Base");
+    grow<Restored>("Restored");
+}
+```
+
+```text
+Plain     예외 없는 이동 true   할당 1011번
+Logged    예외 없는 이동 false  할당 3034번
+Base      예외 없는 이동 false  할당 3034번
+Restored  예외 없는 이동 true   할당 1011번
+```
+
+소멸자를 적으면 [이동이 만들어지지 않고 복사가 대신합니다](#/read/cpp-syntax/sm-rules). `push_back(std::move(item))`이 복사가 되고, `vector`가 자랄 때마다 원소를 모두 복사합니다. 원소 100,000개로 재면 21 ns이던 것이 51 ns입니다(x86-64, GCC 14 `-O2`). 컴파일러는 아무 말도 하지 않습니다.
+
+| 적은 것 | 잃는 것 | 대신 할 일 |
+| --- | --- | --- |
+| 소멸자 (기록, 정리) | 이동 | 정리는 [그 일을 하는 멤버](#/read/cpp-advanced/res-guard)에게 맡긴다 |
+| 가상 소멸자 | 이동 | 다섯을 모두 정한다. 대개는 [복사를 막는 쪽](#/read/cpp-syntax/inh-dtor)이 맞다 |
+| `const` 멤버 | 대입 | 멤버를 `private`으로 두고 바꾸는 함수를 주지 않는다 |
+| 참조 멤버 | 대입, 기본 생성 | 포인터나 `std::reference_wrapper`로 바꾸거나, 빌리는 타입임을 드러낸다 |
+
+`const` 멤버가 있는 타입은 `vector`에 넣고 지우거나 정렬할 수 없습니다. GCC는 `use of deleted function 'Pin& Pin::operator=(Pin&&)'`라고 알립니다.
+
+## 값으로 만드는 재료
+
+포인터로 하던 일의 대부분은 값으로 할 수 있습니다.
+
+| 하려는 일 | 포인터로 | 값으로 |
+| --- | --- | --- |
+| 없을 수도 있다 | 널 포인터 | [`std::optional`](#/read/cpp-stl/voc-optional) |
+| 여러 타입 가운데 하나 | 부모 포인터 | [`std::variant`](#/read/cpp-advanced/te-compare), [타입 지우기](#/read/cpp-advanced/te-implement) |
+| 크기가 실행 중에 정해진다 | `new[]` | `std::vector`, `std::string` |
+| 큰 것을 돌려준다 | 출력 매개변수 | [값으로 돌려준다](#/read/cpp-advanced/mv-rvo) |
+| 자기 자신을 품는다 (나무) | `Node*` | `std::vector<Node>` |
+
+마지막 줄은 C++17부터 됩니다. `struct Node { std::vector<Node> children; };`가 컴파일되고, 복사하면 나무 전체가 복사됩니다. C++26 초안에는 힙에 두되 값처럼 복사되는 [`std::indirect`와 `std::polymorphic`](#/read/cpp-syntax/ver-26)이 있습니다. 이 책의 환경에는 없어서 돌려 보지 못했습니다.
+
+값 타입의 마무리는 비교입니다. [`operator==`와 `operator<=>`를 `= default`로](#/read/cpp-syntax/op-compare) 받고, `static_assert(std::regular<T>);` 한 줄로 확인해 둡니다.
+
+<Note>
+값으로 설계하면 복사가 늘어납니다. 그 값은 [앞 페이지](#/read/cpp-advanced/perf-copies)에서 쟀습니다. 순서는 **값으로 설계하고, 재서 드러난 복사만 줄이는** 것입니다. 거꾸로 하면 공유와 빌림이 코드 전체로 퍼집니다.
+</Note>
+
+## 정리
+
+- 클래스의 복사, 이동, 비교는 멤버가 정한다. `shared_ptr`와 `string_view`도 문법으로는 값이지만 복사본이 따로 놀지 않는다
+- 소멸자 한 줄이 이동을 지운다. 원소 1,000개를 넣는 동안 할당이 1,011번에서 3,034번이 됐고 경고는 없었다
+- `optional`, `variant`, `vector`로 포인터 없이 설계하고, `= default` 비교와 `std::regular`로 마무리한다

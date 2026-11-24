@@ -1,0 +1,215 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '나갈 때 할 일을 그 자리에 적는 가드, 되돌리기와 release, 실패했을 때만 도는 가드, 표준의 후보';
+export const terms = ['scope_exit', 'unique_resource', 'scope_fail', 'scope_success'];
+
+[래퍼 클래스](#/read/cpp-advanced/res-wrapper)는 같은 자원을 여러 곳에서 쥘 때 값을 합니다. 한 함수에서 한 번만 하는 정리(값을 되돌려 놓기, 임시 파일 지우기, 방금 넣은 것 도로 빼기)에 클래스를 하나씩 만들 수는 없습니다. 그럴 때 <strong>"이 범위를 나갈 때 이것을 하라"</strong>를 그 자리에 적는 것이 스코프 가드입니다.
+
+## 가드를 만든다
+
+```cpp
+#include <print>
+#include <stdexcept>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+template <typename F>
+class ScopeExit {
+public:
+    [[nodiscard]] explicit ScopeExit(F f) noexcept(
+        std::is_nothrow_move_constructible_v<F>)
+        : f_(std::move(f)) {}
+    ScopeExit(const ScopeExit&) = delete;
+    ScopeExit& operator=(const ScopeExit&) = delete;
+    ~ScopeExit()
+    {
+        if (active_) f_();
+    }
+    void release() noexcept { active_ = false; }    // 하지 않기로 한다
+
+private:
+    F f_;
+    bool active_ = true;
+};
+
+std::vector<std::string> names;
+std::vector<int> ages;
+
+void check_age(int age)
+{
+    if (age < 0) throw std::invalid_argument("나이가 음수");
+}
+
+// 두 벡터에 함께 넣는다. 둘 다 되거나, 아무 일도 없거나
+void add_person(std::string name, int age)
+{
+    names.push_back(std::move(name));
+    ScopeExit undo([] { names.pop_back(); });   // 뒤에서 실패하면 되돌린다
+    check_age(age);
+    ages.push_back(age);
+    undo.release();                             // 끝까지 왔다. 되돌리지 않는다
+}
+
+int main()
+{
+    {
+        std::println("1. 들어옴");
+        ScopeExit first([] { std::println("3. 먼저 만든 가드"); });
+        ScopeExit second([] { std::println("2. 나중에 만든 가드"); });
+    }
+
+    add_person("kim", 30);
+    try {
+        add_person("lee", -1);
+    } catch (const std::exception& error) {
+        std::println("실패: {}", error.what());
+    }
+    std::println("names {} / ages {}", names.size(), ages.size());
+}
+```
+
+```text
+1. 들어옴
+2. 나중에 만든 가드
+3. 먼저 만든 가드
+실패: 나이가 음수
+names 1 / ages 1
+```
+
+가드는 소멸자에서 람다를 부르는 객체일 뿐입니다. 지역 변수이므로 **만든 순서의 반대로** 돌고, `return`으로 나가든 예외로 나가든 돕니다.
+
+`add_person`이 가드의 전형적인 쓰임입니다. 한 걸음 나아갈 때마다 "되돌리는 법"을 가드로 걸어 두고, 끝까지 가면 `release()`로 풉니다. [강한 보장](#/read/cpp-syntax/exc-safety)을 여러 객체에 걸쳐 만드는 방법입니다. `try`/`catch`로 쓰면 걸음마다 `try`가 한 겹씩 깊어지지만 가드는 걸음 수만큼 줄이 늘 뿐입니다.
+
+가드에 넣는 람다는 **던지면 안 됩니다.** 소멸자 안에서 불리므로 예외가 나오면 [프로그램이 끝납니다](#/read/cpp-syntax/exc-unwind). `pop_back`, `close`, 값 대입처럼 실패하지 않는 일만 넣습니다.
+
+## 이름을 빼먹으면
+
+```cpp nocheck
+ScopeExit([] { std::println("정리"); });        // 이름이 없다
+std::println("일하는 중");
+```
+
+```text
+정리
+일하는 중
+```
+
+이름 없는 임시 객체는 그 문장이 끝날 때 사라지므로 정리가 **바로** 돕니다. 컴파일은 되고, 대개는 눈에 띄지 않습니다. `std::lock_guard<std::mutex>{m};`도 같은 실수입니다. 잠갔다가 바로 풉니다. libstdc++와 libc++는 그 생성자에 `[[nodiscard]]`를 붙여 경고를 내고, 위의 `ScopeExit`도 같은 방법을 씁니다.
+
+```text
+warning: ignoring return value of 'ScopeExit<F>::ScopeExit(F) ...',
+         declared with attribute 'nodiscard' [-Wunused-result]
+```
+
+GCC 14는 `[[nodiscard]]`를 **생성자에** 붙였을 때 이 경고를 냈고, 클래스에만 붙였을 때는 내지 않았습니다. Clang 20은 어느 쪽에 붙여도 냈습니다. 생성자에 붙입니다.
+
+## 실패했을 때만 도는 가드
+
+`release()`를 부르는 대신, 예외로 나갈 때만 스스로 돌게 할 수 있습니다. `std::uncaught_exceptions()`는 지금 스택을 풀고 있는 예외의 **개수**를 돌려줍니다. 들어올 때보다 늘었으면 이 범위는 예외로 나가는 중입니다.
+
+```cpp
+#include <exception>
+#include <print>
+#include <stdexcept>
+#include <utility>
+
+template <typename F>
+class ScopeFail {
+public:
+    [[nodiscard]] explicit ScopeFail(F f) : f_(std::move(f)) {}
+    ScopeFail(const ScopeFail&) = delete;
+    ~ScopeFail()
+    {
+        if (std::uncaught_exceptions() > entered_) f_();
+    }
+
+private:
+    F f_;
+    int entered_ = std::uncaught_exceptions();  // 들어올 때 풀리고 있던 예외의 수
+};
+
+void step(bool fail)
+{
+    ScopeFail log([] { std::println("  이 단계가 실패했다"); });
+    std::println("  단계 시작");
+    if (fail) throw std::runtime_error("오류");
+    std::println("  단계 끝");
+}
+
+struct Cleanup {
+    ~Cleanup() { step(false); }     // 소멸자 안에서 성공하는 단계를 돌린다
+};
+
+int main()
+{
+    std::println("성공");
+    step(false);
+    std::println("실패");
+    try {
+        step(true);
+    } catch (const std::exception&) {
+    }
+    std::println("다른 예외로 풀리는 도중에 성공");
+    try {
+        Cleanup cleanup;
+        throw std::runtime_error("바깥 오류");
+    } catch (const std::exception&) {
+    }
+}
+```
+
+```text
+성공
+  단계 시작
+  단계 끝
+실패
+  단계 시작
+  이 단계가 실패했다
+다른 예외로 풀리는 도중에 성공
+  단계 시작
+  단계 끝
+```
+
+개수를 세는 까닭이 셋째 경우입니다. 바깥 예외 때문에 스택이 풀리는 중에 불린 소멸자 안에서는 "지금 예외가 날고 있는가"가 이미 참입니다. 참·거짓만 물으면 성공한 단계를 실패로 잘못 압니다.
+
+## 표준의 후보
+
+같은 것이 라이브러리 기술 명세(Library Fundamentals TS v3)에 있습니다. 표준 본문은 아니어서 이름공간이 `std::experimental`입니다.
+
+| `<experimental/scope>` | 도는 때 |
+| --- | --- |
+| `scope_exit` | 언제나 |
+| `scope_fail` | 예외로 나갈 때만 |
+| `scope_success` | 예외 없이 나갈 때만 |
+| `unique_resource` | [핸들 하나를 쥔 래퍼](#/read/cpp-advanced/res-wrapper). 범위를 나갈 때 닫는다 |
+
+```cpp nocheck
+#include <experimental/scope>
+
+std::experimental::scope_exit restore([&] { depth = saved; });
+```
+
+GCC 14에서 네 가지가 모두 도는 것을 확인했습니다. GCC는 13부터 싣고 있고, Clang 20의 libc++에는 이 헤더가 없습니다. 두 컴파일러로 빌드하는 코드라면 위의 스무 줄짜리 클래스를 프로젝트에 두는 편이 낫습니다.
+
+## 가드와 클래스 가운데
+
+| | 스코프 가드 | 래퍼 클래스 |
+| --- | --- | --- |
+| 맞는 자리 | 한 함수에서 한 번 하는 정리, 되돌리기 | 같은 자원을 여러 곳에서 쥘 때 |
+| 정리하는 법이 적힌 곳 | 쓰는 자리마다 | 클래스 안에 한 번 |
+| 함수 밖으로 내보내기 | 못 한다 | 옮겨서 돌려준다 |
+| 잊을 수 있는 것 | 가드를 거는 것 자체 | 없다. 타입이 강제한다 |
+
+같은 정리 람다를 두 번째로 적게 되면 클래스로 옮길 때입니다.
+
+<Note>
+가드는 공짜입니다. `fopen` 뒤에 `ScopeExit`로 `fclose`를 건 함수와 손으로 `fclose`를 적은 함수를 GCC 14 `-O2`로 컴파일하면 명령이 한 줄도 다르지 않았습니다. 사이에서 부른 함수가 예외를 던질 수 있으면 가드 쪽에만 "닫고 다시 던지는" 코드가 더 붙습니다. 손으로 쓴 쪽에는 그 코드가 없고, 그래서 샙니다.
+</Note>
+
+## 정리
+
+- 스코프 가드는 소멸자에서 람다를 부르는 지역 객체다. 만든 순서의 반대로, 어떤 길로 나가든 돈다
+- 걸음마다 되돌리는 가드를 걸고 끝에서 `release()`하면 여러 객체에 걸친 "되거나, 아무 일도 없거나"가 된다
+- 가드에는 이름을 붙이고, 던지지 않는 일만 넣는다. 같은 정리를 두 번 적게 되면 래퍼 클래스로 옮긴다

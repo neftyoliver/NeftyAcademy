@@ -1,0 +1,171 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'O 표기, 상각 O(1), 무엇을 세는 보장인가, 표기가 말해 주지 않는 캐시';
+
+표준은 함수가 **무엇을** 하는지와 함께 **얼마나 걸리는지**도 정해 둡니다. `vector::push_back`은 "상각 상수 시간", `map::find`는 "크기의 로그"라는 식입니다. 이 보장은 인터페이스의 일부이고, 컨테이너를 고르는 근거가 됩니다.
+
+## 표기 읽기
+
+n은 원소의 개수입니다. O(무엇)은 "n이 커질 때 일의 양이 그 꼴로 늘어난다"는 뜻입니다.
+
+| 표기 | 이름 | n이 100만일 때 걸음 수 |
+| --- | --- | --- |
+| O(1) | 상수 | 1 |
+| O(log n) | 로그 | 약 20 |
+| O(n) | 선형 | 100만 |
+| O(n log n) | 선형 로그 | 약 2,000만 |
+| O(n²) | 제곱 | 1조 |
+
+걸음 수는 감을 잡기 위한 것이고, 실제로는 앞에 상수가 붙습니다. 표기는 그 상수를 버립니다. 그래서 O 표기는 "n이 충분히 클 때 누가 이기는가"만 말하고, n이 작을 때의 승부는 말하지 않습니다.
+
+자주 쓰는 연산의 보장은 이렇습니다.
+
+| 하는 일 | `vector` | `list` |
+| --- | --- | --- |
+| 끝에 넣기 | 상각 O(1) | O(1) |
+| 중간에 넣기 | O(n) | O(1) (자리를 알 때) |
+| i번째 읽기 | O(1) | O(n) |
+| 값으로 찾기 | O(n) | O(n) |
+
+| 하는 일 | `map` | `unordered_map` |
+| --- | --- | --- |
+| 열쇠로 찾기 | O(log n) | 평균 O(1), 최악 O(n) |
+| 넣기, 지우기 | O(log n) | 평균 O(1), 최악 O(n) |
+| 차례로 돌기 | 열쇠 순서대로 | 순서 없음 |
+
+## 상각 O(1)
+
+`push_back`은 대개 한 칸에 쓰기만 하지만, 자리가 꽉 차면 더 큰 메모리를 잡고 전부 옮깁니다. 그 한 번은 O(n)입니다. 그런데도 "상각 O(1)"이라고 하는 까닭을 옮긴 횟수를 세어 봅니다.
+
+```cpp
+#include <print>
+#include <vector>
+
+struct Counted {
+    static inline int moves = 0;
+    int value = 0;
+    Counted(int v) : value(v) {}
+    Counted(Counted&& other) noexcept : value(other.value) { ++moves; }
+    Counted& operator=(Counted&&) noexcept = default;
+};
+
+int main()
+{
+    for (int n : {10, 100, 1000, 10000}) {
+        Counted::moves = 0;
+        std::vector<Counted> v;
+        for (int i = 0; i < n; ++i)
+            v.emplace_back(i);
+        int moves = Counted::moves;
+        double average = static_cast<double>(moves) / n;
+        std::println("{:6}번 넣기: 옮김 {:6}번, 평균 {:.2f}", n, moves, average);
+    }
+}
+```
+
+```text
+    10번 넣기: 옮김     15번, 평균 1.50
+   100번 넣기: 옮김    127번, 평균 1.27
+  1000번 넣기: 옮김   1023번, 평균 1.02
+ 10000번 넣기: 옮김  16383번, 평균 1.64
+```
+
+용량을 두 배씩 늘리면 옮기는 횟수는 1 + 2 + 4 + ... 이고, 이 합은 마지막 항의 두 배를 넘지 않습니다. n번 넣는 동안 옮긴 횟수가 2n보다 작으니, **한 번에 평균** 두 번이 안 됩니다. 이것이 상각(amortized)입니다. 드물게 오는 비싼 한 번을 싼 여러 번에 나누어 얹은 평균입니다.
+
+평균이 그렇다는 것이지 매번이 그렇다는 것이 아닙니다. 8,193번째를 넣는 한 번은 앞의 8,192개를 모두 옮깁니다. 1밀리초마다 센서 값을 받아 넣는 루프라면 그 한 번이 주기를 넘길 수 있습니다. 몇 개가 들어갈지 알면 `reserve`로 미리 잡아 그 한 번을 없앱니다. 늘어나는 비율은 구현이 정하고 [「vector는 어떻게 자라는가」](#/read/cpp-stl/impl-vector)에서 봅니다.
+
+## 무엇을 세는 보장인가
+
+보장을 읽을 때는 **무엇의 개수**를 말하는지 봐야 합니다. `std::lower_bound`(정렬된 구간에서 이진 탐색)의 보장은 "비교 횟수가 O(log n)"입니다.
+
+```cpp
+#include <algorithm>
+#include <list>
+#include <print>
+#include <vector>
+
+struct Probe {
+    static inline long compares = 0;
+    int value;
+    friend bool operator<(const Probe& a, const Probe& b)
+    {
+        ++compares;
+        return a.value < b.value;
+    }
+};
+
+int main()
+{
+    std::vector<Probe> v;
+    std::list<Probe> l;
+    for (int i = 0; i < 1'000'000; ++i) {
+        v.push_back({i});
+        l.push_back({i});
+    }
+
+    Probe::compares = 0;
+    auto hit_v = std::lower_bound(v.begin(), v.end(), Probe{777'777});
+    std::println("vector: {}을 찾는 데 비교 {}번", hit_v->value, Probe::compares);
+
+    Probe::compares = 0;
+    auto hit_l = std::lower_bound(l.begin(), l.end(), Probe{777'777});
+    std::println("list:   {}을 찾는 데 비교 {}번", hit_l->value, Probe::compares);
+}
+```
+
+```text
+vector: 777777을 찾는 데 비교 20번
+list:   777777을 찾는 데 비교 20번
+```
+
+비교는 둘 다 20번입니다. 그런데 `list`의 반복자는 한 칸씩만 움직일 수 있어서, 먼저 길이를 세느라 100만 칸을 걷고, 가운데로 가느라 50만 칸, 다시 25만 칸을 걷습니다. 표준은 이 경우 "걸음 수는 선형"이라고 따로 적어 둡니다. 비교가 아주 비싼 타입이 아니라면 `list`에서의 이진 탐색은 처음부터 훑는 것보다 나을 것이 없습니다.
+
+<Note>
+`std::sort`의 보장도 "비교 횟수가 O(n log n)"입니다. 무작위 정수 1,000개를 정렬하며 세어 보면 GCC 14에서 11,865번이 나옵니다. n log₂ n은 9,966이니 상수가 1.2쯤 붙은 것입니다. 보장은 "이 꼴을 넘지 않는다"이지 "정확히 이만큼"이 아닙니다.
+</Note>
+
+## 표기가 말해 주지 않는 것
+
+처음부터 끝까지 더하는 일은 `vector`에서도 `list`에서도 O(n)입니다. 걸리는 시간은 같지 않습니다.
+
+```cpp
+#include <chrono>
+#include <list>
+#include <numeric>
+#include <print>
+#include <vector>
+
+template <typename Container>
+void measure(const char* name, const Container& c)
+{
+    auto start = std::chrono::steady_clock::now();
+    long long sum = std::accumulate(c.begin(), c.end(), 0LL);
+    auto took = std::chrono::steady_clock::now() - start;
+    std::println("{:7} 합 {} 걸린 시간 {}", name, sum,
+                 std::chrono::duration_cast<std::chrono::microseconds>(took));
+}
+
+int main()
+{
+    const int n = 5'000'000;
+    std::vector<int> v(n, 1);
+    std::list<int> l(n, 1);
+    measure("vector", v);
+    measure("list", l);
+}
+```
+
+```text nocheck
+vector  합 5000000 걸린 시간 3059us
+list    합 5000000 걸린 시간 21820us
+```
+
+x86-64 서버에서 `-O2`로 한 번 잰 값이고, 기기마다 다릅니다. 볼 것은 비율입니다. 같은 O(n)인데 일곱 배 차이가 납니다. `vector`의 원소는 메모리에 줄지어 있어서 CPU가 다음 칸을 미리 읽어 둡니다. `list`의 원소는 칸마다 따로 할당되어 흩어져 있고, 다음 칸의 주소를 읽어야 그다음을 읽을 수 있습니다. 게다가 이 예제의 `list`는 막 만든 것이라 노드가 그나마 가까이 모여 있습니다. 오래 쓴 프로그램에서는 더 흩어집니다.
+
+그래서 순서는 이렇습니다. 먼저 `vector`로 쓰고, 느리면 **재 보고**, 그때 표를 봅니다. "중간에 넣는 일이 많으니 `list`"라는 판단은 O 표기로는 옳아 보입니다. 그런데 넣을 자리를 찾아 걸어가는 시간까지 넣어, 무작위 `int`를 정렬된 자리에 끼워 넣는 일을 같은 서버에서 재 보면 1,000개일 때 `vector`가 다섯 배, 1만 개일 때 스무 배 넘게 빨랐습니다. 걷는 일이 넣는 일보다 훨씬 비쌌기 때문입니다.
+
+## 정리
+
+- 복잡도 보장은 인터페이스의 일부다. 컨테이너를 고를 때 표를 본다
+- 상각 O(1)은 평균이다. 드물게 오는 비싼 한 번이 문제라면 `reserve`로 없앤다
+- O 표기는 상수와 캐시를 말하지 않는다. 마지막 판단은 재 본 숫자로 한다

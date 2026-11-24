@@ -1,0 +1,141 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'SIMD로 빠르게: 칸별 배열(SoA)로 넷씩 처리하기, 절두체 컬링을 SSE로, 컴파일러마다 다른 결과';
+export const terms = [
+  '__m128', '_mm_add_ps', '_mm_and_ps', '_mm_castsi128_ps', '_mm_cmpge_ps', '_mm_loadu_ps',
+  '_mm_movemask_ps', '_mm_mul_ps', '_mm_set1_epi32', '_mm_set1_ps', '_mm_setzero_ps',
+  '_mm_sub_ps',
+];
+
+[「벡터와 행렬」](#/read/cpp-game-engine/math-vectors)의 `Vec3`를 보면, float 네 개를 한 번에 계산하는 SIMD 레지스터(SSE의 `__m128`)에 딱 맞을 것 같습니다. 실제로 많은 엔진이 처음에 `Vec4`를 `__m128`로 감싸 봅니다. 그런데 게임 엔진에서 SIMD가 정말 힘을 쓰는 것은 그 방식이 아닙니다. 「C++ 고급」의 [「SIMD」](#/read/cpp-advanced/perf-simd)에서 본 기초를 엔진의 대표적인 일 하나에 적용해 봅니다.
+
+## 하나를 넷으로 vs 넷을 하나로
+
+- **AoS로 담고 하나를 SIMD로**: `Vec4` 하나의 x, y, z, w를 레지스터 하나에 담습니다. 덧셈은 좋지만, 내적은 네 칸을 곱한 뒤 **칸끼리 더하는**(가로 연산) 단계가 필요해서 이득이 작습니다. 3차원 벡터면 한 칸은 놀고 있습니다
+- **SoA로 담고 넷을 한 번에**: x만 모은 배열, y만 모은 배열…로 담고, 레지스터 하나에 **서로 다른 물체 넷의 x**를 담습니다. 그러면 모든 연산이 칸끼리 같은 일이라 네 칸이 모두 일하고, 가로 연산이 없습니다
+
+## 시야 절두체 컬링
+
+카메라가 보는 공간(절두체)은 평면 여섯 개로 둘러싸인 상자이고, 물체의 경계 구가 어느 한 평면의 완전히 바깥이면 그 물체는 그리지 않습니다([「컬링과 정렬」](#/read/cpp-game-engine/rend-culling)). 구 6만 5천 개를 두 방법으로 검사해 봅니다.
+
+```cpp
+#include <immintrin.h>
+#include <array>
+#include <cstdint>
+#include <print>
+#include <vector>
+
+struct Plane { float nx, ny, nz, d; };          // n·p + d >= 0 이면 안쪽
+struct Sphere { float x, y, z, r; };            // 구 하나씩(AoS)
+
+struct Spheres {                                // 칸마다 배열(SoA)
+    std::vector<float> x, y, z, r;
+};
+
+// 한 번에 하나: 여섯 면 중 하나라도 완전히 바깥이면 보이지 않는다
+int cull_aos(const std::vector<Sphere>& s, const std::array<Plane, 6>& pl)
+{
+    int visible = 0;
+    for (const auto& b : s) {
+        bool in = true;
+        for (const auto& p : pl)
+            if (p.nx * b.x + p.ny * b.y + p.nz * b.z + p.d < -b.r) {
+                in = false;
+                break;
+            }
+        visible += in;
+    }
+    return visible;
+}
+
+// 한 번에 넷: SSE 레지스터 하나에 구 네 개의 x(또는 y, z, r)를 담는다
+int cull_soa_sse(const Spheres& s, const std::array<Plane, 6>& pl)
+{
+    int visible = 0;
+    const std::size_t n = s.x.size();           // 4의 배수라고 둔다
+    for (std::size_t i = 0; i < n; i += 4) {
+        __m128 x = _mm_loadu_ps(&s.x[i]), y = _mm_loadu_ps(&s.y[i]);
+        __m128 z = _mm_loadu_ps(&s.z[i]);
+        __m128 nr = _mm_sub_ps(_mm_setzero_ps(), _mm_loadu_ps(&s.r[i]));  // -r
+        __m128 in = _mm_castsi128_ps(_mm_set1_epi32(-1));   // 처음엔 모두 안쪽
+        for (const auto& p : pl) {
+            __m128 dist = _mm_add_ps(
+                _mm_add_ps(_mm_mul_ps(_mm_set1_ps(p.nx), x),
+                           _mm_mul_ps(_mm_set1_ps(p.ny), y)),
+                _mm_add_ps(_mm_mul_ps(_mm_set1_ps(p.nz), z), _mm_set1_ps(p.d)));
+            in = _mm_and_ps(in, _mm_cmpge_ps(dist, nr));    // 네 개를 한 번에 비교
+        }
+        visible += __builtin_popcount(_mm_movemask_ps(in));
+    }
+    return visible;
+}
+
+int main()
+{
+    // 원점에 선 카메라가 -z를 보는 대략의 시야(90도), 가까운 면 0.1, 먼 면 100
+    const float k = 0.70710678f;
+    std::array<Plane, 6> frustum = {{{k, 0, -k, 0}, {-k, 0, -k, 0},
+                                     {0, k, -k, 0}, {0, -k, -k, 0},
+                                     {0, 0, -1, -0.1f}, {0, 0, 1, 100}}};
+    std::uint32_t seed = 7;                     // 어디서나 같은 수를 내는 xorshift
+    auto rnd = [&](float lo, float hi) {
+        seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
+        return lo + (hi - lo) * float(seed >> 8) / float(1 << 24);
+    };
+    const int N = 1 << 16;
+    std::vector<Sphere> aos(N);
+    Spheres soa;
+    for (auto* v : {&soa.x, &soa.y, &soa.z, &soa.r}) v->resize(N);
+    for (int i = 0; i < N; ++i) {
+        aos[i] = {rnd(-100, 100), rnd(-100, 100), rnd(-100, 100), rnd(0.1f, 2)};
+        soa.x[i] = aos[i].x; soa.y[i] = aos[i].y;
+        soa.z[i] = aos[i].z; soa.r[i] = aos[i].r;
+    }
+    int a = cull_aos(aos, frustum), b = cull_soa_sse(soa, frustum);
+    std::println("구 {}개 중 보이는 것: 하나씩 {}, SSE로 넷씩 {}", N, a, b);
+    std::println("Sphere {}바이트, __m128 {}바이트", sizeof(Sphere),
+                 sizeof(__m128));
+}
+```
+
+```text
+구 65536개 중 보이는 것: 하나씩 11371, SSE로 넷씩 11371
+Sphere 16바이트, __m128 16바이트
+```
+
+- `_mm_set1_ps(p.nx)`는 평면 계수 하나를 네 칸 모두에 복사합니다. 그러면 `nx * x + ny * y + nz * z + d`가 구 넷에 대해 한 번에 계산됩니다
+- 비교 `_mm_cmpge_ps`는 칸마다 참이면 모든 비트가 1, 거짓이면 0인 **마스크**를 돌려주고, 여섯 평면의 마스크를 `and`로 모읍니다. 하나씩 버전의 `break` 같은 분기가 없습니다
+- 마지막에 `_mm_movemask_ps`로 네 칸의 결과를 4비트로 모아 1의 개수를 셉니다
+- 두 방법의 답이 같은지 먼저 확인했습니다. SIMD 코드는 반드시 단순한 버전과 결과를 견주는 시험을 함께 둡니다
+
+## 재 보면
+
+같은 코드를 200번씩 돌려 구 하나당 시간을 쟀습니다(검사용 VM, 반복문이 최적화로 사라지지 않게 매번 메모리 장벽을 두었습니다).
+
+| 컴파일러와 옵션 | 하나씩 | SSE로 넷씩 |
+| --- | --- | --- |
+| GCC 14 `-O2` | 약 11~13ns | 약 1.9~3.2ns |
+| GCC 14 `-O3 -march=x86-64-v3` | 약 8.5~9.2ns | 약 0.73ns |
+| Clang 20 `-O2` | 약 1.2~1.4ns | 약 0.76~0.92ns |
+
+SSE 버전은 어느 컴파일러에서나 빨랐습니다. 눈에 띄는 것은 **하나씩 버전의 속도가 컴파일러에 따라 열 배 가까이** 달랐다는 점입니다. 같은 C++ 코드라도 컴파일러가 반복문과 분기를 어떤 기계어로 바꾸느냐에 따라 이만큼 차이가 납니다. 데이터가 무작위라 "바깥이면 그만두기" 분기의 결과를 CPU가 예측하기 어려운 것도 한몫했을 것입니다([「분기 예측」](#/read/cpp-advanced/perf-branch)). 정확한 까닭을 알려면 [컴파일러 탐색기](#/read/cpp-advanced/read-reference)로 두 컴파일러의 기계어를 견줘 봐야 하고, 이 쪽에서는 거기까지 하지 않았습니다. 성능이 중요한 곳은 **출시할 컴파일러로 직접 재는 것**이 유일하게 믿을 수 있는 방법입니다.
+
+## 플랫폼마다 다른 명령
+
+`_mm_` 함수들은 x86의 SSE 명령입니다. 휴대폰·콘솔·애플 실리콘의 ARM에서는 NEON(`vaddq_f32` 같은 이름)을 써야 합니다. 엔진은 보통 다음 중 하나로 이 차이를 숨깁니다.
+
+- 엔진 안에 `simd_float4` 같은 얇은 감싸개를 두고, 플랫폼마다 SSE와 NEON으로 구현한다
+- 컴파일러의 자동 벡터화에 맡길 수 있게 SoA 배열과 단순한 반복문으로 쓴다(Clang이 하나씩 버전에서 보여 준 것처럼, 잘 되면 꽤 빠르다)
+- ISPC 같은 SIMD 전용 언어나 SIMD 라이브러리를 쓴다
+
+어느 쪽이든 가장 큰 결정은 명령 선택이 아니라 **데이터를 SoA로 놓는 것**입니다. 이 결정이 [「아키타입과 희소 집합」](#/read/cpp-game-engine/ecs-storage)의 ECS 설계로 이어집니다.
+
+<Note>
+SoA는 "물체 하나의 모든 칸"을 읽을 때는 메모리 여러 곳을 건너뛰어야 해서 불리합니다. 그래서 넷이나 여덟 개씩 묶은 작은 AoS의 배열(AoSoA, 예: `struct { float x[8], y[8], z[8], r[8]; }`의 배열)로 두는 절충도 많이 씁니다. 묶음 크기를 SIMD 폭에 맞추면 두 장점을 함께 얻습니다.
+</Note>
+
+## 정리
+
+- `Vec4` 하나를 SIMD 레지스터로 감싸기보다, 칸별 배열(SoA)로 담고 서로 다른 물체 넷을 한 번에 처리해야 모든 칸이 일한다
+- 절두체 컬링은 평면 계수를 네 칸에 복사하고, 비교 결과를 마스크로 모아 분기 없이 구 넷을 검사한다
+- 하나씩 버전의 속도는 컴파일러마다 크게 다르므로 출시할 컴파일러로 직접 재고, ARM의 NEON까지 감싸개나 자동 벡터화로 덮는다

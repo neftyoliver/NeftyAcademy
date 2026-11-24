@@ -1,0 +1,121 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '알람: ISA-18.2의 알람 상태와 확인, 데드밴드와 지연으로 떨림 막기, 우선순위, 알람 홍수, 보류와 억제';
+
+알람은 HMI에서 가장 중요한 기능입니다. 작업자가 지금 무엇에 손을 써야 하는지 알려 주기 때문입니다. 그런데 많은 공장에서 알람은 오히려 문제가 됩니다. 쓸데없는 알람이 하루에 수천 개씩 울리면 작업자는 확인 버튼을 습관처럼 누르게 되고, 정작 중요한 알람을 놓칩니다. 대형 사고 조사에서 "알람이 너무 많아 진짜 경고가 묻혔다"는 결론이 되풀이되자, 알람을 체계적으로 관리하는 표준 ISA-18.2(국제 표준 IEC 62682)가 나왔습니다.
+
+## 알람의 상태와 떨림
+
+ISA-18.2의 알람은 조건(지금 높은가)과 확인(작업자가 보았는가)을 따로 기억합니다. 그리고 경계 근처에서 값이 오르내릴 때 알람이 켜졌다 꺼졌다를 되풀이하는 **채터링**을 막아야 합니다. 상한 알람 하나를 만들어 두 가지를 확인했습니다.
+
+```cpp
+// ISA-18.2 알람 상태 기계와, 데드밴드·지연으로 떨림(채터링)을 막는 상한 알람
+#include <cstdio>
+#include <vector>
+
+enum class AlarmState { Normal, Unack, Acked, ReturnedUnack };
+const char* name(AlarmState s) {
+    static const char* n[] = {"정상", "발생·미확인", "발생·확인", "복귀·미확인"};
+    return n[int(s)];
+}
+
+class HighAlarm {
+    double limit, deadband;
+    int onDelay, count = 0;                      // 조건이 이만큼 이어져야 발생
+    bool active = false;
+public:
+    AlarmState state = AlarmState::Normal;
+    int activations = 0;
+    HighAlarm(double lim, double db, int delay)
+        : limit(lim), deadband(db), onDelay(delay) {}
+
+    void sample(double v) {
+        if (!active) {
+            count = v > limit ? count + 1 : 0;
+            if (count >= onDelay) {              // 발생
+                active = true;
+                ++activations;
+                state = AlarmState::Unack;
+            }
+        } else if (v < limit - deadband) {       // 데드밴드 아래로 내려와야 복귀
+            active = false;
+            count = 0;
+            state = state == AlarmState::Acked ? AlarmState::Normal
+                                               : AlarmState::ReturnedUnack;
+        }
+    }
+    void acknowledge() {                         // 작업자가 확인 버튼을 누름
+        if (state == AlarmState::Unack) state = AlarmState::Acked;
+        else if (state == AlarmState::ReturnedUnack) state = AlarmState::Normal;
+    }
+};
+
+int main() {
+    // 상한 200도 근처를 오르내리는 온도(1초마다), 잡음 ±1도
+    std::vector<double> temp;
+    for (int i = 0; i < 60; ++i)
+        temp.push_back(199.5 + (i % 3 == 0 ? 1.0 : -0.6)     // 잡음
+                       // 20~35초에 실제로 높음
+                       + (i > 20 && i < 35 ? 3 : 0));
+
+    HighAlarm naive(200, 0, 1), good(200, 2, 3);
+    for (double v : temp) {
+        naive.sample(v);
+        good.sample(v);
+    }
+    std::printf("데드밴드·지연 없음: 발생 %d번 / "
+                "데드밴드 2도·3초 지연: 발생 %d번\n",
+                naive.activations, good.activations);
+
+    HighAlarm a(200, 2, 3);                      // 한 알람의 일생
+    auto show = [&](const char* what) {
+        std::printf("  %s → %s\n", what, name(a.state));
+    };
+    for (int i = 0; i < 3; ++i) a.sample(205);
+    show("205도가 3초 이어짐");
+    a.acknowledge();
+    show("작업자 확인");
+    a.sample(199);
+    show("199도(데드밴드 안)");
+    a.sample(197);
+    show("197도로 내려옴");
+    for (int i = 0; i < 3; ++i) a.sample(206);
+    show("다시 206도");
+    a.sample(190);
+    show("확인 전에 내려옴");
+    a.acknowledge();
+    show("작업자 확인");
+}
+```
+
+```text
+데드밴드·지연 없음: 발생 16번 / 데드밴드 2도·3초 지연: 발생 1번
+  205도가 3초 이어짐 → 발생·미확인
+  작업자 확인 → 발생·확인
+  199도(데드밴드 안) → 발생·확인
+  197도로 내려옴 → 정상
+  다시 206도 → 발생·미확인
+  확인 전에 내려옴 → 복귀·미확인
+  작업자 확인 → 정상
+```
+
+- **채터링**: 잡음이 섞인 온도가 상한 200도를 오르내리자, 단순 비교로는 1분에 16번이나 알람이 울렸습니다. 실제로 높았던 것은 20~35초 한 번뿐입니다. 복귀는 상한보다 2도 아래로 내려와야 인정하고(데드밴드), 발생은 조건이 3초 이어져야 인정하자(지연) 1번이 되었습니다
+- **확인은 따로**: 확인한 알람도 조건이 남아 있으면 "발생·확인"으로 화면에 남고, 조건이 사라져야 정상이 됩니다. 반대로 작업자가 보기 전에 조건이 사라지면 "복귀·미확인"으로 남아, 무슨 일이 있었는지 작업자가 알게 합니다
+- 화면에서는 미확인 알람을 깜박이게 하고, 확인하면 깜박임을 멈추는 것이 보통입니다
+
+## 알람을 관리하기
+
+- **알람이 될 자격**: 알람은 작업자가 **무언가를 해야 하는** 일에만 씁니다. 해야 할 일이 없는 상태 변화는 알람이 아니라 기록(이벤트)입니다
+- **우선순위**: 대응하지 않으면 생길 결과의 크기와 대응에 쓸 수 있는 시간으로 정하고, 높은 우선순위는 적게 둡니다
+- **알람 홍수**: 흔히 인용하는 기준은 작업자 한 명에게 평균 10분에 1개 정도면 감당할 만하고, 10분에 10개를 넘으면 홍수입니다. 장비 하나가 멈추면 그 뒤의 알람이 줄줄이 울리므로, 원인 알람만 보이고 결과 알람은 억제하는 설계가 필요합니다
+- **보류와 운전 정지**: 고장 난 센서의 알람은 작업자가 정해진 시간 동안 **보류**할 수 있게 하되, 시간이 지나면 저절로 풀리고 누가 왜 보류했는지 기록합니다
+
+<Note>
+알람과 이벤트는 모두 시각, 태그, 값, 상태 변화, 확인한 사람과 함께 기록합니다. 사고가 나면 이 기록이 무슨 순서로 무엇이 일어났는지 보여 주는 유일한 증거가 되므로, 시계를 맞추고(NTP, PTP) 기록이 지워지거나 고쳐지지 않게 합니다([「추적성」](#/read/cpp-industrial/data-trace)). 공장 전체의 알람이 정말 필요한지 정기적으로 검토하는 일(알람 합리화)도 표준이 요구하는 활동입니다.
+</Note>
+
+## 정리
+
+- ISA-18.2 알람은 조건과 확인을 따로 기억해 정상, 발생·미확인, 발생·확인, 복귀·미확인 상태를 오간다
+- 경계 근처의 떨림은 복귀 쪽 데드밴드와 발생 쪽 지연으로 막고, 알람은 작업자가 무언가를 해야 하는 일에만 쓴다
+- 우선순위를 나누고, 알람 홍수와 연쇄 알람을 억제로 다스리며, 보류는 시간 제한과 기록을 붙여 허용한다

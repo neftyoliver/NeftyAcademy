@@ -1,0 +1,134 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '낙관적 잠금: 사라지는 변경, 버전 열로 충돌 알아보기, FOR UPDATE와 NOWAIT, SKIP LOCKED 작업 큐';
+
+[「트랜잭션과 격리 수준」](#/read/cpp-database/db-transactions)에서 두 트랜잭션이 같은 값을 읽고 각자 써서 한쪽의 변경이 사라지는 것을 보았습니다. 사용자가 화면에 띄운 상품을 몇 분 동안 고치다 저장하는 경우가 더 흔한데, 그동안 트랜잭션을 열어 두거나 행을 잠가 둘 수는 없습니다. 연결과 잠금을 사람이 생각하는 시간만큼 쥐게 되기 때문입니다. 방법은 둘입니다. 충돌이 드물다고 보고 저장할 때 알아보는 **낙관적 잠금**과, 고치기 전에 먼저 잠그는 **비관적 잠금**입니다.
+
+## 충돌을 알아보는 두 방법
+
+```cpp pkg=libpq
+#include <libpq-fe.h>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+
+struct Res {                                     // 결과의 요약
+    std::string state, value;                    // 오류면 state에 SQLSTATE
+};
+
+Res run(PGconn* c, const char* sql) {
+    PGresult* r = PQexec(c, sql);
+    Res out;
+    if (const char* s = PQresultErrorField(r, PG_DIAG_SQLSTATE)) {
+        out.state = s;
+        out.value = PQresultErrorField(r, PG_DIAG_MESSAGE_PRIMARY);
+    } else if (PQntuples(r) > 0) {
+        out.value = PQgetvalue(r, 0, 0);
+    }
+    PQclear(r);
+    return out;
+}
+
+// 읽을 때 본 버전 그대로일 때만 고친다. 고친 행 수를 돌려준다
+int save(PGconn* c, int price, int seen_version) {
+    std::string p = std::to_string(price), v = std::to_string(seen_version);
+    const char* params[] = {p.c_str(), v.c_str()};
+    PGresult* r = PQexecParams(c, "UPDATE op_items SET price = $1, "
+                                  "version = version + 1 "
+                                  "WHERE id = 1 AND version = $2",
+                               2, nullptr, params, nullptr, nullptr, 0);
+    int rows = std::atoi(PQcmdTuples(r));
+    PQclear(r);
+    return rows;
+}
+
+int main() {
+    const char* ci = "host=localhost dbname=academy user=academy password=academy";
+    PGconn* alice = PQconnectdb(ci);
+    PGconn* bob = PQconnectdb(ci);
+    run(alice, "SET client_min_messages = warning");
+    run(alice, "DROP TABLE IF EXISTS op_items, op_jobs");
+    run(alice, "CREATE TABLE op_items (id int PRIMARY KEY, price int, "
+               "version int)");
+    run(alice, "CREATE TABLE op_jobs (id int PRIMARY KEY, "
+               "done bool DEFAULT false)");
+    run(alice, "INSERT INTO op_jobs (id) VALUES (1), (2), (3)");
+    const char* reset = "DELETE FROM op_items; "
+                        "INSERT INTO op_items VALUES (1, 1000, 1)";
+
+    std::printf("버전 없이 저장하기\n");     // 둘 다 1000을 읽고 화면에서 고친다
+    run(alice, reset);
+    run(alice, "UPDATE op_items SET price = 1100 WHERE id = 1");
+    run(bob, "UPDATE op_items SET price = 900 WHERE id = 1");
+    std::printf("  앨리스 1100, 밥 900 저장 → 최종 %s (앨리스의 변경이 사라짐)\n",
+                run(alice, "SELECT price FROM op_items").value.c_str());
+
+    std::printf("버전 열로 저장하기\n");     // 둘 다 (1000, 버전 1)을 읽었다
+    run(alice, reset);
+    std::printf("  앨리스: %d행 고침\n", save(alice, 1100, 1));
+    if (save(bob, 900, 1) == 0) {                // 그 사이 누가 바꿨다
+        Res now = run(bob, "SELECT price || ' (버전 ' || version || ')' "
+                           "FROM op_items");
+        std::printf("  밥: 0행 고침 → 충돌, 다시 읽으니 %s\n", now.value.c_str());
+    }
+
+    std::printf("FOR UPDATE로 미리 잠그기\n");
+    run(alice, "BEGIN");
+    run(alice, "SELECT price FROM op_items WHERE id = 1 FOR UPDATE");
+    run(bob, "BEGIN");
+    Res r = run(bob, "SELECT price FROM op_items WHERE id = 1 FOR UPDATE NOWAIT");
+    std::printf("  밥(NOWAIT): %s %s\n", r.state.c_str(), r.value.c_str());
+    run(bob, "ROLLBACK");
+    run(alice, "UPDATE op_items SET price = price + 50, version = version + 1");
+    run(alice, "COMMIT");
+
+    std::printf("SKIP LOCKED로 일감 나누기\n");
+    const char* take = "UPDATE op_jobs SET done = true WHERE id = ("
+                       "SELECT id FROM op_jobs WHERE NOT done ORDER BY id "
+                       "LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING id";
+    run(alice, "BEGIN");
+    std::string a = run(alice, take).value;      // A가 하나를 잡고 아직 일하는 중
+    run(bob, "BEGIN");
+    std::string b = run(bob, take).value;        // B는 잠긴 행을 건너뛴다
+    std::printf("  일꾼 A: %s번, 일꾼 B: %s번\n", a.c_str(), b.c_str());
+    run(alice, "COMMIT");
+    run(bob, "COMMIT");
+    std::printf("  남은 일: %s\n",
+                run(alice, "SELECT string_agg(id::text, ', ') FROM op_jobs "
+                           "WHERE NOT done").value.c_str());
+    PQfinish(alice);
+    PQfinish(bob);
+}
+```
+
+```text
+버전 없이 저장하기
+  앨리스 1100, 밥 900 저장 → 최종 900 (앨리스의 변경이 사라짐)
+버전 열로 저장하기
+  앨리스: 1행 고침
+  밥: 0행 고침 → 충돌, 다시 읽으니 1100 (버전 2)
+FOR UPDATE로 미리 잠그기
+  밥(NOWAIT): 55P03 could not obtain lock on row in relation "op_items"
+SKIP LOCKED로 일감 나누기
+  일꾼 A: 1번, 일꾼 B: 2번
+  남은 일: 3
+```
+
+- **버전 없이 저장하면**: 둘 다 1000을 읽고 각자 저장하자 나중에 쓴 밥의 값만 남았습니다. 오류도 경고도 없이 앨리스의 변경이 사라졌습니다
+- **버전 열**: 행마다 버전 번호를 두고, 읽을 때 본 버전을 `WHERE version = $2`에 넣어 저장하며 번호를 하나 올립니다. 그 사이 누가 바꿨다면 고친 행이 0개이므로 충돌을 알 수 있습니다. 밥의 프로그램은 다시 읽어 바뀐 값을 사용자에게 보여 주고, 덮어쓸지 합칠지 묻습니다. 생각하는 동안 아무것도 잠그지 않고, SQLite를 포함해 어느 데이터베이스에서나 됩니다
+- **FOR UPDATE**: 서버 코드가 읽고 바로 고치는 일이라면 짧은 트랜잭션 안에서 `SELECT ... FOR UPDATE`로 행을 먼저 잠급니다. 다른 트랜잭션은 그 행을 잠그려다 기다리고, `NOWAIT`를 붙이면 기다리지 않고 바로 55P03을 받습니다. 키 열을 바꾸지 않는다면 더 약한 `FOR NO KEY UPDATE`를 써서, 이 행을 가리키는 외래 키의 INSERT까지 막지 않게 할 수 있습니다
+- **SKIP LOCKED**: 여러 일꾼이 한 테이블에서 일감을 가져갈 때, 잠긴 행을 건너뛰면 서로 기다리지 않고 다른 일감을 잡습니다. A가 1번을 쥐고 일하는 동안 B는 2번을 가져갔습니다. A가 커밋하지 못하고 죽으면 트랜잭션이 되돌려져 1번이 다시 남은 일이 됩니다
+
+## 고르는 기준
+
+충돌이 드물고 사람이 생각하는 시간이 끼면 버전 열이 맞습니다. 같은 행을 여럿이 자주 고치고 고치는 일이 짧다면 FOR UPDATE가 되돌림 없이 줄을 세웁니다. `UPDATE ... SET stock = stock - 1`처럼 데이터베이스 안에서 계산할 수 있는 일은 둘 다 필요 없습니다. 잠그는 쪽은 여러 행을 잠글 때 순서를 지켜야 하고([「교착 상태」](#/read/cpp-database/tx-deadlock)), 버전 쪽은 충돌했을 때 무엇을 할지 화면까지 정해 둬야 합니다. NOWAIT와 SKIP LOCKED는 MySQL 8.0과 MariaDB 10.6부터 쓸 수 있습니다.
+
+<Note>
+웹 API에서는 버전 번호를 응답의 `ETag` 헤더로 내보내고, 저장 요청의 `If-Match` 헤더로 돌려받아 같은 검사를 합니다. 버전이 다르면 `412 Precondition Failed`로 알려, 클라이언트가 다시 읽고 판단하게 합니다.
+</Note>
+
+## 정리
+
+- 사람이 고치는 동안 잠금을 쥘 수 없으므로, 버전 열을 WHERE에 넣어 저장하고 고친 행이 0개면 충돌로 다룬다
+- 서버 코드의 짧은 읽고-고치기는 FOR UPDATE로 먼저 잠그고, 기다리지 않으려면 NOWAIT, 일감을 나눌 때는 SKIP LOCKED를 쓴다
+- 충돌이 드물고 생각하는 시간이 길면 낙관적 잠금, 자주 부딪히는 짧은 일은 비관적 잠금이나 데이터베이스 안의 계산이 맞다

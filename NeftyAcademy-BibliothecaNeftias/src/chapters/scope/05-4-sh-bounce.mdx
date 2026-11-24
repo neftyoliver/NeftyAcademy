@@ -1,0 +1,93 @@
+import { Figure, Note } from 'paragoniahex';
+import { Scope } from '../../components/Scope';
+import { bounce, bounceZoom, filtered } from './data/sh-bounce';
+
+export const summary = '떨림을 잡는 설정, 누를 때와 뗄 때의 모양, 커서로 떨림의 길이 재기, 커패시터가 메우는 것과 남기는 것';
+export const terms = [];
+
+단추를 한 번 눌렀는데 프로그램은 여러 번 눌렸다고 셉니다. 접점이 붙는 순간에 몇 번 튀기 때문입니다. 글로 읽으면 믿기 어렵지만, 오실로스코프로 한 번 잡아 보면 다시는 잊지 않게 됩니다. 한 번뿐인 사건을 잡는 연습으로도 좋습니다.
+
+## 떨림을 잡는 설정
+
+풀업 저항이 달린 단추 줄에 10배 프로브를 대고, 집게는 GND에 뭅니다.
+
+- **단발로, 내려가는 에지에**: 누르면 줄이 LOW로 내려가므로 내려가는 에지에 겁니다. 레벨은 신호의 가운데(3.3V 줄이면 1.65V)에 둡니다([「자동, 일반, 단발」](#/read/scope/tr-modes))
+- **트리거 점은 왼쪽에**: 왼쪽에서 한 칸쯤에 둡니다. 볼 것은 대부분 트리거 뒤에 있습니다
+- **가로는 1ms/칸에서 시작한다**: 잰 사람의 기록으로는 대부분의 스위치가 10ms 안에 잦아듭니다. 화면 전체 10ms로 잡아 보고, 떨림이 화면을 넘으면 넓히고 한쪽에 몰려 있으면 당깁니다
+- **뗄 때는 따로 잡는다**: 올라가는 에지로 바꿔 한 번 더 잡습니다. 붙을 때와 떨어질 때의 떨림은 서로 다릅니다
+- **여러 번 잡아 가장 긴 것을 본다**: 떨림은 누를 때마다 다릅니다. 열 번, 스무 번 잡아서 가장 길었던 것을 적어 둡니다
+
+## 누를 때와 뗄 때
+
+<Figure caption="단추를 짧게 눌렀다 뗀 줄. 가로 1ms/칸. T 표시가 트리거 점이다">
+  <Scope tdiv={1e-3} dt={5e-6} traces={[{ name: 'CH1 단추 줄', data: bounce, vdiv: 1, pos: -2 }]} trigger={{ level: 1.65 }} triggerAt={1e-3} />
+</Figure>
+
+<Figure caption="같은 기록에서 누르는 순간을 가로 0.2ms/칸으로 늘렸다. 세로 커서는 처음 붙은 때와 마지막으로 붙은 때">
+  <Scope tdiv={2e-4} dt={5e-6} traces={[{ name: 'CH1 단추 줄', data: bounceZoom, vdiv: 1, pos: -2 }]} cursorsT={[4e-4, 1.3e-3]} />
+</Figure>
+
+```python
+# 접점이 붙어 있던 구간(ms): 누를 때 네 번, 뗄 때 두 번 더
+closed = [(1.000, 1.080), (1.200, 1.250), (1.450, 1.480), (1.900, 6.000),
+          (6.150, 6.220), (6.400, 6.430)]
+falls = [(start, 0) for start, _ in closed]         # 붙으면 LOW
+rises = [(end, 1) for _, end in closed]             # 떨어지면 HIGH
+edges = sorted(falls + rises)
+
+def presses(period_ms):
+    """레벨이 period_ms 동안 그대로일 때만 받아들이고, LOW를 받아들인 횟수를 센다"""
+    count, state = 0, 1
+    for i, (t, level) in enumerate(edges):
+        until = edges[i + 1][0] if i + 1 < len(edges) else 1e9
+        if until - t >= period_ms and level != state:
+            state = level
+            count += level == 0
+    return count
+
+for period in (0.0, 0.05, 0.5, 2.0):
+    n = presses(period)
+    print(f"{period:4.2f}ms 동안 그대로여야 받는다: {n}번 눌렀다고 센다")
+```
+
+```text
+0.00ms 동안 그대로여야 받는다: 6번 눌렀다고 센다
+0.05ms 동안 그대로여야 받는다: 4번 눌렀다고 센다
+0.50ms 동안 그대로여야 받는다: 1번 눌렀다고 센다
+2.00ms 동안 그대로여야 받는다: 1번 눌렀다고 센다
+```
+
+- **누를 때 네 번 붙었다**: 처음 붙은 뒤 0.9ms 동안 세 번 떨어졌다가 다시 붙었습니다. 늘린 화면의 커서가 그 길이를 잽니다
+- **뗄 때에도 두 번 다시 붙었다**: 6ms에 떨어진 뒤 0.43ms 사이에 두 번 더 붙었습니다
+- **사람은 한 번, 줄은 여섯 번**: 줄은 모두 여섯 번 LOW로 내려갔습니다. 에지를 그대로 세는 프로그램은 여섯 번 눌렀다고 합니다
+- **거르는 기간은 가장 긴 틈보다 길게**: 이 기록에서 가장 긴 틈은 0.42ms입니다. 그보다 긴 0.5ms 동안 그대로인 레벨만 받아들이면 한 번으로 셉니다. 진짜 단추에는 넉넉히 수십 ms를 줍니다([「디바운스」](#/read/libgpiod/ed-debounce))
+- **잰 사람의 숫자**: 스위치 열여덟 가지를 300번씩 눌러 잰 기록이 있습니다. 둘을 빼면 떨림은 평균 1.6ms, 길어야 6.2ms였고, 하나는 뗄 때 157ms 동안 떨렸습니다. 내 단추가 어느 쪽인지는 재 봐야 압니다
+
+## 커패시터를 달면
+
+단추 줄과 GND 사이에 100nF를 달고, 단추와 줄 사이에 100Ω을 넣었습니다.
+
+<Figure caption="CH1은 접점만 있을 때, CH2는 100nF와 100Ω을 달았을 때. 가로 1ms/칸">
+  <Scope tdiv={1e-3} dt={5e-6} traces={[{ name: 'CH1 접점만', data: bounce, vdiv: 1, pos: 0 }, { name: 'CH2 커패시터를 달고', data: filtered, vdiv: 1, pos: -4 }]} />
+</Figure>
+
+- **붙을 때는 그대로 빠르다**: 접점이 붙으면 커패시터가 100Ω을 거쳐 곧바로 빠지고 줄은 0V가 됩니다
+- **잠깐 떨어진 틈은 메워진다**: 접점이 떨어지면 10kΩ이 커패시터를 다시 채워야 합니다. 시정수가 1ms이므로 0.42ms의 틈에는 1.2V까지만 오릅니다. HIGH로 읽히는 2.0V에 못 미칩니다([「RC 충전 곡선과 시정수」](#/read/scope/sh-rc))
+- **뗄 때는 느리게 한 번 오른다**: 다시 붙을 때마다 커패시터가 빠지므로, 마지막으로 떨어진 뒤에야 끝까지 차오릅니다
+- **그 대신 어중간한 전압에 오래 머문다**: 0.8V에서 2.0V까지 오르는 데 0.65ms가 걸립니다. 그동안 입력은 LOW도 HIGH도 아니어서, 작은 잡음에도 여러 번 뒤집힐 수 있습니다. 이런 줄은 히스테리시스가 있는 입력(슈미트 트리거)으로 받아야 합니다([「RC와 슈미트 트리거로 떨림 지우기」](#/read/analog-digital/dc-debounce))
+- **100Ω은 접점을 지킨다**: 저항 없이 커패시터를 접점에 바로 달면, 붙는 순간 커패시터의 전하가 접점으로 한꺼번에 쏟아집니다
+
+<Note>
+그림은 ngspice 42로 돌린 것이고, 접점이 붙고 떨어지는 때는 제가 정해 넣은 것입니다. 진짜 단추의 떨림을 잰 것이 아닙니다. 누르고 있는 시간도 한 화면에 누름과 뗌을 함께 담으려고 5ms로 줄였습니다. 사람이 누르는 시간은 이보다 수십 배 깁니다. 스위치를 잰 숫자와 슈미트 트리거가 필요하다는 것은 Jack Ganssle의 글에서 옮겼습니다.
+</Note>
+
+## 정리
+
+- 단추의 떨림은 단발, 내려가는 에지, 1ms/칸으로 잡는다. 여러 번 잡아 가장 긴 떨림을 본다
+- 한 번의 누름에서 줄은 여러 번 오르내린다. 거르는 기간은 가장 긴 틈보다 넉넉히 길게 잡는다
+- 커패시터는 틈을 메우지만 변을 느리게 한다. 느린 변은 슈미트 트리거 입력으로 받는다
+
+## 참고 문서
+
+- [Jack Ganssle: A Guide to Debouncing(스위치 열여덟 가지의 떨림을 잰 값, 거르는 시간, RC 회로와 슈미트 트리거)](https://my.eng.utah.edu/~cs5780/debouncing.pdf)
+- [Tektronix: The Oscilloscope, Basic Features and Functions(단발, 에지 트리거의 레벨과 기울기)](https://www.physics.wisc.edu/courses/home/spring2023/623/lab_equipment/MSO2014_scope_tutorials/Basic-Scopes/2-pg%20feature%20summary.pdf)

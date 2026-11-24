@@ -1,0 +1,185 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '길이를 아는 span과 모르는 span, const의 자리, 잘라 보기로 프레임 풀기, 바이트로 보기, 검사와 수명';
+export const terms = ['std::span', '~span', 'std::as_bytes', 'std::as_writable_bytes'];
+
+[「array와 span」](#/read/cpp-syntax/ft-array-span)에서 `std::span`을 "포인터와 길이를 묶은 것"으로 소개하고 함수 인자에 썼습니다. [`std::string_view`](#/read/cpp-stl/str-view)가 글자에 하는 일을 아무 타입의 배열에 하는 타입이고, 장치와 바이트를 주고받는 코드에서 가장 자주 쓰입니다.
+
+## 만들기와 const의 자리
+
+```cpp
+#include <array>
+#include <print>
+#include <span>
+#include <vector>
+
+int sum(std::span<const int> values)        // 읽기만 하는 뷰
+{
+    int total = 0;
+    for (int v : values)
+        total += v;
+    return total;
+}
+
+void clear(std::span<int> values)           // 고칠 수 있는 뷰
+{
+    for (int& v : values)
+        v = 0;
+}
+
+int main()
+{
+    int c_array[] = {1, 2, 3};
+    std::array<int, 4> fixed = {1, 2, 3, 4};
+    std::vector<int> grown = {1, 2, 3, 4, 5};
+    const std::vector<int> frozen = {7, 8};
+
+    std::println("{} {} {}", sum(c_array), sum(fixed), sum(grown));
+    std::println("{}", sum({grown.data() + 1, 2}));     // 포인터와 길이로: 2 + 3
+    std::println("{}", sum(frozen));        // const 컨테이너는 const 뷰로만
+
+    clear(grown);
+    std::println("{}", sum(grown));
+
+    std::span<int> dynamic = fixed;         // 길이를 실행 중에 들고 다닌다
+    std::span<int, 4> fixed_size = fixed;   // 길이가 타입에 있다
+    std::println("{} {}", sizeof dynamic, sizeof fixed_size);
+}
+```
+
+```text
+6 10 15
+5
+15
+0
+16 8
+```
+
+`const`를 어디에 쓰느냐로 뜻이 갈립니다.
+
+| 타입 | 원소를 고칠 수 있나 | 쓰는 때 |
+| --- | --- | --- |
+| `std::span<const int>` | 없다 | 읽기만 하는 인자. 대부분 이것 |
+| `std::span<int>` | 있다 | 버퍼를 채워 주는 함수 |
+| `const std::span<int>` | **있다** | 뷰 자체를 다른 곳으로 못 돌릴 뿐이다 |
+
+포인터의 `const int*`와 `int* const`의 차이와 같습니다. 셋째를 "읽기 전용"이라고 믿고 쓰는 실수가 흔합니다.
+
+`std::span<int, 4>`처럼 길이를 타입에 적으면 객체가 포인터 하나로 줄고, 길이가 다른 배열을 넘기는 실수를 컴파일러가 잡습니다. 레지스터 블록이나 고정 길이 키처럼 길이가 규격으로 정해진 것에 씁니다.
+
+## 잘라 보기
+
+`first(n)`, `last(n)`, `subspan(시작, 길이)`는 복사 없이 일부만 가리키는 새 뷰를 줍니다. 통신 프레임을 푸는 코드가 이것으로 짧아집니다.
+
+```cpp
+#include <cstdint>
+#include <optional>
+#include <print>
+#include <span>
+#include <vector>
+
+using Bytes = std::span<const std::uint8_t>;
+
+// 프레임: 0xAA, 길이, 내용(길이만큼), 앞의 모든 바이트의 합
+std::optional<Bytes> payload_of(Bytes frame)
+{
+    if (frame.size() < 3 || frame[0] != 0xAA)
+        return std::nullopt;
+    const std::size_t length = frame[1];
+    if (frame.size() != length + 3)
+        return std::nullopt;
+
+    std::uint8_t checksum = 0;
+    // 마지막 하나를 뺀 전부를 더한다
+    for (std::uint8_t byte : frame.first(frame.size() - 1))
+        checksum = static_cast<std::uint8_t>(checksum + byte);
+    if (checksum != frame.back())
+        return std::nullopt;
+
+    return frame.subspan(2, length);        // 내용만 가리키는 뷰
+}
+
+int main()
+{
+    const std::vector<std::uint8_t> good = {0xAA, 0x03, 0x10, 0x20, 0x30, 0x0D};
+    const std::vector<std::uint8_t> bad = {0xAA, 0x03, 0x10, 0x20, 0x31, 0x0D};
+
+    for (const auto& frame : {good, bad}) {
+        if (const auto payload = payload_of(frame)) {
+            for (std::uint8_t byte : *payload)
+                std::print("{:02X} ", byte);
+            std::println("");
+        } else {
+            std::println("잘못된 프레임");
+        }
+    }
+}
+```
+
+```text
+10 20 30
+잘못된 프레임
+```
+
+`payload_of`는 프레임이 `vector`에 있든, 스택의 배열에 있든, 수신 버퍼의 한가운데에 있든 상관하지 않습니다. 내용도 복사하지 않고 원래 버퍼의 그 자리를 가리켜 돌려줍니다.
+
+## 바이트로 보기
+
+`std::as_bytes`는 어떤 타입의 `span`이든 `std::span<const std::byte>`로 바꿔 줍니다. 값을 파일이나 소켓에 그대로 쓰거나, 메모리에 어떻게 놓였는지 들여다볼 때 씁니다.
+
+```cpp
+#include <cstddef>
+#include <cstdint>
+#include <print>
+#include <span>
+
+void dump(std::span<const std::byte> bytes)
+{
+    for (std::byte b : bytes)
+        std::print("{:02X} ", std::to_integer<int>(b));
+    std::println("");
+}
+
+struct Sample {
+    std::uint16_t id;
+    float value;
+};
+
+int main()
+{
+    const std::uint32_t word = 0x12345678;
+    dump(std::as_bytes(std::span(&word, 1)));       // 객체 하나도 "길이 1인 배열"로
+
+    static constexpr Sample samples[] = {{1, 1.0f}, {2, -2.0f}};
+    dump(std::as_bytes(std::span(samples)));
+}
+```
+
+```text
+78 56 34 12
+01 00 00 00 00 00 80 3F 02 00 00 00 00 00 00 C0
+```
+
+첫 줄에서 x86과 라즈베리파이가 모두 낮은 바이트부터 놓는다는 것(리틀 엔디언)이, 둘째 줄에서 `id` 뒤에 채움 바이트 둘이 들어간다는 것이 보입니다. 쓰는 쪽은 `std::as_writable_bytes`입니다. `read(fd, …)`로 구조체 배열을 채울 때 씁니다. 이런 식으로 바이트를 다뤄도 되는 타입과 채움 바이트의 주의점은 [「reinterpret_cast와 std::bit_cast」](#/read/cpp-syntax/cast-reinterpret)에 있습니다.
+
+## 검사와 수명
+
+<Note kind="warn">
+`s[i]`, `s.first(n)`, `s.subspan(a, b)`는 범위를 검사하지 않습니다. 벗어나면 정의되지 않은 동작입니다. 위의 `payload_of`가 `subspan`을 부르기 전에 길이부터 확인한 까닭입니다. 검사하는 `s.at(i)`는 C++26에 들어왔고 GCC 14에서는 `-std=c++26`을 줘야 있습니다. `-D_GLIBCXX_ASSERTIONS`로 빌드하면 `[]`와 `first`도 검사하고 벗어나면 멈춥니다([「디버그 모드와 경화 모드」](#/read/cpp-stl/impl-debug)).
+</Note>
+
+수명의 규칙은 `std::string_view`와 같습니다. `span`은 소유하지 않습니다.
+
+| 코드 | 생기는 일 |
+| --- | --- |
+| `std::span<int> s = v; v.push_back(1);` | `v`가 옮겨 가면 `s`는 죽은 메모리를 가리킨다 |
+| `std::span<const int> s = make_vector();` | 임시 `vector`가 그 줄에서 사라진다 |
+| 멤버 변수로 `span`을 들고 있기 | 가리키는 버퍼가 객체보다 오래 산다는 보장이 필요하다 |
+
+함수 인자로 받아 그 함수 안에서만 쓰는 것이 안전한 쓰임입니다.
+
+## 정리
+
+- 읽기만 하는 인자는 `std::span<const T>`. `const std::span<T>`는 읽기 전용이 아니다
+- `first`, `last`, `subspan`으로 복사 없이 자른다. 자르기 전에 길이를 확인한다
+- `std::as_bytes`로 어떤 배열이든 바이트 열로 본다. `span`도 뷰여서 주인보다 오래 살 수 없다

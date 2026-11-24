@@ -1,0 +1,134 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '리플렉션 만들기: 필드 목록을 한 번 적고, 저장·편집기·스크립트가 타입을 몰라도 필드를 읽고 쓰게 하기';
+
+[「저장과 불러오기」](#/read/cpp-game-engine/scene-serialize)에서 필드가 하나 늘 때마다 읽기와 쓰기 코드를 네 군데 고쳐야 했습니다. 편집기의 속성 창, 스크립트 연결, 네트워크 복제도 모두 "이 타입에 어떤 필드가 있나"를 알아야 합니다. C++는 실행 중에 그 정보를 알려 주지 않으므로(C++26의 정적 리플렉션이 널리 쓰이기 전까지는), 엔진이 직접 **리플렉션**, 곧 타입에 대한 정보를 데이터로 만들어 둡니다.
+
+## 필드 목록 한 번, 쓰는 곳은 여럿
+
+```cpp
+#include <cstddef>
+#include <map>
+#include <print>
+#include <sstream>
+#include <string>
+#include <variant>
+#include <vector>
+
+// ---- 필드 정보: 이름, 종류, 객체 안의 위치 ----
+enum class Kind { Float, Int, String };
+struct Field { const char* name; Kind kind; std::size_t offset; float min, max; };
+struct TypeInfo { const char* name; std::size_t size; std::vector<Field> fields; };
+
+std::map<std::string, const TypeInfo*>& registry() {
+    static std::map<std::string, const TypeInfo*> r;
+    return r;
+}
+
+template <class T> Kind kind_of();
+template <> Kind kind_of<float>() { return Kind::Float; }
+template <> Kind kind_of<int>() { return Kind::Int; }
+template <> Kind kind_of<std::string>() { return Kind::String; }
+
+// 타입마다 한 번 적는 목록
+#define FIELD(T, m, lo, hi) \
+    Field{#m, kind_of<decltype(T::m)>(), offsetof(T, m), lo, hi}
+#define REFLECT(T, ...)                                             \
+    const TypeInfo& type_of(const T*) {                             \
+        static TypeInfo info{#T, sizeof(T), {__VA_ARGS__}};         \
+        return info;                                                \
+    }                                                               \
+    static bool T##_registered = (registry()[#T] = &type_of((T*)nullptr), true);
+
+struct Light { float intensity = 1; int color = 0xffffff; std::string label; };
+REFLECT(Light, FIELD(Light, intensity, 0, 10), FIELD(Light, color, 0, 0xffffff),
+        FIELD(Light, label, 0, 0))
+
+struct Enemy { std::string name; int hp = 100; float speed = 3; };
+REFLECT(Enemy, FIELD(Enemy, name, 0, 0), FIELD(Enemy, hp, 1, 999),
+        FIELD(Enemy, speed, 0, 20))
+
+// ---- 이 아래는 Light도 Enemy도 모른다 ----
+std::string to_text(const TypeInfo& t, const void* obj) {
+    std::ostringstream o;
+    o << t.name << " {";
+    for (auto& f : t.fields) {
+        auto p = static_cast<const char*>(obj) + f.offset;
+        o << " " << f.name << "=";
+        switch (f.kind) {
+            case Kind::Float:  o << *reinterpret_cast<const float*>(p); break;
+            case Kind::Int:    o << *reinterpret_cast<const int*>(p); break;
+            case Kind::String: o << '"' << *reinterpret_cast<const std::string*>(p)
+                                 << '"'; break;
+        }
+    }
+    return o.str() + " }";
+}
+
+bool set(const TypeInfo& t, void* obj, const std::string& name, double v) {
+    for (auto& f : t.fields) {
+        if (name != f.name) continue;
+        if (v < f.min || v > f.max) {
+            std::println("  {}.{}={} 거절: 범위 {}~{}",
+                         t.name, f.name, v, f.min, f.max);
+            return false;
+        }
+        auto p = static_cast<char*>(obj) + f.offset;
+        if (f.kind == Kind::Float) *reinterpret_cast<float*>(p) = float(v);
+        else if (f.kind == Kind::Int) *reinterpret_cast<int*>(p) = int(v);
+        else return false;
+        return true;
+    }
+    return false;
+}
+
+int main() {
+    std::print("등록된 타입:");
+    for (auto& [name, info] : registry())
+        std::print(" {}(필드 {}개, {}바이트)",
+                   name, info->fields.size(), info->size);
+    std::println("");
+
+    Light lamp{2.5f, 0xffcc88, "현관"};
+    Enemy orc{"오크", 250, 2.5f};
+    std::println("{}", to_text(type_of(&lamp), &lamp));
+    std::println("{}", to_text(type_of(&orc), &orc));
+
+    set(type_of(&orc), &orc, "hp", 400);          // 편집기 속성 창이 하는 일
+    set(type_of(&orc), &orc, "speed", 50);
+    set(*registry()["Light"], &lamp, "intensity", 7);
+    std::println("{}", to_text(type_of(&orc), &orc));
+    std::println("{}", to_text(type_of(&lamp), &lamp));
+}
+```
+
+```text
+등록된 타입: Enemy(필드 3개, 40바이트) Light(필드 3개, 40바이트)
+Light { intensity=2.5 color=16764040 label="현관" }
+Enemy { name="오크" hp=250 speed=2.5 }
+  Enemy.speed=50 거절: 범위 0~20
+Enemy { name="오크" hp=400 speed=2.5 }
+Light { intensity=7 color=16764040 label="현관" }
+```
+
+## 무엇을 적어 두나
+
+- `REFLECT` 매크로가 타입마다 `TypeInfo`를 하나 만듭니다. 필드마다 **이름**(`#m`으로 소스의 이름을 문자열로), **종류**(`decltype`으로 알아낸 타입), **위치**(`offsetof`)를 담습니다
+- 범위 같은 **편집용 정보**도 함께 붙였습니다. 속도 50은 범위 0~20을 벗어나 거절되었습니다. 실제 엔진은 여기에 표시 이름, 설명, 편집기에서 숨길지, 저장할지, 네트워크로 보낼지 같은 표시를 더 붙입니다
+- 정적 변수 초기화에서 이름으로 찾는 **등록부**에 넣어 두었기 때문에, `registry()["Light"]`처럼 문자열만으로 타입 정보를 찾을 수 있습니다. 저장 파일의 `"Light"`라는 글자에서 객체를 만들거나, 스크립트가 이름으로 필드를 찾을 때 쓰입니다
+
+## 타입을 모르는 코드
+
+`to_text`와 `set`은 `Light`도 `Enemy`도 모릅니다. 객체 주소에 필드 위치를 더해 값의 자리를 찾고, 종류에 따라 읽고 씁니다. 그래서 새 타입을 만들 때 `REFLECT` 한 줄만 적으면 저장, 속성 창, 스크립트 연결이 한꺼번에 생깁니다. [「프리팹」](#/read/cpp-game-engine/scene-prefab)의 오버라이드를 필드 이름으로 기록하는 것도, 속성 이름이 바뀌었을 때 옛 이름을 새 이름으로 옮기는 것도 이 정보 위에서 합니다.
+
+이 방식의 약점은 목록을 손으로 적는다는 점입니다. 필드를 추가하고 `REFLECT`에 넣지 않으면 조용히 저장되지 않습니다. 그래서 큰 엔진들은 헤더를 읽어 리플렉션 코드를 생성하는 별도 도구를 두고, 필드 위에 표시 매크로만 달게 합니다. Unreal Engine의 `UPROPERTY`와 Unreal Header Tool이 대표적인 예입니다.
+
+<Note>
+`offsetof`는 표준 배치 타입에서만 확실히 보장됩니다. `std::string` 멤버가 있는 이 예제의 타입들은 표준 배치가 아니어서, 표준상 "조건부 지원"이고 GCC와 Clang은 실제로 동작합니다. 이식성이 걱정되면 위치 대신 멤버 포인터(`&Light::intensity`)를 저장하고 템플릿으로 읽고 쓰는 방법이 있습니다. C++26에 들어간 정적 리플렉션(P2996)은 컴파일 시간에 멤버 목록을 직접 순회하게 해 주므로, 지원하는 컴파일러가 퍼지면 이런 손 목록이 크게 줄어들 것입니다.
+</Note>
+
+## 정리
+
+- 리플렉션은 타입의 필드 이름, 종류, 위치와 편집용 정보를 데이터로 만들어 둔 것이다
+- 필드 목록을 한 번 적으면 저장, 속성 창, 스크립트, 네트워크가 타입을 몰라도 필드를 읽고 쓴다
+- 손으로 적는 목록은 빠뜨리기 쉬워 큰 엔진은 코드 생성 도구를 쓰며, C++26 정적 리플렉션이 이를 대신할 수 있다

@@ -1,0 +1,244 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '서식의 문법 전부, format_to와 고정 버퍼, 컴파일 시간 검사, parse로 나만의 서식 글자';
+export const terms = [
+  'std::format', 'std::print', 'std::println', '~println', 'std::format_to', 'std::vformat',
+  'std::make_format_args', 'std::format_to_n', 'std::formatted_size',
+];
+
+[「첫 프로그램: std::println」](#/read/cpp-syntax/from-c-hello)부터 `{}`를 써 왔고, [「출력 붙이기: formatter와 operator&lt;&lt;」](#/read/cpp-syntax/op-stream)에서 내 타입을 `{}`에 넣었습니다. 여기서는 서식의 문법을 끝까지 보고, 화면이 아닌 곳으로 보내는 법과 나만의 서식 글자를 만드는 법을 다룹니다.
+
+## 서식의 문법
+
+`{` 와 `}` 사이는 `번호:서식`이고, 서식의 조각은 정해진 순서로 옵니다.
+
+| 조각 | 뜻 | 예 |
+| --- | --- | --- |
+| 채움과 정렬 | `<` 왼쪽, `>` 오른쪽, `^` 가운데. 앞에 채울 글자 | `{:*^8}` |
+| 부호 | `+`는 양수에도 부호를 붙인다 | `{:+}` |
+| `#` | 진법 머리말(`0x`, `0b`)을 붙인다 | `{:#x}` |
+| `0` | 폭을 0으로 채운다 | `{:05}` |
+| 폭 | 가장 좁을 때의 칸 수 | `{:8}` |
+| `.정밀도` | 실수는 소수 자릿수, 글은 최대 길이 | `{:.2f}` |
+| 종류 | `d` `x` `o` `b` 정수, `f` `e` `g` 실수, `c` 글자, `s` 글 | `{:x}` |
+
+```cpp
+#include <print>
+
+int main()
+{
+    std::println("[{:6}] [{:<6}] [{:^6}] [{:*^6}]", 42, 42, 42, 42);
+    std::println("[{:6}] [{:>6}] [{:.3}]", "ab", "ab", "abcdef");
+    std::println("{0:d} {0:x} {0:#x} {0:o} {0:b} {0:c}", 65);
+    std::println("{:08.3f} {:#010x} {:>+8}", 3.14159, 255, 42);
+    std::println("{:10.3e}|{:<10.2f}|{:+.1f}", 12345.678, 2.5, 2.5);
+    std::println("{} {} {}", 1.0, 1e21, 0.1 + 0.2);
+    std::println("{} {:d}", true, true);
+    std::println("{1} {0} {1}, 중괄호 자체는 {{}}", "a", "b");
+
+    int width = 8;
+    int precision = 2;
+    std::println("[{:{}.{}f}]", 3.14159, width, precision);    // 폭도 인자로
+    std::println("[{:6}] [{:6}]", "한글", "ab");
+}
+```
+
+```text
+[    42] [42    ] [  42  ] [**42**]
+[ab    ] [    ab] [abc]
+65 41 0x41 101 1000001 A
+0003.142 0x000000ff      +42
+ 1.235e+04|2.50      |+2.5
+1 1e+21 0.30000000000000004
+true 1
+b a b, 중괄호 자체는 {}
+[    3.14]
+[한글  ] [ab    ]
+```
+
+- 정렬을 적지 않으면 숫자는 오른쪽, 글은 왼쪽에 붙습니다.
+- 실수에 종류를 적지 않으면 [`to_chars`](#/read/cpp-stl/str-convert)처럼 "다시 읽었을 때 같은 값이 되는 가장 짧은 글"이 나옵니다. `0.1 + 0.2`가 0.3이 아닌 것이 그대로 보입니다.
+- 폭은 글자 수가 아니라 **화면의 칸 수**입니다. 한글은 한 글자가 두 칸이어서 `"한글"`에는 공백이 둘만 붙습니다. 표를 찍을 때 줄이 맞습니다.
+
+## 화면이 아닌 곳으로
+
+| 함수 | 결과가 가는 곳 |
+| --- | --- |
+| `std::format(…)` | 새 `std::string` |
+| `std::format_to(반복자, …)` | 반복자가 가리키는 곳. 길이 제한 없음 |
+| `std::format_to_n(반복자, n, …)` | 최대 n글자까지만 |
+| `std::formatted_size(…)` | 쓰지 않고 길이만 센다 |
+| `std::print(파일, …)` | `stderr` 같은 `FILE*`나 `std::ostream` |
+
+```cpp
+#include <format>
+#include <iterator>
+#include <print>
+#include <string>
+
+int main()
+{
+    std::string date = std::format("{}-{:02}-{:02}", 2026, 3, 7);
+    std::println("{} ({}글자)", date, date.size());
+
+    std::string line = "values:";               // 있던 문자열 끝에 이어 쓴다
+    for (double v : {23.456, 41.0})
+        std::format_to(std::back_inserter(line), " {:.1f}", v);
+    std::println("{}", line);
+
+    char buffer[16];                            // 힙을 쓰지 않는 고정 버퍼
+    auto result = std::format_to_n(buffer, sizeof buffer - 1,
+                                   "temp={:.1f}C humid={}%", 23.456, 41);
+    *result.out = '\0';
+    std::println("\"{}\" (다 쓰려면 {}글자)", buffer, result.size);
+}
+```
+
+```text
+2026-03-07 (10글자)
+values: 23.5 41.0
+"temp=23.5C humi" (다 쓰려면 20글자)
+```
+
+`std::format_to_n`은 넘치는 만큼을 버리고, 원래 필요했던 길이를 `size`로 알려 줍니다. 끝에 `\0`을 붙이지 않으므로 C 함수에 넘길 것이면 한 칸을 남기고 직접 붙입니다. 힙을 쓸 수 없는 코드에서 `snprintf`가 하던 일을 타입 검사와 함께 하는 방법입니다.
+
+## 컴파일할 때 검사된다
+
+`printf("%d", "text")`는 경고에 그치고 실행하면 쓰레기를 찍습니다. `std::format`의 서식 문자열은 컴파일러가 읽습니다.
+
+```cpp nocheck
+std::println("{:d}", "text");       // 글을 정수 서식으로
+```
+
+```text
+error: call to consteval function
+  'std::basic_format_string<char, const char (&)[5]>("{:d}")'
+  is not a constant expression
+```
+
+오류 문장은 길지만 뜻은 "서식 문자열을 컴파일 시간에 확인하다가 실패했다"입니다. 인자 개수가 모자라도 같은 오류가 납니다.
+
+그 대신 서식 문자열은 컴파일할 때 알려진 값이어야 합니다. 설정 파일이나 번역문에서 읽은 서식은 `std::vformat`으로 넘기고, 이때는 틀리면 실행 중에 예외가 납니다.
+
+```cpp
+#include <format>
+#include <print>
+#include <string>
+
+int main()
+{
+    std::string pattern = "{} + {} = {}";       // 실행 중에 정해진 서식
+    int a = 1;
+    int b = 2;
+    int sum = a + b;
+    std::println("{}", std::vformat(pattern, std::make_format_args(a, b, sum)));
+
+    try {
+        std::println("{}", std::vformat("{:d}", std::make_format_args(pattern)));
+    } catch (const std::format_error& e) {
+        std::println("format_error: {}", e.what());
+    }
+}
+```
+
+```text
+1 + 2 = 3
+format_error: format error: failed to parse format-spec
+```
+
+## 나만의 서식 글자: parse
+
+`std::formatter<std::string>`을 물려받으면 폭과 정렬을 그대로 얻는다는 것까지 보았습니다. `{:l}`처럼 내 타입만의 서식 글자를 받으려면 `parse`를 직접 씁니다.
+
+```cpp
+#include <format>
+#include <print>
+
+struct Pin {
+    int number;
+    bool high;
+};
+
+template <>
+struct std::formatter<Pin> {
+    char mode = 's';    // s: 짧게(기본), l: 길게
+
+    // "{:l}" 이면 콜론 뒤의 "l}" 을 받는다. 읽은 곳의 다음('}' 의 자리)을 돌려준다
+    constexpr auto parse(std::format_parse_context& ctx)
+    {
+        auto it = ctx.begin();
+        if (it != ctx.end() && (*it == 's' || *it == 'l'))
+            mode = *it++;
+        if (it != ctx.end() && *it != '}')
+            throw std::format_error("Pin 서식은 s 또는 l");
+        return it;
+    }
+
+    auto format(const Pin& p, std::format_context& ctx) const
+    {
+        if (mode == 'l')
+            return std::format_to(ctx.out(), "GPIO{} is {}", p.number,
+                                  p.high ? "HIGH" : "LOW");
+        return std::format_to(ctx.out(), "GPIO{}={}", p.number, p.high ? "H" : "L");
+    }
+};
+
+int main()
+{
+    Pin led{17, true};
+    std::println("{}", led);
+    std::println("{:s}", led);
+    std::println("{:l}", led);
+}
+```
+
+```text
+GPIO17=H
+GPIO17=H
+GPIO17 is HIGH
+```
+
+`parse`는 서식을 읽어 멤버에 적어 두고, `format`은 그 멤버를 보고 찍습니다. `parse`가 `constexpr`이므로 `std::println("{:z}", led)`는 실행 전에 걸립니다. 컴파일러가 `throw`가 있는 줄을 짚어 줍니다.
+
+```text
+error: expression '<throw-expression>' is not a constant expression
+   20 |             throw std::format_error("Pin 서식은 s 또는 l");
+```
+
+폭과 정렬까지 직접 받으려면 `parse`에서 숫자와 `<`, `>`도 읽어야 합니다. 그럴 바에는 물려받는 방법과 섞어, 내 글자만 먼저 읽고 나머지를 `std::formatter<std::string>::parse`에 넘기는 편이 짧습니다.
+
+## 컨테이너를 통째로
+
+C++23은 컨테이너도 `{}`에 넣게 했습니다.
+
+```cpp libcxx
+#include <map>
+#include <print>
+#include <string>
+#include <vector>
+
+int main()
+{
+    std::vector<int> pins = {17, 27, 22};
+    std::map<std::string, int> levels = {{"led", 1}, {"button", 0}};
+    std::println("{}", pins);
+    std::println("{}", levels);
+    std::println("{::#x}", pins);       // 둘째 콜론 뒤는 원소 하나하나의 서식
+}
+```
+
+```text
+[17, 27, 22]
+{"button": 0, "led": 1}
+[0x11, 0x1b, 0x16]
+```
+
+<Note kind="warn">
+이 기능은 GCC 14의 표준 라이브러리에 아직 없습니다. GCC 14에서는 `std::formatter must be specialized for each type being formatted`라는 오류가 나고, GCC 15부터 됩니다. 위 출력은 Clang 20과 libc++로 얻었습니다. 이 책의 다른 예제가 컨테이너를 루프로 찍는 까닭이 이것입니다.
+</Note>
+
+## 정리
+
+- 서식은 `채움·정렬, 부호, #, 0, 폭, .정밀도, 종류` 순서다. 폭은 화면의 칸 수로 센다
+- 힙 없이 쓰려면 `std::format_to_n`, 실행 중에 정해지는 서식은 `std::vformat`
+- 내 타입의 서식 글자는 `formatter`의 `parse`에서 읽는다. `constexpr`이라 틀린 서식은 컴파일 오류가 된다

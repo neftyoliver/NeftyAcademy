@@ -1,0 +1,212 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '어댑터를 엮은 함수, 파이프에 끼우는 나만의 어댑터, 코루틴 제너레이터, view_interface';
+export const terms = [
+  'view_interface', 'range_adaptor_closure', 'ranges::view_interface',
+  'ranges::range_adaptor_closure',
+];
+
+표준의 뷰로 모자랄 때 나만의 것을 만드는 길이 넷 있습니다. 쉬운 것부터 적으면, 있는 어댑터를 엮은 함수, 파이프에 끼울 수 있는 어댑터, 코루틴 제너레이터, 뷰 클래스입니다. 대부분의 일은 앞의 셋에서 끝납니다.
+
+## 어댑터를 엮은 함수
+
+[앞에서](#/read/cpp-stl/rng-pipe) 어댑터끼리 `|`로 이어 변수에 담았습니다. 인자가 필요하면 함수로 만듭니다.
+
+```cpp
+#include <print>
+#include <ranges>
+#include <vector>
+
+// 범위를 벗어난 값을 빼고 배율을 곱하는 어댑터를 만들어 준다
+auto scaled_within(int low, int high, double scale)
+{
+    return std::views::filter([=](int raw) { return raw >= low && raw <= high; })
+         | std::views::transform([=](int raw) { return raw * scale; });
+}
+
+int main()
+{
+    const std::vector<int> raw = {-5, 100, 2048, 9999, 4095};
+    for (double volts : raw | scaled_within(0, 4095, 3.3 / 4095))
+        std::print("{:.2f} ", volts);
+    std::println("");
+}
+```
+
+```text
+0.08 1.65 3.30
+```
+
+반환 타입은 `auto`로 둡니다. 어댑터의 실제 타입은 길고 쓸 일이 없습니다. 람다는 값을 **복사해** 잡았습니다(`[=]`). 참조로 잡으면 함수가 끝난 뒤 죽은 인자를 가리킵니다.
+
+## 파이프에 끼우는 나만의 어댑터
+
+`raw | 내것`처럼 쓸 수 있는 어댑터를 타입으로 만들려면 C++23의 `std::ranges::range_adaptor_closure`를 물려받습니다.
+
+```cpp
+#include <print>
+#include <ranges>
+#include <utility>
+#include <vector>
+
+// 이웃한 두 값의 평균을 내주는 어댑터
+struct smoothed_fn : std::ranges::range_adaptor_closure<smoothed_fn> {
+    template <std::ranges::viewable_range Range>
+    auto operator()(Range&& range) const
+    {
+        return std::forward<Range>(range)
+             | std::views::adjacent<2>
+             | std::views::transform([](const auto& pair) {
+                   const auto& [a, b] = pair;
+                   return (a + b) / 2.0;
+               });
+    }
+};
+inline constexpr smoothed_fn smoothed;
+
+int main()
+{
+    const std::vector<int> samples = {10, 20, 40, 30};
+    for (double s : samples | smoothed)
+        std::print("{} ", s);
+    std::println("");
+
+    for (double s : samples | std::views::reverse | smoothed | std::views::take(2))
+        std::print("{} ", s);
+    std::println("");
+}
+```
+
+```text
+15 30 35
+35 30
+```
+
+물려받은 기반 클래스가 `|` 연산자를 대 줍니다. 내가 쓸 것은 "레인지를 받아 뷰를 돌려주는 `operator()`" 하나입니다. 다른 어댑터의 앞에도 뒤에도 끼울 수 있습니다.
+
+## 제너레이터
+
+차례로 값을 **만들어 내는** 일은 코루틴으로 쓰는 것이 가장 짧습니다. C++23의 `std::generator<T>`를 반환 타입으로 적고, 내줄 값마다 `co_yield`를 씁니다. 함수는 그 자리에서 멈췄다가, 다음 값을 청할 때 이어서 돕니다.
+
+```cpp
+#include <generator>
+#include <print>
+#include <ranges>
+#include <string_view>
+#include <utility>
+
+std::generator<int> fibonacci()
+{
+    int a = 0;
+    int b = 1;
+    while (true) {              // 끝이 없어도 된다. 청한 만큼만 돈다
+        co_yield a;
+        a = std::exchange(b, a + b);
+    }
+}
+
+// 글에서 한 줄씩 내준다
+std::generator<std::string_view> lines(std::string_view text)
+{
+    while (!text.empty()) {
+        const auto end = text.find('\n');
+        co_yield text.substr(0, end);
+        if (end == std::string_view::npos)
+            break;
+        text.remove_prefix(end + 1);
+    }
+}
+
+int main()
+{
+    for (int n : fibonacci() | std::views::take(10))
+        std::print("{} ", n);
+    std::println("");
+
+    for (std::string_view line : lines("temp=23.5\nhumid=41\npress=1013"))
+        std::print("[{}] ", line);
+    std::println("");
+}
+```
+
+```text
+0 1 1 2 3 5 8 13 21 34
+[temp=23.5] [humid=41] [press=1013]
+```
+
+[반복자 클래스](#/read/cpp-stl/it-own)로 쓰면 "지금 어디까지 왔는가"를 멤버 변수에 적고 `++` 때마다 꺼내 써야 합니다. 제너레이터에서는 그 상태가 그냥 지역 변수이고, 흐름은 평범한 `while`입니다. 트리를 따라 내려가며 값을 내주는 일처럼 상태가 복잡할수록 차이가 큽니다.
+
+치르는 값도 있습니다.
+
+| | 제너레이터 | 뷰를 엮은 것 |
+| --- | --- | --- |
+| 범주 | 입력. 한 번만 지나간다 | 밑의 레인지를 따른다 |
+| 복사 | 안 된다. 옮기기만 | 된다 |
+| 메모리 | 멈춘 자리를 담을 프레임을 대개 힙에 잡는다 | 없다 |
+| 원소 하나에 | 함수를 깨우고 재우는 값 | 인라인되면 거의 없다 |
+
+한 번 훑고 끝나는 일, 파일이나 장치에서 읽어 내주는 일에는 맞고, 빠른 루프 안에서 수백만 번 도는 일에는 맞지 않습니다. 코루틴이 속에서 어떻게 도는지는 고급 책의 [「제너레이터」](#/read/cpp-advanced/co-generator)에서 다룹니다.
+
+<Note kind="warn">
+제너레이터의 인자를 참조나 뷰로 받을 때는 수명을 봅니다. `lines(std::string("a\nb"))`처럼 임시 문자열을 넘기면, 임시 객체는 그 줄에서 사라지고 제너레이터는 죽은 글자를 가리킨 채 남습니다. 함수는 첫 `co_yield`에서 멈춰 있을 뿐 끝난 것이 아니기 때문입니다. 넘긴 것이 제너레이터보다 오래 살게 하거나, 인자를 값(`std::string`)으로 받습니다.
+</Note>
+
+## 뷰 클래스
+
+`begin()`과 `end()`를 가진 클래스에 `std::ranges::view_interface`를 물려받게 하면, 그 둘로 만들 수 있는 멤버를 채워 줍니다.
+
+```cpp
+#include <cstddef>
+#include <print>
+#include <ranges>
+
+// 포인터와 개수를 묶은 뷰. begin 과 end 만 쓴다
+class Samples : public std::ranges::view_interface<Samples> {
+public:
+    Samples(const int* first, std::size_t count)
+        : first_(first), last_(first + count)
+    {
+    }
+    const int* begin() const { return first_; }
+    const int* end() const { return last_; }
+
+private:
+    const int* first_;
+    const int* last_;
+};
+static_assert(std::ranges::view<Samples>);
+
+int main()
+{
+    const int buffer[] = {7, 8, 9};
+    const Samples samples(buffer, 3);
+    // 아래 넷은 view_interface 가 만들어 준 것이다
+    std::println("{} {} {} {}", samples.size(), samples.front(), samples[2],
+                 samples.empty());
+    for (int s : samples | std::views::reverse)
+        std::print("{} ", s);
+    std::println("");
+}
+```
+
+```text
+3 7 9 false
+9 8 7
+```
+
+이 예제는 `std::span`이 이미 하는 일이어서 쓸모는 없고, 틀만 보이려는 것입니다. 뷰 클래스를 직접 쓰는 것은 임의 접근이 되어야 하거나 크기를 O(1)로 알아야 하는 것처럼, 앞의 세 길로는 얻지 못하는 성질이 필요할 때입니다.
+
+## 고르기
+
+| 필요한 것 | 길 |
+| --- | --- |
+| 있는 단계를 묶어 이름을 붙인다 | 어댑터를 엮은 변수나 함수 |
+| `\|`로 끼울 수 있는 새 단계 | `range_adaptor_closure` |
+| 상태를 들고 값을 차례로 만들어 낸다 | `std::generator` |
+| 임의 접근, 크기, 여러 번 돌기 | 반복자를 갖춘 뷰 클래스 |
+
+## 정리
+
+- 대개는 있는 어댑터를 엮은 함수로 충분하다. 람다는 값을 복사해 잡는다
+- 값을 만들어 내는 일은 `std::generator`와 `co_yield`가 가장 짧다. 한 번만 지나가고 프레임 할당이 든다
+- 뷰 클래스는 `view_interface`를 물려받아 `begin`과 `end`만 쓴다. 정말 필요할 때만 만든다

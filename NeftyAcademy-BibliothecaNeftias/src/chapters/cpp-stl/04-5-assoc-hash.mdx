@@ -1,0 +1,218 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '해시를 주는 두 방법, 멤버를 섞는 법과 XOR의 함정, 문자열을 임시 객체 없이 찾기, 컴파일 시간 해시';
+export const terms = ['std::hash', 'hash_combine'];
+
+[`unordered_map`](#/read/cpp-stl/assoc-unordered)의 열쇠가 되려면 타입에 두 가지가 있어야 합니다. 같은지 견주는 `==`, 그리고 값을 `std::size_t` 하나로 바꾸는 **해시 함수**입니다. `int`, `std::string`, 포인터 같은 타입에는 표준이 만들어 둔 `std::hash`가 있고, 내 타입에는 직접 줍니다.
+
+## 해시를 주는 두 방법
+
+[「특수화와 부분 특수화」](#/read/cpp-syntax/tpl-special)에서 `std::hash<Pin>`을 특수화하는 길을 보았습니다. 컨테이너의 셋째 인자로 해시 타입을 따로 넘기는 길도 있습니다.
+
+| 방법 | 꼴 | 쓰는 때 |
+| --- | --- | --- |
+| `std::hash` 특수화 | `template <> struct std::hash<Point> { … };` | 그 타입의 해시가 하나로 정해져 있다 |
+| 해시 타입을 넘기기 | `std::unordered_set<Point, PointHash>` | 남의 타입이거나, 쓰는 곳마다 다르게 하고 싶다 |
+
+어느 쪽이든 지켜야 할 약속은 하나입니다. **`a == b`이면 해시도 같아야 합니다.** 거꾸로는 아니어도 됩니다. `==`가 견주는 멤버와 해시가 섞는 멤버가 어긋나면(예: `==`는 이름만 보는데 해시는 번호까지 섞는다) 넣은 것을 찾지 못하는 표가 됩니다.
+
+## 멤버를 섞는 법
+
+멤버가 여럿이면 각각의 해시를 하나로 합쳐야 합니다. 여기서 가장 흔한 실수가 **XOR로만 묶는 것**입니다.
+
+```cpp
+#include <algorithm>
+#include <cstddef>
+#include <functional>
+#include <print>
+#include <unordered_set>
+
+struct Point {
+    int x;
+    int y;
+    bool operator==(const Point&) const = default;
+};
+
+// 나쁜 예: 두 해시를 XOR 로만 묶는다
+struct XorHash {
+    std::size_t operator()(const Point& p) const
+    {
+        return std::hash<int>{}(p.x) ^ std::hash<int>{}(p.y);
+    }
+};
+
+// 값 하나를 씨앗에 섞어 넣는다 (Boost 의 hash_combine 과 같은 식)
+inline void hash_combine(std::size_t& seed, std::size_t value)
+{
+    seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+}
+
+struct MixHash {
+    std::size_t operator()(const Point& p) const
+    {
+        std::size_t seed = 0;
+        hash_combine(seed, std::hash<int>{}(p.x));
+        hash_combine(seed, std::hash<int>{}(p.y));
+        return seed;
+    }
+};
+
+template <typename Hash>
+void report(const char* name)
+{
+    std::unordered_set<Point, Hash> points;
+    for (int x = 0; x < 100; ++x)
+        for (int y = 0; y < 100; ++y)
+            points.insert({x, y});
+
+    std::size_t longest = 0;
+    std::size_t used = 0;
+    for (std::size_t b = 0; b < points.bucket_count(); ++b) {
+        longest = std::max(longest, points.bucket_size(b));
+        used += points.bucket_size(b) != 0;
+    }
+    std::println("{:5} 버킷 {} 가운데 {}개 사용, 가장 긴 사슬 {}", name,
+                 points.bucket_count(), used, longest);
+}
+
+int main()
+{
+    const bool same = XorHash{}({1, 2}) == XorHash{}({2, 1});
+    std::println("(1,2)와 (2,1)의 해시가 같은가: {}", same);
+    std::println("(7,7)의 해시: {}", XorHash{}({7, 7}));
+    report<XorHash>("XOR");
+    report<MixHash>("섞기");
+}
+```
+
+```text
+(1,2)와 (2,1)의 해시가 같은가: true
+(7,7)의 해시: 0
+XOR   버킷 10273 가운데 128개 사용, 가장 긴 사슬 100
+섞기  버킷 10273 가운데 6424개 사용, 가장 긴 사슬 4
+```
+
+점 1만 개를 넣었는데 XOR 쪽은 버킷 128개에만 몰렸고, 사슬 하나에 100개가 달렸습니다. XOR은 순서를 가리지 않고(`a ^ b == b ^ a`), 같은 값끼리는 0이 됩니다. 좌표처럼 값의 범위가 좁고 서로 바뀐 짝이 흔한 자료에서는 거의 쓸모가 없습니다.
+
+`hash_combine`은 앞의 결과를 비트 이동으로 흩뜨린 뒤 다음 값을 더합니다. 순서가 바뀌면 결과도 바뀝니다. 표준에는 이 함수가 아직 없어서 프로젝트마다 한 벌씩 들고 있습니다.
+
+<Note>
+GCC의 `std::hash<int>`는 값을 그대로 돌려줍니다. `std::hash<int>{}(42)`는 42입니다. 표준이 허락한 구현이고, 버킷 수가 소수여서 보통의 정수 열쇠에서는 잘 퍼집니다. 그러나 "해시는 비트를 골고루 섞어 준다"고 믿고 위 `XorHash`처럼 쓰면 그 믿음이 깨집니다.
+</Note>
+
+## 문자열을 임시 객체 없이 찾기
+
+`std::unordered_map<std::string, int>`에 `find("name")`을 부르면 임시 `std::string`이 만들어집니다. [`map`의 투명 비교](#/read/cpp-stl/assoc-compare)와 같은 문제이고, 고치는 법도 닮았습니다. 해시 표에서는 **해시와 비교 둘 다**에 표지가 있어야 합니다.
+
+```cpp
+#include <cstdlib>
+#include <functional>
+#include <new>
+#include <print>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+
+static int allocations = 0;
+void* operator new(std::size_t n)
+{
+    ++allocations;
+    if (void* p = std::malloc(n))
+        return p;
+    throw std::bad_alloc{};
+}
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+
+struct StringHash {
+    using is_transparent = void;        // 다른 타입으로 찾기를 켠다
+    std::size_t operator()(std::string_view text) const
+    {
+        return std::hash<std::string_view>{}(text);
+    }
+};
+
+template <typename Value>
+using StringMap =
+    std::unordered_map<std::string, Value, StringHash, std::equal_to<>>;
+
+int main()
+{
+    const char* name = "temperature_sensor_outdoor";
+    std::unordered_map<std::string, int> plain = {{name, 1}};
+    StringMap<int> transparent = {{name, 1}};
+    const std::string_view view = name;
+
+    allocations = 0;
+    const bool a = plain.contains(name);
+    std::println("기본: 찾음 {}, 할당 {}번", a, allocations);
+
+    allocations = 0;
+    const bool b = transparent.contains(name);
+    const bool c = transparent.contains(view);
+    std::println("투명: 찾음 {} {}, 할당 {}번", b, c, allocations);
+}
+```
+
+```text
+기본: 찾음 true, 할당 1번
+투명: 찾음 true true, 할당 0번
+```
+
+`StringHash`는 `std::string`, `std::string_view`, `const char*`를 모두 `std::string_view`로 받아 같은 해시를 냅니다. 표준은 내용이 같은 `std::string`과 `std::string_view`의 해시가 같도록 정해 두었으므로 약속이 지켜집니다. `StringMap` 같은 별칭을 프로젝트에 하나 두고 쓰면 됩니다.
+
+## 컴파일 시간 해시
+
+`std::hash`는 `constexpr`이 아닙니다. 컴파일할 때 문자열의 해시가 필요하면 직접 씁니다. FNV-1a가 짧아서 자주 쓰입니다.
+
+```cpp
+#include <cstdint>
+#include <print>
+#include <string_view>
+
+constexpr std::uint64_t fnv1a(std::string_view text)
+{
+    std::uint64_t hash = 0xcbf29ce484222325ULL;
+    for (unsigned char c : text) {
+        hash ^= c;
+        hash *= 0x100000001b3ULL;
+    }
+    return hash;
+}
+static_assert(fnv1a("a") == 0xaf63dc4c8601ec8cULL);    // 알려진 검사 값
+
+int run(std::string_view command)
+{
+    switch (fnv1a(command)) {       // 문자열로는 switch 를 못 하지만 해시로는 된다
+    case fnv1a("on"):
+        return 1;
+    case fnv1a("off"):
+        return 0;
+    case fnv1a("toggle"):
+        return 2;
+    default:
+        return -1;
+    }
+}
+
+int main()
+{
+    std::println("{} {} {} {}", run("on"), run("off"), run("toggle"), run("blink"));
+}
+```
+
+```text
+1 0 2 -1
+```
+
+`case`의 값은 컴파일할 때 계산됩니다. 두 `case`의 해시가 우연히 같으면 "`case` 값이 겹친다"는 컴파일 오류가 나므로 조용히 틀리지는 않습니다. 다만 **들어온 글**이 다른데 해시가 같은 경우는 걸러지지 않습니다. 명령어가 바깥에서 오고 틀린 명령을 받아들이면 안 되는 자리라면, `case` 안에서 문자열을 한 번 더 견줍니다.
+
+<Note kind="warn">
+`std::hash`의 결과를 파일에 쓰거나 다른 기기로 보내지 않습니다. 구현마다, 판마다, 32비트와 64비트에서 값이 다릅니다. 저장하거나 주고받을 해시는 FNV-1a나 CRC처럼 **식이 정해진** 것을 직접 구현해 씁니다.
+</Note>
+
+## 정리
+
+- 열쇠에는 `==`와 해시가 필요하다. 같은 값은 반드시 같은 해시를 내야 한다
+- 멤버의 해시를 XOR로만 묶지 않는다. 씨앗에 차례로 섞는 `hash_combine` 꼴을 쓴다
+- 문자열 열쇠는 `is_transparent`를 단 해시와 `std::equal_to<>`로 임시 객체 없이 찾는다

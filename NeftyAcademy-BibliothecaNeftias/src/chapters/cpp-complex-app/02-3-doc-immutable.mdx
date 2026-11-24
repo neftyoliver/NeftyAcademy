@@ -1,0 +1,163 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '고치면 새 판이 생기는 불변 문서, 길만 새로 만드는 구조 공유, 포인터로 견주기, 변경을 아는 세 가지 길';
+export const terms = ['didChange', 'history_t'];
+
+문서를 그 자리에서 고치는 모델은 세 가지를 따로 챙겨야 합니다. 뷰에게 무엇이 바뀌었는지 알려야 하고, 되돌릴 방법을 명령마다 마련해야 하고, 다른 스레드가 읽는 동안에는 잠가야 합니다. **불변 모델**은 문서를 고치지 않습니다. 고치려면 새 판을 만들고, 옛 판은 그대로 둡니다. 통째로 복사하는 것은 아니고, 바뀌지 않은 가지는 두 판이 함께 씁니다.
+
+```cpp
+// 불변 문서: 고치면 새 판이 생기고, 안 바뀐 가지는 옛 판과 함께 쓴다
+#include <format>
+#include <memory>
+#include <print>
+#include <span>
+#include <string>
+#include <thread>
+#include <vector>
+
+struct Node;
+using Ref = std::shared_ptr<const Node>;         // 한번 만들면 고치지 못한다
+struct Node {
+    std::string text;
+    std::vector<Ref> kids;
+};
+
+int made = 0;                                    // 지금까지 만든 노드 수
+Ref make(std::string text, std::vector<Ref> kids = {}) {
+    ++made;
+    return std::make_shared<const Node>(std::move(text), std::move(kids));
+}
+
+// path를 따라 내려가 그 노드의 글만 바꾼 새 뿌리를 돌려준다
+Ref with_text(const Ref& n, std::span<const int> path, std::string text) {
+    if (path.empty()) return make(std::move(text), n->kids);
+    auto kids = n->kids;                         // 포인터만 복사한다
+    kids[path[0]] = with_text(kids[path[0]], path.subspan(1), std::move(text));
+    return make(n->text, std::move(kids));
+}
+
+int seen = 0;                                    // 견주면서 들여다본 노드 수
+void diff(const Ref& a, const Ref& b, std::string at,
+          std::vector<std::string>& out) {
+    ++seen;
+    if (a == b) return;                          // 같은 노드면 그 아래는 안 본다
+    if (a->text != b->text) out.push_back(at + ": " + a->text + " -> " + b->text);
+    for (std::size_t i = 0; i < a->kids.size() && i < b->kids.size(); ++i)
+        diff(a->kids[i], b->kids[i], at + "/" + std::to_string(i), out);
+}
+
+std::size_t letters(const Ref& n) {              // 끝까지 읽는 일(저장이라 치자)
+    std::size_t sum = n->text.size();
+    for (const Ref& kid : n->kids) sum += letters(kid);
+    return sum;
+}
+
+int main() {
+    std::vector<Ref> chapters;
+    for (int c = 0; c < 10; ++c) {
+        std::vector<Ref> paras;
+        for (int p = 0; p < 100; ++p)
+            paras.push_back(make(std::format("문단 {}-{}", c, p)));
+        chapters.push_back(make(std::format("{}장", c), std::move(paras)));
+    }
+    std::vector<Ref> history{make("책", std::move(chapters))};  // 판을 쌓는다
+    std::println("처음: 노드 {}개", made);
+
+    int before = made;
+    const int where[] = {3, 42};
+    history.push_back(with_text(history.back(), where, "고친 문단"));
+    std::println("3장의 42번 문단을 고침: 새로 만든 노드 {}개", made - before);
+    std::println("  옛 판: {}", history[0]->kids[3]->kids[42]->text);
+    std::println("  새 판: {}", history[1]->kids[3]->kids[42]->text);
+    std::println("  0장은 두 판이 같은 노드: {}",
+                 history[0]->kids[0] == history[1]->kids[0]);
+
+    std::vector<std::string> changes;
+    diff(history[0], history[1], "", changes);
+    std::println("두 판을 견줌: 본 노드 {}개, 바뀐 곳 {}곳", seen, changes.size());
+    std::println("  {}", changes[0]);
+
+    Ref saved = history.back();                  // 저장한 판을 기억해 둔다
+    const int title[] = {0};
+    history.push_back(with_text(history.back(), title, "머리말"));
+    std::println("또 고침: 저장 안 한 변경 {}", history.back() != saved);
+    history.pop_back();                          // 실행 취소
+    std::println("되돌림: 저장 안 한 변경 {}", history.back() != saved);
+
+    std::size_t wrote = 0;
+    before = made;
+    {
+        std::jthread saver([snap = saved, &wrote] { wrote = letters(snap); });
+        for (int i = 0; i < 100; ++i) {          // 저장하는 동안에도 계속 고친다
+            const int at[] = {i % 10, i};
+            history.push_back(with_text(history.back(), at, "x"));
+        }
+    }
+    std::println("저장하는 동안 100번 고침: 새로 만든 노드 {}개", made - before);
+    std::println("저장한 글자 수 {}, 그 판을 지금 다시 세면 {}", wrote,
+                 letters(saved));
+    std::println("쌓인 판 {}개, 맨 처음 판의 그 문단: {}", history.size(),
+                 history[0]->kids[3]->kids[42]->text);
+}
+```
+
+```text
+처음: 노드 1011개
+3장의 42번 문단을 고침: 새로 만든 노드 3개
+  옛 판: 문단 3-42
+  새 판: 고친 문단
+  0장은 두 판이 같은 노드: true
+두 판을 견줌: 본 노드 111개, 바뀐 곳 1곳
+  /3/42: 문단 3-42 -> 고친 문단
+또 고침: 저장 안 한 변경 true
+되돌림: 저장 안 한 변경 false
+저장하는 동안 100번 고침: 새로 만든 노드 300개
+저장한 글자 수 10945, 그 판을 지금 다시 세면 10945
+쌓인 판 102개, 맨 처음 판의 그 문단: 문단 3-42
+```
+
+- **길만 새로 만든다**: 고친 노드와 거기서 뿌리까지의 조상만 새로 만들고 나머지는 포인터로 가리킵니다. 노드 1011개 가운데 3개였습니다. 편집 하나의 값은 문서의 크기가 아니라 트리의 깊이를 따릅니다
+- **옛 판은 그대로다**: 옛 판을 든 쪽은 아무 일도 겪지 않습니다. 실행 취소는 판의 목록에서 하나 앞을 고르는 일이고, 역연산을 짤 필요가 없습니다([「실행 취소 스택」](#/read/cpp-complex-app/cmd-stack))
+- **견줄 때는 포인터부터**: 두 판의 노드가 같은 포인터이면 그 아래는 볼 것도 없습니다. 그래서 1011개 가운데 111개만 보고 바뀐 한 곳을 찾았습니다
+- **저장했는지는 포인터 한 번**: 저장한 판과 지금 판이 같은지만 보면 됩니다. 고쳤다가 되돌리면 저절로 저장된 상태로 돌아옵니다
+- **읽는 쪽에는 잠금이 없다**: 저장 스레드가 든 판은 누구도 고치지 못합니다. 그동안 100번을 고쳤어도 저장한 글자 수는 그 판의 것과 같습니다([「자동 저장과 복구」](#/read/cpp-complex-app/file-autosave))
+
+## 변경을 아는 세 가지 길
+
+| 길 | 일하는 쪽 | 좋은 점 | 조심할 점 |
+| --- | --- | --- | --- |
+| 알림 | 고치는 코드 | 바뀐 곳을 바로 안다 | 하나라도 빠뜨리면 뷰가 낡는다 |
+| 버전 번호와 변화 목록 | 고치는 코드 | 다른 프로세스로 보낼 수 있다 | 차례대로 빠짐없이 적용해야 한다 |
+| 판 견주기 | 읽는 코드 | 고치는 코드가 할 일이 없다 | 넣고 뺀 것을 짝짓기 어렵다 |
+
+알림은 [「문서, 명령, 뷰의 층」](#/read/cpp-complex-app/ana-layers)에서 본 방식입니다. 두 번째 길의 본보기는 편집기와 언어 서버 사이의 약속인 LSP입니다. 편집기는 `textDocument/didChange`로 바뀐 범위와 새 글만 보내고, 서버는 받은 차례대로 적용해 자기 사본을 맞춥니다. 문서의 버전 번호는 실행 취소와 다시 실행에도 올라가므로, 번호가 같으면 같은 내용이라고 믿을 수 있습니다. 세 번째 길은 위 예제의 `diff`이고, 불변 모델에서만 값이 쌉니다.
+
+## 실제 프로그램
+
+- **immer**: C++로 쓴 불변 자료 구조 라이브러리입니다. 값으로 넘겨도 데이터를 복사하지 않고, 바뀌지 않는 데이터여서 여러 곳에서 동시에 읽어도 안전하며, 새 값과 옛 값을 싸게 견줄 수 있다고 소개합니다
+- **Sean Parent의 예제**: Adobe의 Sean Parent가 발표에서 쓴 코드는 객체가 `shared_ptr<const ...>`로 값을 들고, 문서는 객체의 벡터, 기록인 `history_t`는 문서의 벡터입니다. 커밋은 맨 뒤 문서를 하나 더 쌓는 일이고 실행 취소는 맨 뒤를 빼는 일입니다
+- **Krita**: 2019년에 벡터 레이어를 쓸 때 복사하도록 바꾸는 작업을 했습니다. 명령마다 되돌릴 정보를 간직하는 대신 레이어를 다른 판으로 바꿔 끼워 실행 취소를 하려는 것이었고, 문서의 얕은 사본을 남겨 두었다가 돌아가는 스냅숏 도커도 함께 만들었습니다
+
+## 치르는 값
+
+- **편집마다 할당**: 깊이만큼 노드를 새로 만듭니다. 그래서 가지가 많고 얕은 트리가 유리하고, 한 명령이 여러 곳을 고칠 때는 다 고친 뒤에 판을 한 번만 쌓습니다([「트랜잭션」](#/read/cpp-complex-app/cmd-transaction))
+- **주소가 이름이 못 된다**: 같은 문단도 판마다 다른 노드입니다. 선택이나 책갈피는 포인터가 아니라 경로나 ID로 가리켜야 합니다([「선택 모델」](#/read/cpp-complex-app/doc-selection))
+- **기록이 메모리를 붙든다**: 어느 판이든 가리키는 동안에는 그 판의 노드가 풀리지 않습니다. 기록의 길이를 정해 두어야 합니다
+- **큰 덩어리는 나눠야 한다**: 노드 하나에 긴 글이나 픽셀 전부를 담으면 고칠 때마다 통째로 복사됩니다. 앞의 두 쪽에서 본 조각과 타일이 그 덩어리를 나누는 방법입니다
+
+<Note>
+예제의 `diff`는 자식의 수가 같은 판끼리만 옳게 견줍니다. 가운데에 문단을 하나 넣으면 그 뒤의 문단이 모두 한 칸씩 밀려, 자리로 짝지으면 전부 바뀐 것으로 보입니다. 그래서 실제 모델은 노드마다 바뀌지 않는 ID를 주고 ID로 짝을 짓습니다. 여럿이 함께 고칠 때도 이 ID가 바탕이 됩니다([「OT와 CRDT」](#/read/cpp-complex-app/col-ot-crdt)).
+</Note>
+
+## 정리
+
+- 불변 모델은 고칠 때 고친 노드에서 뿌리까지만 새로 만들고 나머지를 함께 써서, 판 하나를 깊이만큼의 값으로 얻는다
+- 옛 판이 그대로이므로 실행 취소, 저장 여부, 다른 스레드의 읽기가 판의 포인터를 다루는 일로 바뀐다
+- 변경은 알림, 버전 번호와 변화 목록, 판 견주기로 알 수 있고, 판을 견줄 때는 같은 포인터인 가지를 건너뛴다
+
+## 참고 문서
+
+- [immer(C++로 쓴 불변 자료 구조 라이브러리, 쓰는 까닭)](https://github.com/arximboldi/immer)
+- [Sean Parent: value-semantics.cpp(문서의 벡터로 만든 기록과 실행 취소)](https://sean-parent.stlab.cc/presentations/2013-03-06-value_semantics/value-semantics.cpp)
+- [KDE 커뮤니티 위키: GSoC 2019 Better undo/redo for Krita(스냅숏 도커, 쓸 때 복사하는 벡터 레이어)](https://community.kde.org/GSoC/2019/StatusReports/tusooa)
+- [Language Server Protocol 3.18 명세(didChange 알림과 문서의 버전 번호)](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/)

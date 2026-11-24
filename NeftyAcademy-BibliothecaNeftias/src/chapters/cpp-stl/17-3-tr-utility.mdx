@@ -1,0 +1,241 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '값 없이 타입을 묻는 declval, 값의 종류를 지키는 forward_like, 묶음에 번호를 붙이는 index_sequence';
+export const terms = [
+  'std::declval', '~declval', 'std::forward', '~forward', 'integer_sequence', 'index_sequence',
+  'make_index_sequence', 'index_sequence_for', 'std::as_const', 'std::to_underlying',
+  'std::unreachable', 'std::exchange', 'std::cmp_less', 'cmp_less', 'std::in_range',
+  'std::forward_like', 'std::move_if_noexcept',
+];
+
+`<utility>`에는 `std::pair`와 `std::move` 말고도, 템플릿 코드를 쓸 때 연장 노릇을 하는 작은 것들이 있습니다. 혼자서는 하는 일이 없어 보이지만 [`std::apply`](#/read/cpp-stl/voc-pair)나 `std::make_unique` 같은 것이 이들로 만들어져 있습니다.
+
+## declval
+
+"`T`의 `measure()`가 돌려주는 타입"을 알고 싶은데 `T`를 만들 방법이 없을 때가 있습니다. 기본 생성자가 없거나, 생성자가 무엇을 받는지 모릅니다. `std::declval<T>()`는 **만들지 않고 "`T` 타입의 값이 있다 치고"** 식을 쓸 수 있게 해 줍니다.
+
+```cpp
+#include <print>
+#include <type_traits>
+#include <utility>
+
+struct Probe {
+    explicit Probe(int pin);            // 기본 생성자가 없다
+    double measure() const;
+};
+
+// Probe{} 라고 쓸 수 없어도 타입은 물을 수 있다
+template <typename T>
+using measure_result_t = decltype(std::declval<const T&>().measure());
+
+// noexcept 인지도 같은 방법으로 묻는다
+template <typename T>
+inline constexpr bool measures_without_throwing =
+    noexcept(std::declval<const T&>().measure());
+
+int main()
+{
+    std::println("{}", std::is_same_v<measure_result_t<Probe>, double>);
+    std::println("{}", measures_without_throwing<Probe>);
+}
+```
+
+```text
+true
+false
+```
+
+`Probe`의 함수들은 **선언만 있고 정의가 없는데도** 컴파일되고 링크됩니다. `decltype`과 `noexcept` 안의 식은 계산되지 않고 타입만 따지기 때문입니다. `declval`은 이런 자리(`decltype`, `sizeof`, `noexcept`, `requires`)에서만 쓸 수 있고, 실제로 실행되는 코드에서 부르면 컴파일 오류입니다. `std::declval<const T&>()`처럼 참조와 `const`를 붙여 "어떤 종류의 값으로 불렀을 때"인지를 정합니다.
+
+C++20부터는 같은 물음의 대부분을 [`requires` 식](#/read/cpp-syntax/con-requires)의 매개변수로 더 쉽게 씁니다. `requires(const T& t) { t.measure(); }`의 `t`가 `declval`이 하던 일을 합니다. `declval`이 남는 자리는 위처럼 **타입을 꺼내야** 할 때입니다.
+
+## forward와 그 친척
+
+| 함수 | 하는 일 |
+| --- | --- |
+| `std::move(x)` | `x`를 [우측값으로](#/read/cpp-syntax/sm-rvalue) 바꾼다. 옮기는 것이 아니라 "옮겨도 된다"는 표시다 |
+| `std::forward<T>(x)` | 받은 그대로 넘긴다. 좌측값으로 왔으면 좌측값, 우측값으로 왔으면 우측값 |
+| `std::forward_like<T>(x)` (C++23) | `x`를 **`T`의 종류에 맞춰** 넘긴다. `T`가 우측값이면 `x`도 우측값으로 |
+| `std::as_const(x)` | `x`를 `const` 참조로 본다. `const` 쪽 오버로드를 고르게 할 때 |
+| `std::move_if_noexcept(x)` | 이동이 `noexcept`일 때만 우측값으로 바꾼다. [`vector`가 자랄 때](#/read/cpp-syntax/exc-noexcept) 쓰는 것 |
+
+`std::forward`는 [「인자 추론과 CTAD」](#/read/cpp-syntax/tpl-deduction)에서 봤습니다. `forward_like`는 **멤버를 내줄 때** 씁니다. 객체가 임시이면 멤버도 옮겨 가게 하는 것입니다.
+
+```cpp
+#include <print>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+struct Buffer {
+    std::vector<int> data;
+
+    // 한 벌의 함수로 좌측값, const, 우측값 객체를 모두 받는다 (C++23)
+    template <typename Self>
+    auto&& items(this Self&& self)
+    {
+        return std::forward_like<Self>(self.data);
+    }
+};
+
+int main()
+{
+    Buffer buffer{{1, 2, 3}};
+    const Buffer fixed{{4, 5}};
+
+    using FromLvalue = decltype(buffer.items());
+    using FromConst = decltype(fixed.items());
+    using FromRvalue = decltype(std::move(buffer).items());
+    std::println("{} {} {}", std::is_lvalue_reference_v<FromLvalue>,
+                 std::is_const_v<std::remove_reference_t<FromConst>>,
+                 std::is_rvalue_reference_v<FromRvalue>);
+
+    // 임시 객체에서 꺼내면 복사 없이 옮겨 온다
+    const std::vector<int> taken = Buffer{{7, 8, 9}}.items();
+    std::println("{}", taken.size());
+
+    std::string name = "sensor";
+    const std::string& view = std::as_const(name);
+    std::println("{}", std::is_const_v<std::remove_reference_t<decltype(view)>>);
+}
+```
+
+```text
+true true true
+3
+true
+```
+
+`this Self&& self`는 C++23의 [명시적 객체 매개변수](#/read/cpp-syntax/ver-23)입니다. 예전에는 `items() &`, `items() const&`, `items() &&` 세 벌을 따로 써야 했습니다.
+
+## index_sequence
+
+`std::index_sequence<0, 1, 2>`는 **정수 묶음을 타입에 실은** 빈 클래스입니다. 객체에는 아무것도 없고, 쓸모는 템플릿 인자로 받아 `0, 1, 2`를 [묶음](#/read/cpp-syntax/tpl-variadic)으로 꺼내는 데 있습니다. 튜플의 `std::get<I>`처럼 **번호가 컴파일할 때 정해져야** 하는 것을 묶음으로 펼칠 때 필요합니다.
+
+| 이름 | 만드는 것 |
+| --- | --- |
+| `std::index_sequence<0, 1, 2>` | 그 묶음 그대로 |
+| `std::make_index_sequence<N>` | `0`부터 `N-1`까지 |
+| `std::index_sequence_for<Ts...>` | `Ts`의 개수만큼. `make_index_sequence<sizeof...(Ts)>` |
+
+```cpp
+#include <array>
+#include <cstddef>
+#include <functional>
+#include <print>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+
+// 1. 튜플을 함수의 인자로 펼친다. std::apply 가 하는 일
+template <typename F, typename Tuple, std::size_t... I>
+decltype(auto) apply_impl(F&& f, Tuple&& t, std::index_sequence<I...>)
+{
+    return std::invoke(std::forward<F>(f), std::get<I>(std::forward<Tuple>(t))...);
+}
+
+template <typename F, typename Tuple>
+decltype(auto) my_apply(F&& f, Tuple&& t)
+{
+    const auto size = std::tuple_size_v<std::remove_cvref_t<Tuple>>;
+    return apply_impl(std::forward<F>(f), std::forward<Tuple>(t),
+                      std::make_index_sequence<size>{});
+}
+
+// 2. 원소마다 번호와 함께
+template <typename Tuple, std::size_t... I>
+void print_fields_impl(const Tuple& t, std::index_sequence<I...>)
+{
+    (std::println("  {}: {}", I, std::get<I>(t)), ...);
+}
+
+template <typename... Ts>
+void print_fields(const std::tuple<Ts...>& t)
+{
+    print_fields_impl(t, std::index_sequence_for<Ts...>{});
+}
+
+// 3. 컴파일할 때 표를 채운다
+template <std::size_t... I>
+constexpr std::array<int, sizeof...(I)> squares_impl(std::index_sequence<I...>)
+{
+    return {static_cast<int>(I * I)...};
+}
+
+template <std::size_t N>
+constexpr auto squares = squares_impl(std::make_index_sequence<N>{});
+
+double volume(double w, double h, double d)
+{
+    return w * h * d;
+}
+
+int main()
+{
+    std::println("{}", my_apply(volume, std::tuple{2.0, 3.0, 4.0}));
+    print_fields(std::tuple{"temp", 21.5, 3});
+    constexpr auto table = squares<6>;
+    std::println("{} {} {}", table[2], table[5], table.size());
+}
+```
+
+```text
+24
+  0: temp
+  1: 21.5
+  2: 3
+4 25 6
+```
+
+꼴은 늘 같습니다. 바깥 함수가 `make_index_sequence`로 묶음을 만들어 안쪽 함수에 넘기고, 안쪽 함수가 `std::size_t... I`로 받아 `std::get<I>(t)...`처럼 펼칩니다. 함수가 둘로 나뉘는 것은 `I...`라는 묶음을 **추론으로** 얻기 위해서입니다. 구조체의 멤버를 차례로 직렬화하거나, 튜플 둘을 원소끼리 더하거나, 바인딩 코드를 만들 때 이 꼴이 나옵니다.
+
+<Note>
+C++26에는 묶음의 원소를 번호로 바로 꺼내는 문법 `Ts...[0]`가 들어옵니다. 이것이 있으면 안쪽 함수를 따로 두는 일이 많이 줄어듭니다. Clang 20에서 `-std=c++26`으로 되는 것을 확인했고, GCC 14에서는 아직 안 됩니다.
+</Note>
+
+## 그 밖의 작은 도구
+
+| 도구 | 하는 일 | 본 곳 |
+| --- | --- | --- |
+| `std::exchange(x, 새값)` | 새 값을 넣고 옛 값을 돌려준다 | [「이동 생성과 이동 대입」](#/read/cpp-syntax/sm-move) |
+| `std::to_underlying(e)` | 열거형을 바탕 정수로 | [「enum class」](#/read/cpp-syntax/types-enum) |
+| `std::cmp_less(a, b)`, `std::in_range<T>(v)` | 부호가 달라도 옳은 비교, 값이 `T`에 담기는가 | [「암시적 변환의 규칙」](#/read/cpp-syntax/cast-implicit) |
+| `std::invoke(f, args...)` | 함수, 람다, 멤버 포인터를 같은 문법으로 부른다 | [「concepts 헤더」](#/read/cpp-stl/tr-concepts) |
+| `std::type_identity_t<T>` | `T` 그대로. 그 자리에서 추론을 막는다 | [「source_location과 stacktrace」](#/read/cpp-stl/err-location) |
+| `std::unreachable()` (C++23) | "여기에는 오지 않는다"고 컴파일러에게 알린다 | 아래 |
+
+```cpp
+#include <print>
+#include <utility>
+
+enum class Mode { off, on };
+
+int level(Mode mode)
+{
+    switch (mode) {
+    case Mode::off:
+        return 0;
+    case Mode::on:
+        return 1;
+    }
+    std::unreachable();     // 모든 경우를 다뤘다. 경고도 사라진다
+}
+
+int main()
+{
+    std::println("{} {}", level(Mode::off), level(Mode::on));
+}
+```
+
+```text
+0 1
+```
+
+`std::unreachable()`에 실제로 도달하면 [정의되지 않은 동작](#/read/c-basic/ub-what)입니다. 컴파일러는 그 길이 없다고 믿고 코드를 만듭니다. 그래서 `static_cast<Mode>(7)`처럼 바깥에서 온 값이 닿을 수 있는 자리에는 쓰지 않습니다. 그런 자리에는 예외를 던지거나 `std::abort()`를 부릅니다.
+
+## 정리
+
+- `std::declval<T>()`는 계산되지 않는 자리에서 "`T`의 값이 있다 치고" 식의 타입을 묻는다. 만들 수 없는 타입에도 쓸 수 있다
+- `forward`는 받은 인자를, `forward_like`는 멤버를 객체의 종류에 맞춰 넘긴다
+- `index_sequence`는 정수 묶음을 타입에 실어, 튜플처럼 번호가 컴파일할 때 정해져야 하는 것을 펼치게 해 준다

@@ -1,0 +1,147 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '부모가 둘일 때의 메모리 배치, 다이아몬드 문제와 virtual 상속';
+
+C++의 클래스는 부모를 둘 이상 둘 수 있습니다. 인터페이스 여러 개를 구현할 때는 깔끔하고, 데이터를 가진 부모가 겹칠 때는 까다로워집니다.
+
+## 인터페이스 여러 개
+
+```cpp
+#include <print>
+
+class Readable {
+public:
+    virtual ~Readable() = default;
+    virtual int read() = 0;
+};
+
+class Writable {
+public:
+    virtual ~Writable() = default;
+    virtual void write(int value) = 0;
+};
+
+class Register : public Readable, public Writable {
+public:
+    int read() override { return value_; }
+    void write(int value) override { value_ = value; }
+
+private:
+    int value_ = 0;
+};
+
+void store(Writable& w) { w.write(42); }
+int load(Readable& r) { return r.read(); }
+
+int main()
+{
+    Register reg;
+    store(reg);
+    std::println("{}", load(reg));
+
+    Readable* r = &reg;
+    Writable* w = &reg;
+    std::println("{}", static_cast<void*>(r) == static_cast<void*>(&reg));
+    std::println("{}", static_cast<void*>(w) == static_cast<void*>(&reg));
+    std::println("{}", sizeof(Register));
+}
+```
+
+```text
+42
+true
+false
+24
+```
+
+`store`는 쓰기만, `load`는 읽기만 알면 됩니다. 필요한 만큼만 요구하는 좁은 인터페이스를 여러 개 두고, 한 클래스가 그것들을 함께 구현하는 꼴입니다. 다중 상속의 가장 흔하고 안전한 쓰임입니다.
+
+## 포인터의 값이 바뀐다
+
+`w`는 `&reg`를 넣었는데 주소가 다릅니다. `Register` 객체의 배치가 이렇기 때문입니다.
+
+| 오프셋 | 내용 | 가리키는 포인터 |
+| --- | --- | --- |
+| 0 | `Readable` 부분 (vptr) | `Register*`, `Readable*` |
+| 8 | `Writable` 부분 (vptr) | `Writable*` |
+| 16 | `value_` (4바이트 + 채움 4) | |
+
+`Writable*`는 `Writable` 부분의 시작을 가리켜야 하므로 컴파일러가 변환할 때 **8을 더합니다.** 단일 상속에서는 부모와 자식의 주소가 같았지만 부모가 둘이면 그럴 수 없습니다.
+
+- `static_cast`와 암묵적 변환은 이 조정을 알아서 한다
+- `reinterpret_cast`나 `void*`를 거치면 조정이 **빠진다.** `void*`에 넣었다면 넣을 때와 **같은 타입**으로 꺼내야 한다
+- C 콜백에 `void* user_data`로 객체를 넘길 때 실제로 밟는 지뢰다
+
+## 다이아몬드
+
+두 부모가 같은 조부모를 가지면 조부모 부분이 **둘** 생깁니다.
+
+```cpp nocheck
+struct Device { int id = 0; };
+struct Input  : Device {};
+struct Output : Device {};
+struct Port   : Input, Output {};
+
+Port p;
+p.id = 7;       // 오류: Input 쪽 id인가, Output 쪽 id인가
+```
+
+`virtual` 상속은 그 조부모 부분을 **하나로 합칩니다.**
+
+```cpp
+#include <print>
+
+struct Device {
+    int id = 0;
+    Device() { std::println("Device 생성"); }
+};
+struct Input : virtual Device {};
+struct Output : virtual Device {};
+struct Port : Input, Output {};
+
+int main()
+{
+    Port p;
+    p.id = 7;
+    std::println("{}", p.id);
+}
+```
+
+```text
+Device 생성
+7
+```
+
+`Device`가 한 번만 만들어졌습니다. 값을 치릅니다.
+
+| 비용 | 내용 |
+| --- | --- |
+| 접근 | 가상 부모의 위치가 객체마다 다를 수 있어, 실행 중에 표에서 오프셋을 읽어 찾아간다 |
+| 생성 | 가상 부모는 **맨 아래 자식**(`Port`)이 직접 생성한다. `Input`, `Output`이 적어 둔 초기화는 무시된다 |
+| 변환 | 가상 부모에서 자식으로는 `static_cast`가 안 되고 `dynamic_cast`가 필요하다 |
+
+표준 라이브러리의 `std::iostream`이 이 꼴입니다. `std::istream`과 `std::ostream`이 `std::ios`를 `virtual`로 상속하고, `std::iostream`이 둘을 함께 상속합니다.
+
+## 이름이 겹칠 때
+
+```cpp nocheck
+struct A { void reset(); };
+struct B { void reset(); };
+struct C : A, B {};
+
+C c;
+c.reset();          // 오류: 모호하다
+c.A::reset();       // 부모를 지정한다
+```
+
+두 부모에 같은 이름이 있으면 부를 때 모호해집니다. 자식에서 `reset()`을 새로 정의해 둘을 차례로 부르게 하는 것이 보통의 해결입니다.
+
+<Note kind="tip">
+지침은 간단합니다. <strong>데이터를 가진 부모는 하나까지, 인터페이스는 몇 개든.</strong> 이렇게 하면 다이아몬드도 이름 충돌도 거의 만나지 않습니다. 자바와 C#은 이 규칙을 언어에 넣었습니다(클래스는 하나만 상속하고 인터페이스는 여럿 구현한다).
+</Note>
+
+## 정리
+
+- 인터페이스 여러 개를 구현하는 다중 상속은 흔하고 안전하다
+- 부모가 둘이면 포인터를 변환할 때 값이 바뀐다. `void*`를 거칠 때는 같은 타입으로 꺼낸다
+- 다이아몬드는 `virtual` 상속으로 풀지만 비용과 복잡함이 따른다. 설계로 피하는 편이 낫다

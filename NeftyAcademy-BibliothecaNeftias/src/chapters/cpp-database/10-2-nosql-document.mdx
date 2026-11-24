@@ -1,0 +1,152 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '문서 데이터베이스: jsonb와 nlohmann::json, 포함과 경로 연산자, 정규화, GIN 인덱스, mongocxx';
+export const terms = [
+  'bsoncxx::builder::basic::kvp', 'bsoncxx::builder::basic::make_array',
+  'bsoncxx::builder::basic::make_document', 'bsoncxx::to_json', 'mongocxx::client',
+  'mongocxx::instance', 'mongocxx::uri',
+];
+
+**문서 데이터베이스**는 행 대신 JSON 같은 문서를 통째로 저장합니다. 문서 안에 객체와 배열이 겹겹이 들어갈 수 있고, 같은 모음 안의 문서라도 필드가 서로 달라도 됩니다. MongoDB가 대표적이고, 관계형 데이터베이스도 JSON 열을 갖추고 있습니다. SQLite의 JSON 함수는 [「확장」](#/read/cpp-database/sqlite-ext)에서 보았고, PostgreSQL의 `jsonb`는 문서를 이진 꼴로 저장하며 인덱스까지 겁니다. 문서가 필요하다고 해서 꼭 새 시스템을 들일 필요는 없습니다.
+
+## PostgreSQL의 jsonb
+
+```cpp pkg=libpq,nlohmann_json
+#include <libpq-fe.h>
+#include <nlohmann/json.hpp>
+#include <cstdio>
+#include <string>
+
+using json = nlohmann::json;
+
+PGresult* query(PGconn* c, const char* sql, const std::string& param = "") {
+    const char* p[] = {param.c_str()};
+    return PQexecParams(c, sql, param.empty() ? 0 : 1, nullptr, p, nullptr, nullptr,
+                        0);
+}
+
+// 결과의 첫 열을 ", "로 이어 한 줄로
+std::string column(PGconn* c, const char* sql, const std::string& param = "") {
+    PGresult* r = query(c, sql, param);
+    std::string out;
+    for (int i = 0; i < PQntuples(r); ++i)
+        out += (i ? ", " : "") + std::string(PQgetvalue(r, i, 0));
+    PQclear(r);
+    return out;
+}
+
+int main() {
+    PGconn* c = PQconnectdb("host=localhost dbname=academy user=academy "
+                            "password=academy");
+    PQclear(PQexec(c, "SET client_min_messages = warning"));
+    PQclear(PQexec(c, "DROP TABLE IF EXISTS dc_products"));
+    PQclear(PQexec(c, "CREATE TABLE dc_products (id serial PRIMARY KEY, "
+                      "doc jsonb NOT NULL)"));
+
+    // 문서는 C++의 JSON 라이브러리로 만든다. 따옴표 같은 이스케이프를 맡긴다
+    json docs = json::array({
+        {{"name", "볼트"}, {"price", 120}, {"tags", {"금속", "체결"}},
+         {"spec", {{"length_mm", 20}}}},
+        {{"name", "너트"}, {"price", 80}, {"tags", {"금속"}}},
+        {{"name", "고무 \"패킹\""}, {"price", 50}, {"tags", {"고무"}},
+         {"discount", 10}}});
+    for (const json& d : docs)
+        PQclear(query(c, "INSERT INTO dc_products (doc) VALUES ($1::jsonb)",
+                      d.dump()));
+
+    const char* names = "SELECT doc->>'name' FROM dc_products WHERE ";
+    auto find = [&](const char* label, const std::string& where) {
+        std::string sql = names + where + " ORDER BY id";
+        std::printf("%s: %s\n", label, column(c, sql.c_str()).c_str());
+    };
+    find("가격 100 미만", "(doc->>'price')::int < 100");
+    find("tags에 금속", "doc @> '{\"tags\": [\"금속\"]}'");
+    find("discount 키가 있음", "doc ? 'discount'");
+    find("spec.length_mm > 15", "doc @? '$.spec.length_mm ? (@ > 15)'");
+
+    PQclear(PQexec(c, "UPDATE dc_products SET doc = jsonb_set(doc, '{price}', "
+                      "'130') || '{\"discount\": 5}' WHERE doc->>'name' = '볼트'"));
+    std::printf("고친 볼트의 키 순서: %s\n",
+                column(c, "SELECT jsonb_object_keys(doc) FROM dc_products "
+                          "WHERE id = 1").c_str());
+    json j = json::parse(column(c, "SELECT doc FROM dc_products WHERE id = 1"));
+    std::printf("  C++에서 읽기: price %d, discount %d, tags %zu개\n",
+                j["price"].get<int>(), j["discount"].get<int>(), j["tags"].size());
+    std::printf("jsonb의 정규화: %s\n",
+                column(c, "SELECT '{\"b\": 1, \"a\": 2, \"a\": 3}'::jsonb")
+                    .c_str());
+
+    PQclear(PQexec(c, "CREATE INDEX dc_products_doc ON dc_products "
+                      "USING gin (doc jsonb_path_ops)"));
+    PQclear(PQexec(c, "SET enable_seqscan = off"));   // 세 행뿐이라 억지로
+    std::printf("GIN 인덱스로 찾기:\n");
+    PGresult* r = PQexec(c, "EXPLAIN (COSTS OFF) SELECT id FROM dc_products "
+                            "WHERE doc @> '{\"tags\": [\"금속\"]}'");
+    for (int i = 0; i < PQntuples(r); ++i)
+        std::printf("  %s\n", PQgetvalue(r, i, 0));
+    PQclear(r);
+    PQfinish(c);
+}
+```
+
+```text
+가격 100 미만: 너트, 고무 "패킹"
+tags에 금속: 볼트, 너트
+discount 키가 있음: 고무 "패킹"
+spec.length_mm > 15: 볼트
+고친 볼트의 키 순서: name, spec, tags, price, discount
+  C++에서 읽기: price 130, discount 5, tags 2개
+jsonb의 정규화: {"a": 3, "b": 1}
+GIN 인덱스로 찾기:
+  Bitmap Heap Scan on dc_products
+    Recheck Cond: (doc @> '{"tags": ["금속"]}'::jsonb)
+    ->  Bitmap Index Scan on dc_products_doc
+          Index Cond: (doc @> '{"tags": ["금속"]}'::jsonb)
+```
+
+- **문서는 라이브러리로 만든다**: 문서는 C++의 JSON 라이브러리(여기서는 nlohmann::json)로 만들고 `dump()`한 글자를 `$1::jsonb`에 묶었습니다. 이름 속의 큰따옴표도 라이브러리가 이스케이프했습니다. JSON을 글자 잇기로 만들면 이스케이프를 빠뜨리기 쉽고, 사용자 입력이 문서의 구조를 바꿀 수 있습니다. 돌아온 문서는 `json::parse`로 C++ 값이 됩니다
+- **연산자**: `->>`는 필드를 글자로 꺼내고, `@>`는 주어진 문서를 포함하는지, `?`는 키가 있는지, `@?`는 SQL/JSON 경로 식에 맞는 값이 있는지 봅니다. ODBC처럼 `?`를 자리 표시자로 쓰는 드라이버에서는 `?` 연산자가 헷갈리므로 `jsonb_path_exists(doc, '$.discount')` 같은 함수를 씁니다
+- **jsonb는 정규화한다**: 키는 짧은 것부터 바이트 순서로 다시 정렬되었고, 같은 키가 두 번 나오면 마지막 값만 남았습니다. 공백도 지워집니다. 받은 글자를 그대로 보관해야 한다면 글자째 저장하는 `json` 형을 씁니다
+- **GIN 인덱스**: `jsonb_path_ops` GIN 인덱스는 `@>`와 `@?`를 빠르게 하고, 기본 `jsonb_ops`는 더 커지는 대신 `?` 같은 키 연산자까지 받습니다. 필드 하나를 같음이나 범위로 자주 찾는다면 `(doc->>'name')`에 식 인덱스를 거는 편이 낫습니다([「인덱스 설계」](#/read/cpp-database/dbperf-index)). `enable_seqscan`을 끈 것은 세 행짜리 테이블에서 계획을 보여 주려는 것뿐입니다
+
+## 전용 문서 데이터베이스
+
+MongoDB는 문서를 BSON(날짜, 128비트 십진수 같은 형을 더한 이진 JSON)으로 저장하고, 조건도 문서로 적습니다. C++에서는 공식 드라이버 mongocxx를 씁니다. 검사 기계에는 MongoDB 서버가 없어서 아래 조각은 공식 문서의 API와 대조만 했습니다.
+
+```cpp nocheck
+#include <bsoncxx/builder/basic/array.hpp>
+#include <bsoncxx/builder/basic/document.hpp>
+#include <bsoncxx/json.hpp>
+#include <mongocxx/client.hpp>
+#include <mongocxx/instance.hpp>
+#include <mongocxx/uri.hpp>
+#include <iostream>
+
+using bsoncxx::builder::basic::kvp;
+using bsoncxx::builder::basic::make_array;
+using bsoncxx::builder::basic::make_document;
+
+int main() {
+    mongocxx::instance instance;                 // 프로그램에 하나만 둔다
+    mongocxx::client client{mongocxx::uri{"mongodb://localhost:27017"}};
+    auto products = client["shop"]["products"];
+    products.insert_one(make_document(kvp("name", "볼트"), kvp("price", 120),
+                                      kvp("tags", make_array("금속", "체결"))));
+    // 조건 {"price": {"$lt": 200}}도 문서로 만든다
+    for (auto&& doc : products.find(
+             make_document(kvp("price", make_document(kvp("$lt", 200))))))
+        std::cout << bsoncxx::to_json(doc) << '\n';
+}
+```
+
+조건이 문서이므로, 사용자가 보낸 JSON을 그대로 조건에 넣으면 값 자리에 `{"$ne": null}` 같은 연산자가 들어와 조건을 바꿀 수 있습니다. SQL 주입과 같은 꼴의 이 공격을 막으려면 받은 값의 형을 확인하고 문자열이나 수로만 넣습니다. MongoDB는 4.0부터 여러 문서에 걸친 트랜잭션을 지원합니다.
+
+<Note>
+문서 모델은 함께 읽고 함께 고치는 덩어리(주문과 그 주문 줄)를 한 문서에 담을 때 빛납니다. 여러 덩어리가 서로를 가리키는 관계가 많고 외래 키 같은 제약이 중요하면 관계형 테이블이 낫습니다. 둘을 섞어, 관계형 테이블에 자주 바뀌는 속성만 jsonb 열로 두는 방식도 흔합니다.
+</Note>
+
+## 정리
+
+- 문서 데이터베이스는 겹친 구조의 문서를 통째로 저장하며, PostgreSQL의 jsonb도 포함, 키, 경로 연산자와 GIN 인덱스로 같은 일을 한다
+- 문서는 JSON 라이브러리로 만들어 매개변수로 묶고, jsonb가 키 순서와 중복 키를 정규화한다는 점을 기억한다
+- MongoDB의 조건은 문서이므로, 사용자 입력이 연산자로 들어가지 않게 형을 확인해 넣는다

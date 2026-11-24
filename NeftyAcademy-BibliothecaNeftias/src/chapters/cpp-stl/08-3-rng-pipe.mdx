@@ -1,0 +1,207 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '뷰를 | 로 이어 읽는 순서대로 적기, 원소가 흐르는 순서, 파이프에 이름 붙이기, 두 번 도는 계산';
+
+[뷰](#/read/cpp-stl/rng-views) 하나하나는 단순합니다. 값어치는 **이어 붙일 때** 나옵니다. `|`로 이으면 "이것을 걸러서, 바꿔서, 앞의 셋만"이 읽는 순서 그대로 적힙니다.
+
+## 왼쪽에서 오른쪽으로
+
+```cpp
+#include <print>
+#include <ranges>
+#include <vector>
+
+int main()
+{
+    const std::vector<double> celsius = {21.5, -999.0, 22.0, 35.7, -999.0, 22.3};
+
+    // 고장 표시(-999)를 빼고, 화씨로 바꾸고, 앞의 셋만
+    auto first_three = celsius
+        | std::views::filter([](double c) { return c > -100; })
+        | std::views::transform([](double c) { return c * 9 / 5 + 32; })
+        | std::views::take(3);
+
+    for (double f : first_three)
+        std::print("{:.1f} ", f);
+    std::println("");
+}
+```
+
+```text
+70.7 71.6 96.3
+```
+
+파이프 없이 쓰면 같은 식이 안에서 밖으로 읽힙니다.
+
+```cpp nocheck
+auto first_three = std::views::take(
+    std::views::transform(
+        std::views::filter(celsius, [](double c) { return c > -100; }),
+        [](double c) { return c * 9 / 5 + 32; }),
+    3);
+```
+
+둘은 같은 뷰를 만듭니다. `r | 어댑터(인자)`는 `어댑터(r, 인자)`의 다른 적는 법입니다.
+
+## 원소 하나씩 끝까지
+
+파이프는 "먼저 전부 거르고, 그다음 전부 바꾸는" 식으로 돌지 않습니다. 맨 끝에서 원소 하나를 **당기면** 그 하나가 앞 단계들을 차례로 지나옵니다.
+
+```cpp
+#include <print>
+#include <ranges>
+#include <vector>
+
+int main()
+{
+    const std::vector<int> v = {1, 2, 3, 4};
+    auto pipeline = v
+                  | std::views::filter([](int x) {
+                        std::println("  거르기 {}", x);
+                        return x % 2 == 0;
+                    })
+                  | std::views::transform([](int x) {
+                        std::println("  바꾸기 {}", x);
+                        return x * 10;
+                    });
+
+    for (int x : pipeline)
+        std::println("받음 {}", x);
+}
+```
+
+```text
+  거르기 1
+  거르기 2
+  바꾸기 2
+받음 20
+  거르기 3
+  거르기 4
+  바꾸기 4
+받음 40
+```
+
+중간 결과를 담는 컨테이너가 없습니다. 원소가 100만 개여도 메모리는 늘지 않고, `take(3)`으로 끊으면 뒤의 원소는 건드리지도 않습니다. 최적화를 켜면 컴파일러는 이것을 손으로 쓴 `for`와 `if`와 거의 같은 코드로 만듭니다.
+
+## 레인지를 만들어 내는 파이프
+
+파이프의 맨 앞이 컨테이너일 필요는 없습니다. `std::views::iota`로 수를 만들어 내고 `transform`으로 바꾸면 "계산해서 내주는 레인지"가 됩니다. [반복자를 직접 만들던 링 버퍼](#/read/cpp-stl/it-own)를 이것으로 다시 씁니다.
+
+```cpp
+#include <array>
+#include <cstddef>
+#include <print>
+#include <ranges>
+
+// items 를 start 번째부터 한 바퀴 도는 뷰
+auto in_order(const std::array<int, 4>& items, std::size_t start)
+{
+    return std::views::iota(std::size_t{0}, items.size())
+         | std::views::transform([&items, start](std::size_t offset) {
+               return items[(start + offset) % items.size()];
+           });
+}
+
+int main()
+{
+    const std::array<int, 4> ring = {5, 6, 3, 4};   // 가장 오래된 것은 2번 칸
+    for (int v : in_order(ring, 2))
+        std::print("{} ", v);
+    std::println("");
+
+    // 각도 표: 0도부터 45도씩 여덟 개
+    const auto times45 = std::views::transform([](int i) { return i * 45; });
+    for (int degrees : std::views::iota(0, 8) | times45)
+        std::print("{} ", degrees);
+    std::println("");
+}
+```
+
+```text
+3 4 5 6
+0 45 90 135 180 225 270 315
+```
+
+반복자 클래스 서른 줄이 함수 하나가 되었습니다. `in_order`가 돌려주는 뷰는 `items`를 참조로 잡고 있으므로, 배열이 살아 있는 동안에만 씁니다.
+
+## 파이프에 이름 붙이기
+
+어댑터는 레인지 없이 **그것만** 변수에 담을 수 있고, 어댑터끼리도 `|`로 이어집니다. 자주 쓰는 단계에 이름을 붙여 둡니다.
+
+```cpp
+#include <print>
+#include <ranges>
+#include <vector>
+
+int main()
+{
+    const auto valid =
+        std::views::filter([](int raw) { return raw >= 0 && raw <= 4095; });
+    const auto to_millivolts =
+        std::views::transform([](int raw) { return raw * 3300 / 4095; });
+    const auto clean = valid | to_millivolts;       // 어댑터 둘을 이은 어댑터
+
+    const std::vector<int> channel_a = {0, 2048, -1, 4095};
+    const std::vector<int> channel_b = {9999, 1024, 3072};
+    for (int mv : channel_a | clean)
+        std::print("{} ", mv);
+    std::print("/ ");
+    for (int mv : channel_b | clean | std::views::reverse)
+        std::print("{} ", mv);
+    std::println("");
+}
+```
+
+```text
+0 1650 3300 / 2475 825
+```
+
+## 같은 계산이 두 번 도는 곳
+
+뷰는 결과를 기억하지 않습니다. 그래서 단계의 순서에 따라 같은 함수가 여러 번 불립니다.
+
+```cpp
+#include <print>
+#include <ranges>
+#include <vector>
+
+int main()
+{
+    const std::vector<int> v = {1, 2, 3, 4};
+    int calls = 0;
+    const auto square = [&](int x) {
+        ++calls;
+        return x * x;
+    };
+
+    const auto over3 = std::views::filter([](int y) { return y > 3; });
+    for (int x : v | std::views::transform(square) | over3)     // 바꾸고 거른다
+        std::print("{} ", x);
+    std::println("-> 제곱을 {}번 계산", calls);
+
+    calls = 0;
+    const auto over1 = std::views::filter([](int y) { return y > 1; });
+    for (int x : v | over1 | std::views::transform(square))     // 거르고 바꾼다
+        std::print("{} ", x);
+    std::println("-> 제곱을 {}번 계산", calls);
+}
+```
+
+```text
+4 9 16 -> 제곱을 7번 계산
+4 9 16 -> 제곱을 3번 계산
+```
+
+`transform` 뒤에 `filter`를 두면, `filter`가 조건을 보려고 한 번, 통과한 원소를 내가 받을 때 또 한 번 계산합니다. 원소 넷에 일곱 번입니다. 계산이 비싸면 **거르기를 앞에** 두거나, `transform`의 결과를 컨테이너로 굳힌 뒤에 거릅니다.
+
+<Note kind="warn">
+걸리는 곳이 둘 더 있습니다. `filter` 뷰는 `const`인 채로는 돌 수 없습니다. 첫 원소의 자리를 찾아 속에 적어 두기 때문입니다. 그래서 뷰를 받는 함수는 `const auto&`가 아니라 `auto&&`나 값으로 받습니다. 그리고 `filter`를 거쳐 원소를 **고칠** 때, 고친 값이 조건을 벗어나게 하면 정의되지 않은 동작입니다. "짝수만 골라 1을 더한다" 같은 코드가 그렇습니다.
+</Note>
+
+최적화를 끈 빌드(`-O0`)에서는 파이프가 손으로 쓴 루프보다 눈에 띄게 느립니다. 단계마다 함수 호출이 그대로 남기 때문입니다. 디버그 빌드의 속도가 중요한 코드라면 재 보고 정합니다.
+
+## 정리
+
+- `|`로 이으면 읽는 순서대로 적힌다. 원소 하나가 모든 단계를 지나고 나서 다음 원소가 출발한다
+- 어댑터는 변수에 담고 서로 이을 수 있다. `iota`와 `transform`으로 계산해서 내주는 레인지를 만든다
+- 뷰는 결과를 기억하지 않는다. 비싼 `transform` 뒤에 `filter`를 두면 두 번 계산한다

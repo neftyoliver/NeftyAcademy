@@ -1,0 +1,125 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '리눅스만 주는 기능: 무엇이든 파일 기술자로, inotify·timerfd·getrandom 써 보기, epoll과 컨테이너';
+export const terms = [
+  'read()', 'write()', 'close()', 'getrandom()', 'eventfd()', 'timerfd_create()',
+  'inotify_init1()', 'signalfd()',
+];
+
+[「C 생태계의 네 층」](#/read/c-mid/c-ecosystem)의 세 번째 층이 "리눅스 전용"이었습니다. POSIX만 쓰면 맥과 BSD에서도 돌지만, 리눅스에서만 되는 기능을 쓰면 더 간단하고 빠르게 할 수 있는 일이 많습니다. 라즈베리파이도 리눅스이므로, IoT 장치를 만든다면 이 층을 잘 아는 것이 큰 힘이 됩니다. 이 쪽은 그 층의 생김새를 보고 몇 가지를 직접 써 봅니다.
+
+## 무엇이든 파일 기술자로
+
+유닉스는 "모든 것은 파일"이라는 생각으로 장치까지 파일로 다뤘습니다([「장치 드라이버」](#/read/basics/os-drivers)). 리눅스는 이것을 더 밀고 나가, 원래 파일이 아닌 것들도 **파일 기술자**(`read`, `write`, `close`로 다루는 번호)로 만들어 줍니다.
+
+| 기능 | 파일 기술자가 되는 것 | 헤더 |
+| --- | --- | --- |
+| `inotify` | 폴더와 파일에서 일어나는 일(만들기, 고치기, 지우기) | `sys/inotify.h` |
+| `timerfd` | 정해진 시간이 됨 | `sys/timerfd.h` |
+| `eventfd` | 스레드나 프로세스 사이의 신호 | `sys/eventfd.h` |
+| `signalfd` | 유닉스 신호(Ctrl+C 같은 것) | `sys/signalfd.h` |
+| `epoll` | 위의 것들과 소켓 수천 개를 한꺼번에 기다리기 | `sys/epoll.h` |
+
+무엇이든 파일 기술자가 되면 좋은 점은 **한곳에서 다 기다릴 수 있다**는 것입니다. 네트워크 소켓, 타이머, 파일 변경, 종료 신호를 `epoll` 하나로 묶어 "이 중 무엇이든 일이 생기면 깨워 달라"고 할 수 있습니다. 서버와 IoT 장치의 프로그램이 대부분 이 모양으로 짜입니다.
+
+## 직접 써 보기
+
+아래 프로그램은 리눅스 전용 기능 세 가지를 차례로 씁니다. 리눅스 전용 함수를 보이게 하려고 `-D_GNU_SOURCE`로 컴파일했습니다([「POSIX와 ISO C」](#/read/basics/std-posix-c)).
+
+```c flags=-D_GNU_SOURCE
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/inotify.h>
+#include <sys/random.h>
+#include <sys/timerfd.h>
+#include <unistd.h>
+
+int main(void)
+{
+    // getrandom: 커널이 주는 보안용 난수
+    uint8_t key[8];
+    if (getrandom(key, sizeof key, 0) == sizeof key)
+        puts("getrandom: 8바이트를 받았다");
+
+    // inotify: 폴더에서 일어나는 일을 알려 달라고 부탁한다
+    char dir[] = "/tmp/watchXXXXXX";
+    if (mkdtemp(dir) == NULL)
+        return 1;
+    int in = inotify_init1(0);
+    inotify_add_watch(in, dir, IN_CREATE | IN_CLOSE_WRITE);
+
+    char path[64];
+    snprintf(path, sizeof path, "%s/note.txt", dir);
+    FILE *f = fopen(path, "w");         // 파일을 하나 만들고 쓴다
+    fputs("hi\n", f);
+    fclose(f);
+
+    char buf[4096];
+    ssize_t n = read(in, buf, sizeof buf);   // 쌓인 알림을 읽는다
+    for (char *p = buf; p < buf + n;) {
+        struct inotify_event *ev = (struct inotify_event *)p;
+        printf("inotify: %s %s\n", ev->name,
+               ev->mask & IN_CREATE ? "만들어짐" : "쓰고 닫힘");
+        p += sizeof *ev + ev->len;
+    }
+
+    // timerfd: 시간이 되면 읽을 수 있게 되는 파일 기술자
+    int t = timerfd_create(CLOCK_MONOTONIC, 0);
+    struct itimerspec when = {.it_value = {.tv_nsec = 200000000}};  // 0.2초 뒤
+    timerfd_settime(t, 0, &when, NULL);
+    uint64_t fired;
+    read(t, &fired, sizeof fired);      // 0.2초 동안 여기서 잔다
+    printf("timerfd: %llu번 울렸다\n", (unsigned long long)fired);
+
+    unlink(path);
+    rmdir(dir);
+    return 0;
+}
+```
+
+```text
+getrandom: 8바이트를 받았다
+inotify: note.txt 만들어짐
+inotify: note.txt 쓰고 닫힘
+timerfd: 1번 울렸다
+```
+
+- **getrandom**은 커널이 모은 무작위성으로 만든 난수를 줍니다. [「C 표준 라이브러리 전체 훑기」](#/read/c-mid/libc-tour)에서 `rand`는 보안용으로 쓰면 안 된다고 했는데, 암호 키나 토큰에는 이것을 씁니다
+- **inotify**는 폴더를 지켜보다가 파일이 만들어지고 다 쓰여 닫히는 순간을 알려 줍니다. 설정 파일이 바뀌면 다시 읽는 프로그램, 사진이 들어오면 처리하는 프로그램을 반복해서 들여다보지 않고 만들 수 있습니다
+- **timerfd**는 시간을 파일 기술자로 만듭니다. 여기서는 `read`로 기다렸지만, 실제로는 `epoll`에 넣어 소켓과 함께 기다리는 경우가 많습니다
+
+<Note kind="warn">
+예제는 짧게 하려고 대부분의 반환값 확인을 생략했습니다. 실제 코드에서는 `inotify_init1`, `timerfd_create`가 -1을 돌려주는지, `read`가 몇 바이트를 읽었는지를 모두 확인해야 합니다. 실패했을 때의 까닭은 `errno`에 남습니다.
+</Note>
+
+## 더 큰 것들
+
+| 기능 | 하는 일 | 어디서 만나나 |
+| --- | --- | --- |
+| `epoll` | 파일 기술자 수천 개 가운데 준비된 것만 골라 준다 | 웹 서버, 「네트워킹」 책의 HTTP 서버 |
+| `io_uring` | 읽기·쓰기 요청을 줄 세워 한꺼번에 넘기고 결과를 모아 받는다 | 아주 빠른 저장 장치와 서버 |
+| `/proc`, `/sys` | 커널의 상태를 파일로 읽고 쓴다 | [「버스와 입출력」](#/read/basics/arch-bus-io)의 `/proc/iomem` |
+| 네임스페이스와 cgroup | 프로세스마다 보이는 것과 쓸 수 있는 양을 나눈다 | 도커 같은 컨테이너 |
+| netlink | 커널과 네트워크 설정을 주고받는다 | `ip` 명령 |
+
+컨테이너는 따로 있는 기술이 아니라, 리눅스 커널의 네임스페이스(보이는 파일·프로세스·네트워크를 나누기)와 cgroup(CPU·메모리 사용량 제한)을 묶어 쓴 것입니다. 이 책의 예제를 검사하는 기계에서도 `systemd-detect-virt`가 `docker`라고 답했습니다([「PC와 서버」](#/read/basics/modern-pc-server)).
+
+## 설명서 찾기
+
+리눅스 함수의 설명서는 `man`으로 봅니다. 장(section) 번호가 중요합니다.
+
+| 장 | 담는 것 | 예 |
+| --- | --- | --- |
+| 1 | 명령 | `man 1 ls` |
+| 2 | 시스템 콜 | `man 2 inotify_init1` |
+| 3 | C 라이브러리 함수 | `man 3 printf` |
+| 7 | 개념 설명 | `man 7 inotify`, `man 7 epoll` |
+
+각 설명서의 아래쪽 "STANDARDS"(또는 "CONFORMING TO")에 그 함수가 표준 C인지, POSIX인지, 리눅스 전용인지가 적혀 있습니다. 내 프로그램이 어디까지 옮겨 갈 수 있는지 판단할 때 이 줄을 보면 됩니다. 같은 일을 맥에서는 [「맥」](#/read/c-mid/plat-mac)의 kqueue와 FSEvents가, 윈도우에서는 [「윈도우」](#/read/c-mid/plat-windows)의 IOCP와 `ReadDirectoryChangesW`가 합니다.
+
+## 정리
+
+- 리눅스는 파일 변경, 타이머, 신호까지 파일 기술자로 만들어 주어, `epoll` 하나로 모든 일을 함께 기다릴 수 있다
+- `getrandom`은 보안용 난수, `inotify`는 파일 변경 알림, `timerfd`는 시간 알림을 주며, `-D_GNU_SOURCE`로 보이게 한다
+- 컨테이너는 네임스페이스와 cgroup 같은 리눅스 커널 기능의 묶음이고, `man`의 STANDARDS 줄로 함수가 어디서 되는지 알 수 있다

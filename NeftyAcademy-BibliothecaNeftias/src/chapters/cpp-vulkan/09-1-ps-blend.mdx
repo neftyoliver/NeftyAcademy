@@ -1,0 +1,238 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '블렌딩, 깊이, 스텐실: 블렌딩 식과 네 가지 방식, 반투명을 그리는 순서, 스텐실로 가리기와 테두리';
+export const terms = [
+  'VkPipelineColorBlendAttachmentState', 'VkPipelineColorBlendStateCreateInfo',
+  'VkPipelineDepthStencilStateCreateInfo', 'VkBlendFactor', 'VkStencilOpState',
+];
+
+프래그먼트 셰이더가 낸 색은 스텐실 시험, 깊이 시험, 블렌딩을 거쳐 첨부물에 적힙니다. 깊이 시험은 [「깊이 버퍼」](#/read/cpp-vulkan/tex-depth)에서 보았으니 여기서는 나머지 둘을 봅니다. 아래 프로그램은 도우미를 거치지 않고 파이프라인의 구조체를 직접 채워, 블렌딩 방식 넷과 스텐실 설정 셋으로 파이프라인 일곱 개를 만듭니다.
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp,vkx_cmd.hpp,vkx_resource.hpp,vkx_bind.hpp,vkx_pipeline.hpp,vkx_draw.hpp
+#include "vkx_bind.hpp"
+#include "vkx_cmd.hpp"
+#include "vkx_draw.hpp"
+#include "vkx_pipeline.hpp"
+
+const char* VS = R"(#version 450
+layout(location = 0) out vec2 p;
+void main() {       // 뷰포트를 덮는 삼각형. p는 뷰포트 가운데가 (0, 0)
+    p = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2) * 2.0 - 1.0;
+    gl_Position = vec4(p, 0.0, 1.0);
+})";
+
+const char* FS = R"(#version 450
+layout(push_constant) uniform Push { float radius, value, alpha, stripes; };
+layout(location = 0) in vec2 p;
+layout(location = 0) out vec4 color;
+void main() {
+    if (length(p * vec2(1.0, 0.5)) > radius) discard;     // 반지름 밖은 버린다
+    bool dark = stripes > 0.5 && (int(gl_FragCoord.x) / 2) % 2 == 1;
+    color = vec4(dark ? value * 0.4 : value, 0.0, 0.0, alpha);
+})";
+
+int main() {
+    vkx::Instance inst = vkx::make_instance();
+    vkx::Device dev = vkx::make_device(inst.handle);
+    vkx::Commands cmds = vkx::make_commands(dev);
+    const uint32_t W = 48, H = 16;       // 위 네 줄은 블렌딩, 아래 열두 줄은 스텐실
+    const VkFormat RGBA = VK_FORMAT_R8G8B8A8_UNORM;
+    VkFormat ds_format = VK_FORMAT_D24_UNORM_S8_UINT;
+    VkFormatProperties fp;               // 스텐실이 붙은 두 포맷 중 하나는 지원된다
+    vkGetPhysicalDeviceFormatProperties(dev.gpu, ds_format, &fp);
+    const auto ATTACH = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    if (!(fp.optimalTilingFeatures & ATTACH))
+        ds_format = VK_FORMAT_D32_SFLOAT_S8_UINT;
+    vkx::Image target = vkx::make_image(
+        dev, {W, H}, RGBA,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    vkx::Image ds = vkx::make_image(dev, {W, H}, ds_format,
+                                    VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+    vkx::Buffer pixels =
+        vkx::make_buffer(dev, W * H * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+    VkPipelineLayout layout = vkx::make_layout(dev, {}, 16);
+    auto vs = vkx::make_shader(dev, vkx::compile(VS, shaderc_vertex_shader));
+    auto fs = vkx::make_shader(dev, vkx::compile(FS, shaderc_fragment_shader));
+
+    // 도우미를 거치지 않고 파이프라인을 만든다. 색 첨부물의 블렌딩과
+    // 스텐실 설정(없으면 스텐실 시험을 끈다)만 바꿔 가며 쓴다
+    auto make = [&](const VkPipelineColorBlendAttachmentState& attachment,
+                    const VkStencilOpState* stencil = nullptr) {
+        const auto STAGE = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        VkPipelineShaderStageCreateInfo stages[2] = {
+            {.sType = STAGE, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vs,
+             .pName = "main"},
+            {.sType = STAGE, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fs,
+             .pName = "main"}};
+        VkPipelineVertexInputStateCreateInfo input{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        VkPipelineInputAssemblyStateCreateInfo assembly{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+            .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
+        VkPipelineViewportStateCreateInfo viewport{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+            .viewportCount = 1, .scissorCount = 1};
+        VkPipelineRasterizationStateCreateInfo raster{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+            .polygonMode = VK_POLYGON_MODE_FILL, .lineWidth = 1.0f};
+        VkPipelineMultisampleStateCreateInfo multisample{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+            .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
+        VkPipelineDepthStencilStateCreateInfo dss{   // 깊이 시험은 쓰지 않는다
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+            .stencilTestEnable = stencil != nullptr};
+        if (stencil) dss.front = dss.back = *stencil;   // 앞면과 뒷면에 같은 설정
+        VkPipelineColorBlendStateCreateInfo blend{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+            .attachmentCount = 1, .pAttachments = &attachment};
+        VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT,
+                                VK_DYNAMIC_STATE_SCISSOR};
+        VkPipelineDynamicStateCreateInfo dynamic{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+            .dynamicStateCount = 2, .pDynamicStates = dyn};
+        VkPipelineRenderingCreateInfo rendering{   // 깊이와 스텐실은 같은 이미지
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+            .colorAttachmentCount = 1, .pColorAttachmentFormats = &RGBA,
+            .depthAttachmentFormat = ds_format,
+            .stencilAttachmentFormat = ds_format};
+        VkGraphicsPipelineCreateInfo ci{
+            .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+            .pNext = &rendering, .stageCount = 2, .pStages = stages,
+            .pVertexInputState = &input, .pInputAssemblyState = &assembly,
+            .pViewportState = &viewport, .pRasterizationState = &raster,
+            .pMultisampleState = &multisample, .pDepthStencilState = &dss,
+            .pColorBlendState = &blend, .pDynamicState = &dynamic,
+            .layout = layout};
+        VkPipeline p;
+        vkCreateGraphicsPipelines(dev.handle, VK_NULL_HANDLE, 1, &ci, nullptr, &p);
+        return p;
+    };
+
+    // 블렌딩: 결과 = 새 색 × src 인수 + 이미 있는 색 × dst 인수
+    struct Mode { const char* name; VkBool32 on; VkBlendFactor src, dst; };
+    const Mode modes[] = {
+        {"overwrite", VK_FALSE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO},
+        {"alpha", VK_TRUE, VK_BLEND_FACTOR_SRC_ALPHA,
+         VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA},
+        {"additive", VK_TRUE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE},
+        {"multiply", VK_TRUE, VK_BLEND_FACTOR_DST_COLOR, VK_BLEND_FACTOR_ZERO}};
+    VkPipelineColorBlendAttachmentState write{.colorWriteMask = 0xF}, none{};
+    std::vector<VkPipeline> blends;
+    for (const Mode& m : modes) {
+        VkPipelineColorBlendAttachmentState a{
+            .blendEnable = m.on, .srcColorBlendFactor = m.src,
+            .dstColorBlendFactor = m.dst, .colorBlendOp = VK_BLEND_OP_ADD,
+            .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+            .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+            .alphaBlendOp = VK_BLEND_OP_ADD, .colorWriteMask = 0xF};
+        blends.push_back(make(a));
+    }
+    // 스텐실: 실패·통과·깊이 실패 때의 연산, 비교 방법, 읽을 비트, 쓸 비트, 기준값
+    const auto KEEP = VK_STENCIL_OP_KEEP;
+    const VkStencilOpState mark{KEEP, VK_STENCIL_OP_REPLACE, KEEP,
+                                VK_COMPARE_OP_ALWAYS, 0xFF, 0xFF, 1};
+    const VkStencilOpState inside{KEEP, KEEP, KEEP, VK_COMPARE_OP_EQUAL,
+                                  0xFF, 0, 1};
+    const VkStencilOpState outside{KEEP, KEEP, KEEP, VK_COMPARE_OP_NOT_EQUAL,
+                                   0xFF, 0, 1};
+    VkPipeline p_mark = make(none, &mark);          // 색은 쓰지 않는다
+    VkPipeline p_inside = make(write, &inside);
+    VkPipeline p_outside = make(write, &outside);
+
+    VkCommandBuffer cmd = vkx::begin(cmds);
+    vkx::begin_drawing(cmd, target, {}, &ds);    // 색과 스텐실을 0으로 지운다
+    auto draw = [&](VkPipeline p, VkRect2D where, float radius, float value,
+                    float alpha, float stripes) {
+        const float push[4] = {radius, value, alpha, stripes};
+        vkCmdSetScissor(cmd, 0, 1, &where);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+        vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_ALL, 0, 16, push);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+    };
+    for (int32_t y = 0; y < 4; ++y) {
+        draw(blends[0], {{0, y}, {32, 1}}, 9, 0.8f, 1, 0);    // 불투명한 0.8을 깔고
+        draw(blends[y], {{16, y}, {32, 1}}, 9, 0.4f, 0.5f, 0);  // 알파 0.5인 0.4를
+    }
+    const VkRect2D below{{0, 4}, {W, H - 4}};
+    VkViewport scene{0.0f, 4.0f, float(W), float(H - 4), 0.0f, 1.0f};
+    vkCmdSetViewport(cmd, 0, 1, &scene);
+    draw(p_mark, below, 0.35f, 0, 1, 0);         // 1) 원 안의 스텐실에 1을 적는다
+    draw(p_inside, below, 9, 0.95f, 1, 1);       // 2) 화면 전체 줄무늬를 원 안에만
+    draw(p_outside, below, 0.45f, 0.5f, 1, 0);   // 3) 더 큰 원을 원 밖에만: 테두리
+    vkx::end_drawing(cmd, target, pixels);
+    vkx::submit_and_wait(dev, cmds);
+
+    auto* rgba = static_cast<const uint8_t*>(pixels.mapped);
+    auto red = [&](uint32_t x, uint32_t y) {
+        return rgba[(y * W + x) * 4] / 255.0;
+    };
+    std::printf("%-10s %-9s %-9s %s\n", "", "0.8 only", "overlap", "0.4 only");
+    for (uint32_t y = 0; y < 4; ++y)
+        std::printf("%-10s %-9.2f %-9.2f %.2f\n", modes[y].name, red(8, y),
+                    red(24, y), red(40, y));
+    for (uint32_t y = 4; y < H; ++y) {
+        std::putchar('|');
+        for (uint32_t x = 0; x < W; ++x)
+            std::putchar(" .:-=+*#%@"[int(red(x, y) * 9.0 + 0.5)]);
+        std::puts("|");
+    }
+    for (VkPipeline p : blends) vkDestroyPipeline(dev.handle, p, nullptr);
+    for (VkPipeline p : {p_mark, p_inside, p_outside})
+        vkDestroyPipeline(dev.handle, p, nullptr);
+    vkDestroyPipelineLayout(dev.handle, layout, nullptr);
+    vkDestroyShaderModule(dev.handle, vs, nullptr);
+    vkDestroyShaderModule(dev.handle, fs, nullptr);
+    for (vkx::Image* i : {&target, &ds}) vkx::destroy(dev, *i);
+    vkx::destroy(dev, pixels);
+    vkx::destroy(dev, cmds);
+    vkx::destroy(dev);
+    vkx::destroy(inst);
+}
+```
+
+```text
+           0.8 only  overlap   0.4 only
+overwrite  0.80      0.40      0.40
+alpha      0.80      0.60      0.20
+additive   0.80      1.00      0.40
+multiply   0.80      0.32      0.00
+|                                                |
+|                  ++++++++++++                  |
+|                +++-@@--@@--@+++                |
+|              +++@--@@--@@--@@-+++              |
+|              ++@@--@@--@@--@@--++              |
+|             +++@@--@@--@@--@@--+++             |
+|             +++@@--@@--@@--@@--+++             |
+|              ++@@--@@--@@--@@--++              |
+|              +++@--@@--@@--@@-+++              |
+|                +++-@@--@@--@+++                |
+|                  ++++++++++++                  |
+|                                                |
+```
+
+- **블렌딩 식**: 결과는 새 색에 src 인수를 곱한 것과 이미 있던 색에 dst 인수를 곱한 것의 합이고, 색과 알파에 인수를 따로 줍니다. 겹친 칸을 보면 alpha는 0.4 × 0.5 + 0.8 × 0.5 = 0.6, multiply는 0.8 × 0.4 = 0.32입니다. additive는 1.2가 되어야 하지만 UNORM 포맷이라 1.0에서 잘렸습니다
+- **방식의 쓰임**: 알파 블렌딩은 반투명한 면, 더하기는 불꽃이나 빛, 곱하기는 색 입히기에 씁니다. 색에 알파를 미리 곱해 둔 텍스처는 src 인수를 `ONE`으로 바꿔 씁니다
+- **그리는 순서**: 알파 블렌딩은 순서에 따라 결과가 달라집니다. 불투명한 것을 먼저 그리고, 반투명한 것은 먼 것부터 깊이 시험은 켠 채 깊이 쓰기만 끄고 그립니다. 더하기는 순서와 무관합니다
+- **스텐실**: 픽셀마다 정수 하나(보통 8비트)를 두고, 기준값과 비교한 결과에 따라 프래그먼트를 버리거나 그 정수를 고칩니다. 1)에서 색은 쓰지 않고(`colorWriteMask` 0) 원 안에 1을 적었고, 2)는 `EQUAL`이라 화면 전체에 그린 줄무늬가 원 안에만 남았으며, 3)은 `NOT_EQUAL`이라 더 큰 원의 바깥 고리만 그려져 테두리가 됐습니다. 거울이나 포털 안쪽만 그리기, 고른 물체의 외곽선에 쓰는 기법입니다
+- **포맷**: 스텐실은 깊이와 한 이미지에 담습니다. 파이프라인과 렌더링 정보 양쪽에 깊이 포맷과 스텐실 포맷으로 같은 값을 알리고, 같은 뷰를 두 첨부물 자리에 줍니다(`begin_drawing`이 합니다)
+
+## 블렌딩 인수
+
+| 방식 | src 인수 | dst 인수 |
+| --- | --- | --- |
+| 알파 | `SRC_ALPHA` | `ONE_MINUS_SRC_ALPHA` |
+| 미리 곱한 알파 | `ONE` | `ONE_MINUS_SRC_ALPHA` |
+| 더하기 | `ONE` | `ONE` |
+| 곱하기 | `DST_COLOR` | `ZERO` |
+
+연산은 대개 더하기(`VK_BLEND_OP_ADD`)이고, `MIN`과 `MAX`를 고르면 인수는 쓰이지 않습니다. `colorWriteMask`는 블렌딩과 상관없이 첨부물의 어느 채널에 쓸지를 정합니다.
+
+<Note>
+블렌딩은 색 첨부물 포맷이 지원해야 켤 수 있고(`VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT`), 정수 포맷에는 쓸 수 없습니다. 색 첨부물이 여럿일 때 첨부물마다 다른 블렌딩을 주려면 `independentBlend` 기능이 필요합니다.
+</Note>
+
+## 정리
+
+- 블렌딩은 새 색과 있던 색에 인수를 곱해 더하는 식이고, 인수 조합으로 알파·더하기·곱하기 같은 방식을 만든다
+- 반투명한 것은 불투명한 것 뒤에, 먼 것부터, 깊이 쓰기를 끄고 그린다
+- 스텐실은 픽셀마다의 정수로 그릴 영역을 가리며, 적는 패스와 비교하는 패스를 나눠 쓴다

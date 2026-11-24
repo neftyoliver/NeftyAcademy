@@ -1,0 +1,118 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '믹싱: 소리를 더하면 넘친다, 데시벨과 버스 계층, 대사 때 음악 낮추기, 제한기와 동시 소리 수 제한';
+
+게임 소리는 결국 수십 개의 파형을 표본마다 **더한** 하나의 파형입니다. 스피커로 가는 값은 -1에서 1 사이여야 하는데, 폭발과 총성과 음악과 대사가 한꺼번에 나면 합은 쉽게 그 범위를 넘습니다. 넘친 부분은 잘려서 찢어지는 소리가 납니다. 믹서의 일은 무엇을 얼마나 크게 더할지 정해서, 중요한 소리는 들리고 전체는 넘치지 않게 하는 것입니다.
+
+## 여섯 소리 더하기
+
+사인파 여섯 개로 배경음악, 폭발, 총성, 발소리, 빗소리, 대사를 흉내 내서 0.1초(48kHz로 4800표본)를 섞습니다.
+
+```cpp
+#include <algorithm>
+#include <cmath>
+#include <numbers>
+#include <print>
+#include <string>
+#include <vector>
+
+constexpr int RATE = 48000;
+double db_to_gain(double db) { return std::pow(10.0, db / 20); }
+
+struct Voice { std::string name; double freq, amp; int bus; int priority; };
+struct Bus { std::string name; int parent; double db; };
+
+int main() {
+    std::vector<Bus> buses = {
+        {"주", -1, 0}, {"음악", 0, -6}, {"효과음", 0, 0}, {"대사", 0, 0},
+    };
+    std::vector<Voice> voices = {
+        {"배경음악", 220, 0.8, 1, 1}, {"폭발", 60, 0.9, 2, 5},
+        {"총성", 1000, 0.7, 2, 4}, {"발소리", 300, 0.4, 2, 2},
+        {"빗소리", 5000, 0.3, 2, 1}, {"대사", 440, 0.6, 3, 9},
+    };
+    // 버스 이득 = 자기 dB와 조상 dB를 모두 곱한 것
+    auto bus_gain = [&](int b) {
+        double g = 1;
+        for (; b >= 0; b = buses[b].parent) g *= db_to_gain(buses[b].db);
+        return g;
+    };
+
+    auto render = [&](const std::vector<Voice>& vs, double duck_db, bool limit) {
+        double peak = 0, sumsq = 0;
+        int clipped = 0;
+        const int N = RATE / 10;                  // 0.1초
+        for (int i = 0; i < N; ++i) {
+            double t = double(i) / RATE, s = 0;
+            for (auto& v : vs) {
+                double g = bus_gain(v.bus);
+                if (v.bus == 1) g *= db_to_gain(duck_db);   // 음악만 낮추기
+                s += v.amp * g * std::sin(2 * std::numbers::pi * v.freq * t);
+            }
+            if (limit) s = std::tanh(s);          // 부드럽게 눌러 ±1 안으로
+            peak = std::max(peak, std::fabs(s));
+            sumsq += s * s;
+            if (std::fabs(s) > 1) ++clipped;
+        }
+        return std::tuple{peak, std::sqrt(sumsq / N), clipped};
+    };
+    auto report = [](const char* what, auto r) {
+        auto [peak, rms, clipped] = r;
+        std::println("{:22} 최대 {:.2f}  실효 {:.2f}  넘침 {:4}표본",
+                     what, peak, rms, clipped);
+    };
+
+    report("모두 그대로 더함", render(voices, 0, false));
+    report("+ 대사 때 음악 -12dB", render(voices, -12, false));
+    report("+ 부드러운 제한", render(voices, -12, true));
+    buses[0].db = -9;                             // 주 버스에 여유를 둔다
+    report("주 버스 -9dB, 제한 없음", render(voices, -12, false));
+
+    // 동시 소리 수 제한: 우선순위 높은 4개만 남긴다
+    auto kept = voices;
+    std::ranges::sort(kept, std::greater{}, &Voice::priority);
+    kept.resize(4);
+    std::print("소리 4개 제한, 남은 것:");
+    for (auto& v : kept) std::print(" {}", v.name);
+    std::println("");
+    report("4개만", render(kept, -12, false));
+}
+```
+
+```text
+모두 그대로 더함       최대 3.01  실효 1.02  넘침 1684표본
++ 대사 때 음악 -12dB   최대 2.73  실효 0.98  넘침 1592표본
++ 부드러운 제한        최대 0.99  실효 0.63  넘침    0표본
+주 버스 -9dB, 제한 없음 최대 0.97  실효 0.35  넘침    0표본
+소리 4개 제한, 남은 것: 대사 폭발 총성 발소리
+4개만                  최대 0.85  실효 0.34  넘침    0표본
+```
+
+그대로 더하면 최댓값이 3을 넘었고, 4800표본 중 1684개가 범위를 벗어났습니다. 소리 하나하나는 1을 넘지 않아도 합은 넘칩니다.
+
+## 데시벨과 버스
+
+- 음량은 **데시벨**로 다룹니다. 진폭 비율의 상용로그에 20을 곱한 값이라, -6dB는 진폭이 약 절반, -20dB는 10분의 1입니다. 사람의 귀가 음량을 비율로 느끼기 때문에, 슬라이더도 dB로 움직여야 고르게 들립니다
+- 소리는 **버스**에 묶입니다. 음악, 효과음, 대사 버스가 모두 주 버스 아래에 있고, 소리의 최종 이득은 자기 버스부터 주 버스까지의 이득을 모두 곱한 값입니다(`bus_gain`). 설정 화면의 "음악 음량" 슬라이더는 음악 버스 하나만 바꿉니다
+- **덕킹**: 대사가 나오는 동안 음악 버스를 12dB 낮췄습니다. 최댓값은 조금밖에 줄지 않았지만, 대사가 음악에 묻히지 않는 것이 목적입니다. 실제로는 대사 버스의 음량을 보고 음악 버스를 자동으로 누르는 방식(사이드체인)을 많이 씁니다
+
+## 넘치지 않게
+
+넘침을 막는 길은 두 가지였습니다.
+
+- **제한기**: 주 버스 끝에서 `tanh`로 큰 값을 부드럽게 눌러 ±1 안으로 넣었습니다. 넘침은 0이 되었지만 파형 모양이 바뀌므로, 오래 강하게 걸리면 소리가 뭉개집니다. 제한기는 안전망이지 음량 조절 수단이 아닙니다
+- **여유**: 주 버스를 처음부터 9dB 낮췄더니 제한기 없이도 넘치지 않았습니다. 가장 시끄러운 장면에서도 넘치지 않도록 전체 레벨을 잡아 두고, 부족한 음량은 플레이어의 기기 볼륨에 맡기는 것이 기본입니다
+
+## 동시 소리 수 제한
+
+총알이 200발 날아다니면 소리도 200개가 됩니다. 계산 비용도 문제이고, 그렇게 많이 겹치면 어차피 구별해서 들리지도 않습니다. 그래서 동시에 실제로 섞는 소리 수에 상한을 두고, 넘치면 우선순위가 낮거나 작게 들리는 것부터 뺍니다. 예제는 4개만 남겼고 빗소리와 배경음악이 빠졌습니다. 빠진 소리는 지우지 않고 **가상 소리**로 재생 위치만 계속 진행시켰다가, 자리가 나면 그 위치부터 다시 들리게 하는 것이 보통입니다. 소리의 거리에 따른 음량은 다음 장 [「3차원 소리」](#/read/cpp-game-engine/audio-3d)에서 계산합니다.
+
+<Note>
+실제 믹서는 표본 하나씩이 아니라 256~1024표본 정도의 버퍼 단위로, 게임 루프와 별도인 오디오 스레드에서 돕니다. 오디오 스레드가 버퍼를 제때 채우지 못하면 소리가 끊기므로, 그 스레드에서는 잠금, 메모리 할당, 파일 읽기를 하지 않습니다. 게임 스레드의 "이 소리 재생" 명령은 잠금 없는 큐로 넘기고, 파일은 [「스트리밍」](#/read/cpp-game-engine/audio-stream)처럼 다른 스레드가 미리 읽어 둡니다.
+</Note>
+
+## 정리
+
+- 소리 섞기는 표본을 더하는 것이고, 개별 소리가 범위 안이어도 합은 쉽게 넘친다
+- 음량은 dB로 다루고, 버스 계층의 이득을 곱해 최종 음량을 얻으며, 덕킹으로 중요한 소리를 드러낸다
+- 넘침은 전체 여유로 막고 제한기는 안전망으로 두며, 동시 소리 수에 상한을 두고 빠진 소리는 가상 소리로 이어 간다

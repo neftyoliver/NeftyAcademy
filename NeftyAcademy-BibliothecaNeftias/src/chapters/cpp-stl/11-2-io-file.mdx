@@ -1,0 +1,231 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '열기와 확인, 여는 방식, 줄 단위 읽기의 함정, 파일 전체를 한 번에 읽기, 쓰기 오류가 드러나는 때';
+export const terms = ['ifstream', 'ofstream', 'std::fstream'];
+
+`<fstream>`의 `std::ifstream`(읽기), `std::ofstream`(쓰기), `std::fstream`(둘 다)은 [스트림 버퍼](#/read/cpp-stl/io-streams)가 파일에 이어진 스트림입니다. `>>`, `<<`, `std::getline`은 `std::cin`, `std::cout`에서와 똑같이 씁니다.
+
+## 열고, 확인하고, 닫힌다
+
+```cpp
+#include <filesystem>
+#include <fstream>
+#include <print>
+#include <string>
+
+int main()
+{
+    const auto path = std::filesystem::temp_directory_path() / "na-log.txt";
+    {
+        std::ofstream out(path);        // 없으면 만들고, 있으면 비운다
+        if (!out) {
+            std::println("열지 못했다: {}", path.string());
+            return 1;
+        }
+        out << "temp 21.5\n" << "humid 40\n";
+    }                                   // 여기서 닫힌다
+    {
+        std::ofstream more(path, std::ios::app);    // 끝에 덧붙인다
+        more << "press 1013.2\n";
+    }
+
+    std::ifstream in(path);
+    std::string line;
+    int number = 0;
+    while (std::getline(in, line))
+        std::println("{}: {}", ++number, line);
+
+    std::ifstream missing("/no/such/file.txt");
+    std::println("없는 파일: {}", missing.is_open());
+    std::filesystem::remove(path);
+}
+```
+
+```text
+1: temp 21.5
+2: humid 40
+3: press 1013.2
+없는 파일: false
+```
+
+- 생성자가 파일을 열고 [소멸자가 닫습니다](#/read/cpp-syntax/class-dtor). `close()`를 부를 일은 드뭅니다
+- 열지 못해도 **예외가 나지 않습니다.** 스트림이 실패 상태가 될 뿐이고, 그대로 쓰면 읽기와 쓰기가 조용히 건너뛰어집니다. 연 직후에 `if (!out)`으로 확인합니다
+- 경로는 `std::string`이나 [`std::filesystem::path`](#/read/cpp-stl/fs-path)로 줍니다
+
+왜 열지 못했는지는 스트림이 알려 주지 않습니다. libstdc++와 libc++에서는 실패한 직후의 `errno`에 까닭이 남아 있어 `std::strerror(errno)`로 볼 수 있지만(없는 파일이면 `No such file or directory`), 표준이 보장하는 것은 아닙니다. 까닭이 필요하면 열기 전에 [`std::filesystem`으로 확인](#/read/cpp-stl/fs-errors)합니다.
+
+## 여는 방식
+
+| 방식 | 뜻 |
+| --- | --- |
+| `std::ios::in` | 읽기. `ifstream`의 기본 |
+| `std::ios::out` | 쓰기. `ofstream`의 기본. **있던 내용을 비운다** |
+| `std::ios::app` | 쓸 때마다 끝으로 가서 쓴다 |
+| `std::ios::ate` | 연 직후에 한 번 끝으로 간다 |
+| `std::ios::trunc` | 있던 내용을 비운다 |
+| `std::ios::binary` | 줄바꿈 글자를 바꾸지 않는다. [「이진 입출력」](#/read/cpp-stl/io-binary) |
+| `std::ios::noreplace` | C++23. 이미 있는 파일이면 실패한다 |
+
+`|`로 묶어 씁니다. 가장 흔한 사고는 `std::ofstream out(path);`로 **있던 파일을 비우는** 것입니다. 로그처럼 이어 써야 하면 `app`을, 내용을 고치려면 `std::fstream f(path, std::ios::in | std::ios::out);`을, 덮어쓰면 안 되는 파일을 새로 만들 때는 `std::ios::out | std::ios::noreplace`를 씁니다. 마지막 것은 "있는지 확인하고 만들기" 사이에 다른 프로그램이 끼어드는 틈이 없습니다.
+
+## 줄 단위로 읽기
+
+`std::getline(in, line)`은 줄바꿈 전까지를 `line`에 담고 줄바꿈은 버립니다. 함정이 둘 있습니다. 파일 대신 [문자열 스트림](#/read/cpp-stl/io-string)으로 보입니다.
+
+```cpp
+#include <iostream>
+#include <print>
+#include <sstream>
+#include <string>
+
+int main()
+{
+    // 1. 윈도우에서 만든 파일은 줄 끝이 \r\n 이다
+    std::istringstream windows("temp 21.5\r\nhumid 40\r\n");
+    std::string line;
+    while (std::getline(windows, line)) {
+        const auto before = line.size();
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        std::println("{}자 -> {}자 [{}]", before, line.size(), line);
+    }
+
+    // 2. >> 다음의 getline
+    std::istringstream in("3\nfirst line\n");
+    int count = 0;
+    in >> count;                // "3" 까지만 읽는다. 줄바꿈은 남는다
+    std::getline(in, line);
+    std::println("[{}]", line);
+
+    std::istringstream again("3\nfirst line\n");
+    again >> count;
+    std::getline(again >> std::ws, line);   // 앞의 공백과 줄바꿈을 버리고 읽는다
+    std::println("[{}]", line);
+}
+```
+
+```text
+10자 -> 9자 [temp 21.5]
+9자 -> 8자 [humid 40]
+[]
+[first line]
+```
+
+리눅스에서 `\r\n` 파일을 읽으면 줄마다 `\r`이 붙어 옵니다. 화면에 찍으면 보이지 않아서, `line == "humid 40"`이 거짓인 까닭을 한참 찾게 됩니다. 남이 만든 텍스트 파일을 읽는 코드에는 위의 두 줄을 넣어 둡니다.
+
+`>>`는 값 뒤의 줄바꿈을 읽지 않고 남깁니다. 바로 `getline`을 부르면 그 남은 줄바꿈까지만 읽어 빈 줄을 받습니다. `>>`와 `getline`을 섞지 않는 것이 가장 낫고, 섞어야 하면 `std::ws`를 끼웁니다.
+
+## 파일 전체를 한 번에
+
+설정 파일이나 셰이더처럼 통째로 필요한 파일을 `std::string`에 읽는 방법이 셋 있습니다.
+
+```cpp
+#include <cstddef>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <print>
+#include <sstream>
+#include <string>
+#include <utility>
+
+// 1. 반복자로: 한 글자씩 옮긴다
+std::string by_iterator(const std::filesystem::path& path)
+{
+    std::ifstream in(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+
+// 2. 버퍼째로: 스트림 버퍼를 다른 스트림에 쏟는다
+std::string by_rdbuf(const std::filesystem::path& path)
+{
+    std::ifstream in(path, std::ios::binary);
+    std::ostringstream out;
+    out << in.rdbuf();
+    return std::move(out).str();
+}
+
+// 3. 크기를 먼저 알아내고 한 번에 읽는다
+std::string by_read(const std::filesystem::path& path)
+{
+    std::ifstream in(path, std::ios::binary);
+    std::string content(std::filesystem::file_size(path), '\0');
+    in.read(content.data(), static_cast<std::streamsize>(content.size()));
+    content.resize(static_cast<std::size_t>(in.gcount()));
+    return content;
+}
+
+int main()
+{
+    const auto path = std::filesystem::temp_directory_path() / "na-all.txt";
+    {
+        std::ofstream out(path);
+        for (int i = 0; i < 1000; ++i)
+            out << "line " << i << '\n';
+    }
+    const auto a = by_iterator(path);
+    const auto b = by_rdbuf(path);
+    const auto c = by_read(path);
+    std::println("{} {} {} {}", a.size(), b.size(), c.size(), a == b && b == c);
+    std::filesystem::remove(path);
+}
+```
+
+```text
+8890 8890 8890 true
+```
+
+14.7MB짜리 파일로 잰 시간입니다(x86-64, GCC 14 `-O2`, 파일은 이미 메모리에 올라와 있는 상태).
+
+| 방법 | 시간 |
+| --- | --- |
+| 1. `istreambuf_iterator` | 15 ms |
+| 2. `out << in.rdbuf()` | 4 ms |
+| 3. `file_size` + `read` | 2 ms |
+
+작은 파일이면 무엇을 써도 됩니다. 큰 파일이면 3이 맞고, `/proc` 아래의 파일이나 파이프처럼 **크기를 미리 알 수 없는** 것(`file_size`가 0을 주거나 실패한다)은 2로 읽습니다. `std::ios::binary`를 붙인 것은 글자 수가 파일 크기와 정확히 맞게 하려는 것입니다.
+
+## 쓰기 오류는 늦게 드러난다
+
+`<<`는 글자를 버퍼에 넣을 뿐입니다. 디스크가 가득 찼는지는 버퍼를 **내보낼 때**에야 알 수 있습니다. 리눅스의 `/dev/full`은 쓰면 언제나 "공간 없음"을 돌려주는 장치라서, 이것으로 볼 수 있습니다.
+
+```cpp
+#include <fstream>
+#include <print>
+
+int main()
+{
+    std::ofstream out("/dev/full");
+    out << "temp 21.5\n";
+    std::println("<< 직후  {}", out.good());
+    out.flush();
+    std::println("flush 뒤 {}", out.good());
+}
+```
+
+```text
+<< 직후  true
+flush 뒤 false
+```
+
+`flush()`를 부르지 않았다면 소멸자가 닫으면서 내보내다 실패했을 것이고, **소멸자는 그 실패를 알리지 않습니다.** 잃으면 안 되는 파일을 쓰는 함수는 끝에서 직접 내보내고 상태를 돌려줍니다.
+
+```cpp nocheck
+bool save(const std::filesystem::path& path, std::string_view text)
+{
+    std::ofstream out(path, std::ios::binary);
+    out << text;
+    out.flush();
+    return out.good();      // 열기, 쓰기, 내보내기 가운데 하나라도 실패하면 false
+}
+```
+
+<Note kind="warn">
+이렇게 해도 쓰는 도중에 전원이 꺼지면 **반만 쓰인 파일**이 남습니다. 설정 파일처럼 깨지면 안 되는 것은 옆에 임시 파일로 다 쓴 다음 [이름을 바꿔](#/read/cpp-stl/fs-ops) 덮습니다. 이름 바꾸기는 한순간에 일어나므로 옛 파일이나 새 파일 가운데 하나가 온전히 남습니다. 그리고 `flush()`는 운영체제에 넘기는 데까지입니다. 디스크에 실제로 적혔다는 보장(`fsync`)은 표준 스트림에 없어서, 그것까지 필요하면 POSIX의 `open`, `write`, `fsync`를 직접 씁니다.
+</Note>
+
+## 정리
+
+- 파일 스트림은 열기에 실패해도 예외를 던지지 않는다. 연 직후에 `if (!stream)`으로 확인하고, `ofstream`의 기본 방식이 있던 내용을 비운다는 것을 기억한다
+- 줄 단위로 읽을 때는 줄 끝의 `\r`과, `>>` 뒤에 남는 줄바꿈을 조심한다
+- 쓰기 오류는 버퍼를 내보낼 때 드러난다. 중요한 파일은 `flush()` 뒤에 상태를 확인하고, 임시 파일에 쓴 다음 이름을 바꾼다

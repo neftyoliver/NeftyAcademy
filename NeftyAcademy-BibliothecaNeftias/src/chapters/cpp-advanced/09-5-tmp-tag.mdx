@@ -1,0 +1,180 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '빈 타입을 꼬리표로 넘겨 오버로드를 고르는 기법, 반복자의 등급, 이름 없는 생성자를 가르는 꼬리표';
+
+`std::unique_lock lock(m, std::defer_lock)`, `std::optional<T> o(std::in_place, …)`. 이 줄들의 둘째 인자는 값이 없는 **빈 타입의 객체**입니다. 하는 일은 하나, 어느 오버로드가 불릴지를 타입으로 정하는 것입니다. 꼬리표(tag)를 붙여 갈라 보낸다고 해서 태그 디스패치라고 부릅니다.
+
+## 꼬리표로 갈래를 고른다
+
+표준 라이브러리에서 가장 오래된 쓰임이 [반복자의 등급](#/read/cpp-stl/it-category)입니다. `std::advance`를 직접 만들어 봅니다.
+
+```cpp
+#include <forward_list>
+#include <iterator>
+#include <list>
+#include <print>
+#include <vector>
+
+int steps = 0;   // ++나 --를 몇 번 했는가
+
+template <typename It>
+void advance_impl(It& it, int n, std::input_iterator_tag)
+{
+    for (; n > 0; --n, ++steps)
+        ++it;
+}
+template <typename It>
+void advance_impl(It& it, int n, std::bidirectional_iterator_tag)
+{
+    for (; n > 0; --n, ++steps)
+        ++it;
+    for (; n < 0; ++n, ++steps)
+        --it;
+}
+template <typename It>
+void advance_impl(It& it, int n, std::random_access_iterator_tag)
+{
+    it += n;
+    ++steps;
+}
+
+template <typename It>
+void my_advance(It& it, int n)
+{
+    // 반복자의 등급을 나타내는 빈 타입의 객체를 만들어 넘긴다
+    advance_impl(it, n, typename std::iterator_traits<It>::iterator_category{});
+}
+
+template <typename Container>
+void try_it(const char* name, Container c)
+{
+    steps = 0;
+    auto it = c.begin();
+    my_advance(it, 4);
+    std::println("{}: 4칸 앞은 {}, {}걸음", name, *it, steps);
+}
+
+int main()
+{
+    try_it("vector", std::vector{0, 1, 2, 3, 4, 5});
+    try_it("list", std::list{0, 1, 2, 3, 4, 5});
+    try_it("forward_list", std::forward_list{0, 1, 2, 3, 4, 5});
+    std::println("꼬리표의 크기 {}바이트", sizeof(std::random_access_iterator_tag));
+}
+```
+
+```text
+vector: 4칸 앞은 4, 1걸음
+list: 4칸 앞은 4, 4걸음
+forward_list: 4칸 앞은 4, 4걸음
+꼬리표의 크기 1바이트
+```
+
+`iterator_traits<It>::iterator_category`는 타입입니다. `vector`의 반복자에서는 `std::random_access_iterator_tag`이고, 뒤에 `{}`를 붙여 그 타입의 객체를 하나 만들어 셋째 인자로 넘겼습니다. 오버로드 고르기는 평소대로 일어납니다.
+
+`forward_list`가 요점입니다. 그 등급은 `forward_iterator_tag`인데 그것을 받는 오버로드는 없습니다. 그래도 컴파일됩니다. 꼬리표들이 **상속으로 이어져 있기** 때문입니다. `forward_iterator_tag`는 `input_iterator_tag`의 자식이라 부모를 받는 오버로드로 갑니다. "딱 맞는 것이 없으면 한 단계 약한 것"이 상속 하나로 표현됩니다.
+
+## 세 가지 방법
+
+같은 일을 [`if constexpr`](#/read/cpp-syntax/ct-if)와 [콘셉트 오버로드](#/read/cpp-stl/tr-concepts)로도 할 수 있습니다.
+
+| | 꼬리표 | `if constexpr` | 콘셉트 오버로드 |
+| --- | --- | --- | --- |
+| 갈래를 적는 곳 | 오버로드 여럿과 넘겨주는 함수 | 함수 하나 안 | 오버로드 여럿 |
+| 딱 맞는 것이 없을 때 | 꼬리표의 부모로 간다 | 적어 둔 순서대로 | 포함 관계가 넓은 쪽으로 |
+| 갈래를 나중에 더하기 | 오버로드를 더한다 | 그 함수를 고친다 | 오버로드를 더한다 |
+| 쓸 수 있는 곳 | C++98부터 | C++17부터 | C++20부터 |
+
+`-O2`로 컴파일한 기계어는 셋이 같았습니다. `vector`의 반복자에 대해 GCC 14는 세 방식 모두 명령 여섯 개, Clang 20은 다섯 개를 냈습니다. 꼬리표는 빈 객체라 넘길 것이 없고, 오버로드는 컴파일할 때 정해지기 때문입니다.
+
+새로 쓰는 코드에서 갈래 고르기는 콘셉트나 `if constexpr`가 읽기 쉽습니다. 꼬리표가 여전히 제자리인 곳은 다음입니다.
+
+## 생성자에는 이름이 없다
+
+함수는 이름을 달리해 가를 수 있지만 생성자는 이름이 하나입니다. 인자의 타입이 같으면 가를 길이 없습니다. 그래서 꼬리표를 인자로 받습니다.
+
+```cpp
+#include <cstddef>
+#include <map>
+#include <mutex>
+#include <optional>
+#include <print>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <variant>
+#include <vector>
+
+// 나만의 꼬리표
+struct with_capacity_t {
+    explicit with_capacity_t() = default;
+};
+inline constexpr with_capacity_t with_capacity{};
+
+class Buffer {
+public:
+    // 원소 count개
+    explicit Buffer(std::size_t count) : data_(count) {}
+    // 빈 채로 자리만
+    Buffer(with_capacity_t, std::size_t capacity) { data_.reserve(capacity); }
+
+    std::size_t size() const { return data_.size(); }
+    std::size_t capacity() const { return data_.capacity(); }
+
+private:
+    std::vector<int> data_;
+};
+
+int main()
+{
+    Buffer filled(16);
+    Buffer empty(with_capacity, 16);
+    std::println("크기 {} / 크기 {}, 자리 {}", filled.size(), empty.size(),
+                 empty.capacity());
+
+    // in_place: 뒤의 인자들은 안에 든 것의 생성자로 간다
+    std::optional<std::string> dashes(std::in_place, 5, '-');
+    // in_place_index: 같은 타입이 둘일 때 몇 번째인지
+    std::variant<int, int> second(std::in_place_index<1>, 7);
+    // piecewise_construct: 묶음 둘을 열쇠와 값의 생성자로 따로 넘긴다
+    std::map<std::string, std::vector<int>> table;
+    table.emplace(std::piecewise_construct, std::forward_as_tuple(3, 'k'),
+                  std::forward_as_tuple(2, 9));
+    // defer_lock: 지금은 잠그지 않는다
+    std::mutex guard;
+    std::unique_lock lock(guard, std::defer_lock);
+
+    std::println("{} / {}번 칸 / {} → {}개 / 잠금 {}", *dashes, second.index(),
+                 table.begin()->first, table.begin()->second.size(),
+                 lock.owns_lock());
+}
+```
+
+```text
+크기 16 / 크기 0, 자리 16
+----- / 1번 칸 / kkk → 2개 / 잠금 false
+```
+
+`Buffer(16)`과 `Buffer(with_capacity, 16)`은 둘 다 `size_t` 하나를 받지만 뜻이 다릅니다. `std::vector`에 이 꼬리표가 없어서 "자리만 잡은 빈 벡터"를 만들려면 만든 뒤에 `reserve`를 불러야 합니다.
+
+| 표준의 꼬리표 | 쓰는 곳 | 뜻 |
+| --- | --- | --- |
+| `std::in_place` | [`optional`](#/read/cpp-stl/voc-optional), `expected` | 뒤의 인자로 안에서 직접 만든다 |
+| `std::in_place_type<T>`, `std::in_place_index<I>` | [`variant`](#/read/cpp-stl/voc-variant). `any`는 타입 쪽만 | 어느 타입, 몇 번째 칸을 만들지 |
+| `std::piecewise_construct` | `pair`, `map::emplace` | 묶음 둘을 풀어 각각의 생성자로 넘긴다 |
+| `std::defer_lock`, `std::try_to_lock`, `std::adopt_lock` | [`unique_lock`](#/read/cpp-advanced/sync-locks) | 잠금을 지금 할지, 떠볼지, 이미 했는지 |
+| `std::allocator_arg` | `tuple`, [코루틴](#/read/cpp-advanced/co-cost) | 바로 다음 인자가 할당자다 |
+| `std::nothrow` | `new (std::nothrow) T` | 실패하면 예외 대신 `nullptr` |
+| `std::unexpect` | [`expected`](#/read/cpp-stl/voc-expected) | 값이 아니라 오류 쪽을 만든다 |
+
+`in_place_index<1>`은 꼬리표가 **값을 실어 나르는** 모양입니다. 타입 `in_place_index_t<1>`에 숫자가 들어 있어서 실행 시간의 인자 없이 "1번 칸"을 전합니다.
+
+<Note kind="warn">
+꼬리표 타입의 기본 생성자에는 `explicit`를 붙입니다. 붙이지 않으면 `Buffer b({}, 16);`의 빈 중괄호가 꼬리표로 바뀌어 뜻하지 않은 생성자가 불립니다. 붙이면 그 줄은 컴파일 오류가 됩니다. 표준의 꼬리표들도 그렇게 정의되어 있습니다.
+</Note>
+
+## 정리
+
+- 태그 디스패치는 빈 타입의 객체를 인자로 넘겨 오버로드를 고르게 한다. 실행 시간의 값은 없다
+- 반복자의 등급 꼬리표는 상속으로 이어져 있어, 딱 맞는 오버로드가 없으면 부모 쪽으로 간다
+- 갈래 고르기는 콘셉트와 `if constexpr`로 옮겨 갔다. 이름 없는 생성자를 가르는 데는 지금도 꼬리표를 쓴다

@@ -1,0 +1,112 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '적지 않아도 일어나는 변환들, 정수 올림과 부호 섞임의 함정, 막는 도구';
+
+변환 연산자를 쓰지 않아도 컴파일러는 타입을 바꿉니다. 대부분은 C에서 물려받은 규칙이고, 대부분은 편리하며, 몇 가지는 버그의 단골입니다.
+
+## 조용히 일어나는 일
+
+```cpp
+#include <cstdint>
+#include <print>
+#include <type_traits>
+#include <utility>
+
+int main()
+{
+    std::uint8_t a = 200, b = 100;
+    auto sum = a + b;                       // 둘 다 int로 올라간 뒤 더해진다
+    std::println("{} {}", sum, std::is_same_v<decltype(sum), int>);
+
+    std::uint8_t wrapped = a + b;           // int 300을 다시 8비트에 넣는다
+    std::println("{}", wrapped);
+
+    int i = -1;
+    unsigned u = 0;
+    std::println("{}", std::is_same_v<decltype(i + u), unsigned>);
+    std::println("{}", i + u);              // -1이 unsigned로 바뀐 뒤 더해진다
+
+    double ratio = 7 / 2;                   // 정수끼리 나눈 뒤에 double이 된다
+    std::println("{}", ratio);
+
+    bool fits8 = std::in_range<std::uint8_t>(300);
+    bool fits32 = std::in_range<int>(300);
+    std::println("{} {}", fits8, fits32);
+}
+```
+
+```text
+300 true
+44
+true
+4294967295
+3
+false true
+```
+
+## 산술에서의 규칙
+
+연산자의 두 피연산자는 계산 전에 **같은 타입으로** 맞춰집니다.
+
+| 단계 | 규칙 | 예 |
+| --- | --- | --- |
+| 1. 정수 올림 | `int`보다 작은 정수(`char`, `short`, `uint8_t`, `bool`)는 먼저 `int`가 된다 | `uint8_t + uint8_t` → `int` |
+| 2. 한쪽이 실수면 | 다른 쪽도 그 실수 타입이 된다 | `int + double` → `double` |
+| 3. 둘 다 정수면 | 더 큰 타입으로. 크기가 같고 부호만 다르면 **`unsigned`가 이긴다** | `int + unsigned` → `unsigned` |
+
+1번 때문에 `uint8_t` 둘을 더해도 넘치지 않고 300이 나옵니다. 넘침이 일어나는 것은 그 결과를 다시 `uint8_t`에 **넣을 때**입니다.
+
+3번이 [`-1 < 1u`가 거짓](#/read/cpp-syntax/types-builtin)이 되는 까닭입니다. 길이(`size_t`, 부호 없음)와 인덱스(`int`)를 섞는 순간 일어납니다.
+
+<Note kind="warn">
+`std::uint16_t x = 0xFFFF; auto y = x * x;`는 **정의되지 않은 동작**입니다. `x`가 `int`로 올라가고, 65535 × 65535는 32비트 `int`의 범위를 넘으며, 부호 있는 정수의 넘침은 정의되지 않았습니다. "부호 없는 타입이니 넘쳐도 감긴다"는 믿음이 `int`보다 작은 타입에서는 통하지 않습니다. `1u * x * x`처럼 먼저 `unsigned`로 끌어올립니다.
+</Note>
+
+## 대입과 인자에서의 규칙
+
+대입하거나 인자로 넘길 때는 **받는 쪽의 타입**으로 바뀝니다. 값을 잃는 변환도 말없이 됩니다.
+
+| 변환 | 값 | 안전한가 |
+| --- | --- | --- |
+| `int` → `long long`, `float` → `double` | 그대로 | 안전 |
+| `int` → `double` | 그대로 | 안전 |
+| `long long` → `double` | 2⁵³을 넘으면 끝자리를 잃는다 | 조심 |
+| `double` → `int` | 소수부를 버린다. 범위를 넘으면 정의되지 않은 동작 | 위험 |
+| `long long` → `int`, `int` → `uint8_t` | 윗비트를 버린다 | 위험 |
+| `int` → `unsigned` | 음수가 큰 양수가 된다 | 위험 |
+| `int` → `float` | 2²⁴(약 1677만)을 넘으면 끝자리를 잃는다 | 조심 |
+| 숫자, 포인터 → `bool` | 0과 `nullptr`만 `false` | `if (p)`는 편리. `bool flag = 3.7;`은 수상 |
+
+## 포인터와 클래스에서
+
+| 변환 | 예 |
+| --- | --- |
+| 배열 → 첫 원소의 포인터 | `int a[4]; int* p = a;` 길이를 잃는다. [`std::span`](#/read/cpp-syntax/ft-array-span)을 쓴다 |
+| `T*` → `const T*` | `const`를 붙이는 쪽은 늘 된다 |
+| 자식 포인터·참조 → [부모 포인터·참조](#/read/cpp-syntax/inh-public) | `Led*` → `Device*` |
+| `T*` → `void*` | 거꾸로는 `static_cast`가 필요하다 (C와 다르다) |
+| `nullptr` → 어떤 포인터든 | 정수 `0`보다 `nullptr`을 쓴다 |
+| [인자 하나짜리 생성자](#/read/cpp-syntax/class-explicit) | `std::string s = "text";` |
+| [변환 연산자](#/read/cpp-syntax/op-conversion) | `if (file)` |
+
+사용자가 정의한 변환(생성자, 변환 연산자)은 한 번의 변환에서 **하나까지만** 쓰입니다. `const char*` → `std::string` → `Name`처럼 둘을 잇는 일은 저절로 일어나지 않습니다.
+
+## 막는 도구
+
+| 도구 | 잡는 것 |
+| --- | --- |
+| `T x{값};` | [좁아지는 변환](#/read/cpp-syntax/types-init)을 컴파일 오류로 |
+| `-Wconversion` | 값을 잃을 수 있는 암시적 변환 |
+| `-Wsign-conversion`, `-Wsign-compare` | 부호가 바뀌는 변환, 부호가 섞인 비교 |
+| `std::cmp_less(a, b)` 등 (`<utility>`) | 부호가 달라도 수학적으로 옳은 비교 |
+| `std::in_range<T>(v)` (`<utility>`) | `v`가 `T`에 들어가는가 |
+| `explicit` | 내 타입의 생성자와 변환 연산자가 암시적으로 쓰이지 않게 |
+| `auto` | 타입을 다시 적다가 바꿔 버리는 실수 |
+
+`-Wconversion`은 `-Wall`과 `-Wextra`에 **들어 있지 않습니다.** 옛 코드에 켜면 경고가 쏟아지지만, 새 프로젝트라면 처음부터 켜 두고 값이 잘리는 자리마다 [`static_cast`](#/read/cpp-syntax/cast-static)로 뜻을 밝히는 편이 좋습니다. 센서 값과 레지스터를 다루는 코드에서 특히 값집니다.
+
+## 정리
+
+- `int`보다 작은 정수는 계산 전에 `int`가 된다. 부호가 섞이면 `unsigned`가 이긴다
+- 대입과 인자 전달은 값을 잃는 변환도 말없이 한다
+- 중괄호 초기화, `-Wconversion`, `std::cmp_less`, `std::in_range`로 막는다

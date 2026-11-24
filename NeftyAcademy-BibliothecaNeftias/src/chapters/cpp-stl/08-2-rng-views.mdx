@@ -1,0 +1,229 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '소유하지 않고 게으른 레인지, 뷰가 일하는 때, 자주 쓰는 뷰들, 글자열 토막 내기';
+export const terms = [
+  'std::views', 'views::filter', 'views::transform', 'views::take', 'views::drop', 'views::iota',
+  'views::zip', 'views::enumerate', 'views::reverse', 'views::split', 'views::chunk',
+  'views::slide', 'views::keys', 'views::values', 'views::take_while', 'views::drop_while',
+  'views::elements', 'views::stride', 'views::adjacent', 'views::repeat', 'ranges::view',
+  'ranges::views',
+];
+
+**뷰**(view)는 다른 레인지를 **가리키기만** 하는 가벼운 레인지입니다. 원소를 복사해 들고 있지 않고, "저 레인지를 이렇게 보겠다"는 방법만 들고 있습니다. `std::string_view`와 `std::span`이 뷰이고, `<ranges>`의 `std::views::` 아래에 걸러 보기, 바꿔 보기, 잘라 보기 같은 뷰가 서른 개쯤 있습니다.
+
+## 게으르다
+
+뷰를 만드는 것만으로는 아무 일도 일어나지 않습니다. 원소를 **꺼내는 순간에** 그 원소만큼만 일합니다.
+
+```cpp
+#include <print>
+#include <ranges>
+#include <vector>
+
+int main()
+{
+    const std::vector<int> v = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+
+    auto evens = v | std::views::filter([](int x) {
+        std::println("  검사 {}", x);
+        return x % 2 == 0;
+    });
+    std::println("뷰를 만들었다");
+
+    for (int x : evens | std::views::take(2))
+        std::println("받음 {}", x);
+}
+```
+
+```text
+뷰를 만들었다
+  검사 1
+  검사 2
+받음 2
+  검사 3
+  검사 4
+받음 4
+  검사 5
+  검사 6
+```
+
+"뷰를 만들었다"가 먼저 찍혔습니다. 그리고 7부터는 건드리지 않고 끝났습니다. 원소가 100만 개여도, 끝이 없는 레인지여도 필요한 만큼만 일합니다.
+
+끝의 `검사 5`, `검사 6`은 눈여겨볼 곳입니다. `take`는 둘째 원소를 내준 뒤에도 한 칸 더 나아가고, `filter`는 그 한 칸을 가느라 다음 짝수를 찾습니다. 대개는 해가 없지만, 조건 함수에 부작용이 있거나 장치에서 읽어 오는 레인지라면 **쓰지 않을 원소 하나를 더 읽습니다.**
+
+| | 컨테이너 | 뷰 |
+| --- | --- | --- |
+| 원소를 | 소유한다 | 가리킨다 |
+| 복사하면 | 원소를 모두 복사한다 | 가리키는 방법만 복사한다. O(1) |
+| 계산은 | 넣을 때 끝나 있다 | 꺼낼 때마다 한다 |
+
+"꺼낼 때마다"가 값입니다. 같은 뷰를 두 번 돌면 `filter`의 조건도 `transform`의 함수도 두 번 불립니다. 여러 번 쓸 결과는 [`std::ranges::to`](#/read/cpp-stl/rng-algorithms)로 컨테이너에 굳힙니다.
+
+## 자주 쓰는 뷰
+
+```cpp
+#include <map>
+#include <print>
+#include <ranges>
+#include <string>
+#include <vector>
+
+void show(const char* label, std::ranges::input_range auto&& values)
+{
+    std::print("{:12}", label);
+    for (const auto& v : values)
+        std::print("{} ", v);
+    std::println("");
+}
+
+int main()
+{
+    const std::vector<int> v = {1, 2, 3, 4, 5, 6, 7};
+    const auto odd = [](int x) { return x % 2 == 1; };
+
+    show("filter", v | std::views::filter(odd));
+    show("transform", v | std::views::transform([](int x) { return x * 10; }));
+    show("take", v | std::views::take(3));
+    show("drop", v | std::views::drop(5));
+    show("take_while", v | std::views::take_while([](int x) { return x < 4; }));
+    show("reverse", v | std::views::reverse);
+    show("stride", v | std::views::stride(3));              // C++23
+    show("iota", std::views::iota(5, 9));
+    show("repeat", std::views::repeat(7) | std::views::take(3));    // C++23
+
+    const std::map<std::string, int> pins = {{"led", 17}, {"fan", 4}};
+    show("keys", pins | std::views::keys);
+    show("values", pins | std::views::values);
+}
+```
+
+```text
+filter      1 3 5 7
+transform   10 20 30 40 50 60 70
+take        1 2 3
+drop        6 7
+take_while  1 2 3
+reverse     7 6 5 4 3 2 1
+stride      1 4 7
+iota        5 6 7 8
+repeat      7 7 7
+keys        fan led
+values      4 17
+```
+
+| 뷰 | 보여 주는 것 |
+| --- | --- |
+| `filter(조건)` | 조건에 맞는 원소만 |
+| `transform(함수)` | 원소마다 함수를 적용한 결과 |
+| `take(n)`, `drop(n)` | 앞의 n개, 앞의 n개를 뺀 나머지 |
+| `take_while(조건)`, `drop_while(조건)` | 조건이 맞는 동안, 그 뒤부터 |
+| `reverse` | 거꾸로 |
+| `keys`, `values`, `elements<N>` | 쌍이나 튜플의 한 자리 |
+| `iota(a, b)`, `iota(a)` | a부터 1씩 느는 수. 끝을 안 주면 끝이 없다 |
+
+`take`와 `take_while`은 [센티널](#/read/cpp-stl/it-sentinel)을 직접 쓰지 않고 "여기까지만"을 말하는 방법입니다.
+
+## 묶어 보기
+
+C++23에서 여러 레인지를 엮거나 원소를 몇 개씩 묶어 보는 뷰가 더해졌습니다. GCC 14에서 모두 됩니다.
+
+```cpp
+#include <print>
+#include <ranges>
+#include <string>
+#include <vector>
+
+int main()
+{
+    const std::vector<std::string> names = {"temp", "humid", "press"};
+    const std::vector<double> values = {23.5, 41.0, 1013.2};
+
+    for (const auto& [name, value] : std::views::zip(names, values))    // 짝지어
+        std::print("{}={} ", name, value);
+    std::println("");
+
+    // 번호를 붙여
+    for (const auto& [index, name] : names | std::views::enumerate)
+        std::print("{}:{} ", index, name);
+    std::println("");
+
+    const std::vector<int> samples = {1, 2, 3, 4, 5, 6, 7};
+    for (auto block : samples | std::views::chunk(3)) {     // 셋씩 끊어
+        for (int s : block)
+            std::print("{}", s);
+        std::print(" ");
+    }
+    std::println("");
+
+    for (auto window : samples | std::views::slide(3)) {    // 셋씩, 한 칸씩 밀며
+        int sum = 0;
+        for (int s : window)
+            sum += s;
+        std::print("{} ", sum);
+    }
+    std::println("");
+
+    for (auto [before, after] : samples | std::views::adjacent<2>)     // 이웃한 둘
+        std::print("{} ", after - before);
+    std::println("");
+}
+```
+
+```text
+temp=23.5 humid=41 press=1013.2
+0:temp 1:humid 2:press
+123 456 7
+6 9 12 15 18
+1 1 1 1 1 1
+```
+
+`zip`은 이름과 값을 따로 든 두 배열을 함께 돌 때, `enumerate`는 첨자가 필요한 범위 기반 for에, `slide`는 이동 평균 같은 창 계산에 씁니다. `zip`은 가장 짧은 쪽에서 끝납니다.
+
+## 글자열 토막 내기
+
+`std::views::split`은 구분자로 나뉜 토막들을 줍니다. 토막 하나하나는 원래 글자를 가리키는 작은 레인지입니다.
+
+```cpp
+#include <charconv>
+#include <print>
+#include <ranges>
+#include <string_view>
+
+int main()
+{
+    const std::string_view line = "temp=23.5,humid=41,press=1013.2";
+
+    for (const auto field : line | std::views::split(',')) {
+        const std::string_view text(field);         // 토막을 string_view 로 (C++23)
+        const auto eq = text.find('=');
+        double value = 0;
+        std::from_chars(text.data() + eq + 1, text.data() + text.size(), value);
+        std::println("{:5} -> {}", text.substr(0, eq), value);
+    }
+
+    // 구분자가 한 글자가 아니어도 된다
+    const std::string_view path = "a::b::c";
+    for (const auto word : path | std::views::split(std::string_view("::")))
+        std::print("[{}] ", std::string_view(word));
+    std::println("");
+}
+```
+
+```text
+temp  -> 23.5
+humid -> 41
+press -> 1013.2
+[a] [b] [c]
+```
+
+[앞에서 손으로 만든 `split`](#/read/cpp-stl/str-view)과 같은 일을 하되, 토막을 담을 `vector`조차 만들지 않습니다. 토막을 하나 꺼낼 때마다 다음 구분자까지만 찾습니다.
+
+<Note kind="warn">
+뷰는 가리키는 레인지보다 오래 살 수 없습니다. `std::string_view`와 같습니다. 함수 안의 `vector`에 건 뷰를 돌려주거나, 뷰를 만든 뒤 원래 `vector`에 `push_back`을 하면 죽은 곳을 가리킵니다. 뷰는 **만든 자리에서 바로 돌고 버리는 것**으로 쓰는 것이 안전하고, [「댕글링과 빌린 레인지」](#/read/cpp-stl/rng-dangling)에서 자세히 봅니다.
+</Note>
+
+## 정리
+
+- 뷰는 소유하지 않고 게으르다. 만들 때가 아니라 원소를 꺼낼 때 일한다
+- 걸러 보기 `filter`, 바꿔 보기 `transform`, 잘라 보기 `take`·`drop`, 엮어 보기 `zip`·`enumerate`·`slide`
+- 여러 번 쓸 결과는 컨테이너로 굳힌다. 뷰를 원본보다 오래 들고 있지 않는다

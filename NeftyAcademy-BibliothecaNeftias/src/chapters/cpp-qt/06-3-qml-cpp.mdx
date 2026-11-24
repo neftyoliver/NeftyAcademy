@@ -1,0 +1,147 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'C++ 타입을 QML에 내놓기: 속성·메서드·시그널, 타입 등록과 싱글턴, 역할 이름 모델, QML_ELEMENT';
+export const terms = ['QQmlEngine', 'QML_ELEMENT', 'qmlRegisterType', 'QML_SINGLETON'];
+
+QML은 화면을 그리는 데 뛰어나지만, 파일을 읽고, 장치와 통신하고, 무거운 계산을 하는 일은 C++가 맡는 것이 좋습니다. 둘을 잇는 방법은 하나입니다. C++ 클래스를 QObject로 만들어 속성, 호출 가능 메서드, 시그널을 메타 객체에 올리고([「moc가 하는 일」](#/read/cpp-qt/obj-moc)), 그 타입이나 객체를 QML 엔진에 알려 주는 것입니다. 그러면 QML은 그것을 자기 타입처럼 씁니다.
+
+## 계수기와 할 일 목록
+
+```cpp qt=Qml
+#include <QAbstractListModel>
+#include <QCoreApplication>
+#include <QQmlComponent>
+#include <QQmlEngine>
+#include <cstdio>
+
+// QML에서 쓸 C++ 타입: 속성, 호출 가능 메서드, 시그널
+class Counter : public QObject {
+    Q_OBJECT
+    Q_PROPERTY(int value READ value WRITE setValue NOTIFY valueChanged)
+public:
+    int value() const { return v; }
+    void setValue(int x) {
+        if (x != v) { v = x; emit valueChanged(); }
+    }
+    Q_INVOKABLE void add(int n) { setValue(v + n); }
+signals:
+    void valueChanged();
+private:
+    int v = 0;
+};
+
+// QML의 Repeater·ListView가 읽을 수 있는 모델: 역할에 이름을 붙인다
+class Tasks : public QAbstractListModel {
+public:
+    enum { TitleRole = Qt::UserRole + 1, DoneRole };
+    QList<QPair<QString, bool>> rows{
+        {"설계", true}, {"구현", false}, {"시험", false}};
+    int rowCount(const QModelIndex& = {}) const override { return rows.size(); }
+    QVariant data(const QModelIndex& i, int role) const override {
+        if (role == TitleRole) return rows[i.row()].first;
+        if (role == DoneRole) return rows[i.row()].second;
+        return {};
+    }
+    QHash<int, QByteArray> roleNames() const override {   // QML에서 쓸 이름
+        return {{TitleRole, "title"}, {DoneRole, "done"}};
+    }
+};
+
+void toStdout(QtMsgType, const QMessageLogContext&, const QString& m) {
+    std::printf("[console] %s\n", qPrintable(m));
+}
+
+int main(int argc, char** argv) {
+    qInstallMessageHandler(toStdout);
+    QCoreApplication app(argc, argv);
+    // 1) 타입 등록: QML에서 Counter { } 로 만들 수 있게
+    qmlRegisterType<Counter>("App", 1, 0, "Counter");
+    // 2) 이미 있는 C++ 객체 하나를 이름으로 내놓기(싱글턴)
+    Tasks tasks;
+    qmlRegisterSingletonInstance("App", 1, 0, "TaskList", &tasks);
+
+    QQmlEngine engine;
+    QQmlComponent comp(&engine);
+    comp.setData(R"(
+import QtQml
+import App
+
+QtObject {
+    property Counter counter: Counter {
+        onValueChanged: console.log("C++ 속성 바뀜:", value)
+    }
+    property string label: "값 " + counter.value       // C++ 속성에 바인딩
+    property Instantiator rows: Instantiator {         // 모델 행마다 객체 하나
+        model: TaskList
+        delegate: QtObject {
+            required property string title
+            required property bool done
+            Component.onCompleted: console.log(done ? "[x]" : "[ ]", title)
+        }
+    }
+    Component.onCompleted: {
+        counter.add(5)                                 // Q_INVOKABLE 부르기
+        counter.value = 7                              // WRITE 함수를 거친다
+        console.log("label =", label)
+    }
+}
+)", QUrl("main.qml"));
+    QObject* root = comp.create();
+    if (!root) { std::printf("%s\n", qPrintable(comp.errorString())); return 1; }
+
+    auto* c = root->property("counter").value<Counter*>();   // QML이 만든 C++ 객체
+    c->add(3);
+    std::printf("C++에서 add(3) 뒤 QML의 label = %s\n",
+                qPrintable(root->property("label").toString()));
+    delete root;
+}
+#include "main.moc"
+```
+
+```text
+[console] [x] 설계
+[console] [ ] 구현
+[console] [ ] 시험
+[console] C++ 속성 바뀜: 5
+[console] C++ 속성 바뀜: 7
+[console] label = 값 7
+[console] C++ 속성 바뀜: 10
+C++에서 add(3) 뒤 QML의 label = 값 10
+```
+
+## C++ 쪽에서 내놓는 것
+
+- **속성**(`Q_PROPERTY` + NOTIFY): QML이 읽고, 쓰고, 바인딩합니다. `label: "값 " + counter.value`는 C++의 `valueChanged` 시그널에 묶여, C++에서 `add(3)`을 하자 QML의 `label`이 "값 10"이 되었습니다. NOTIFY가 없는 속성은 바인딩이 따라가지 못하고 경고가 납니다
+- **Q_INVOKABLE 메서드와 슬롯**: QML에서 `counter.add(5)`처럼 부릅니다. 인자와 반환값은 QML 타입(int, real, string, list, 객체)으로 자동 변환됩니다
+- **시그널**: QML에서 `onValueChanged` 처리기로 받습니다. 시그널 인자도 처리기의 매개변수가 됩니다
+
+## 엔진에 알리는 방법
+
+- **타입 등록** `qmlRegisterType<Counter>("App", 1, 0, "Counter")`: QML 파일에서 `import App` 뒤 `Counter { }`로 객체를 만들 수 있습니다. QML이 만든 객체는 QML의 객체 나무가 소유합니다
+- **싱글턴 인스턴스** `qmlRegisterSingletonInstance`: C++에서 이미 만든 객체 하나를 이름으로 내놓습니다. 앱 전체의 설정, 장치 연결, 데이터 저장소처럼 하나만 있는 것에 씁니다. 예전 코드의 `setContextProperty`도 비슷한 일을 하지만, 타입 정보를 도구가 모르므로 새 코드에서는 싱글턴이나 다음의 선언형 등록을 씁니다
+- **모델**: `QAbstractListModel`에 `roleNames()`로 역할마다 이름을 붙이면, QML의 `ListView`, `Repeater`, `Instantiator`가 delegate 안에서 `title`, `done`처럼 이름으로 읽습니다. 예제는 delegate에 `required property`로 받을 역할을 밝혀 두었는데, Qt 6에서 권장하는 방식입니다
+
+## 실제 프로젝트에서는 QML_ELEMENT
+
+예제는 파일 하나로 만들려고 `qmlRegisterType`을 직접 불렀습니다. 실제 Qt 6 프로젝트에서는 클래스 선언에 `QML_ELEMENT`(또는 `QML_SINGLETON`) 매크로를 붙이고, CMake에서 QML 모듈을 만듭니다.
+
+```cmake
+qt_add_qml_module(app
+    URI App
+    VERSION 1.0
+    QML_FILES Main.qml
+    SOURCES counter.h counter.cpp tasks.h tasks.cpp
+)
+```
+
+그러면 빌드할 때 타입 등록 코드가 자동으로 생성되고, `qmllint`와 Qt Creator의 자동 완성이 C++ 타입의 속성까지 알게 되며, QML 파일을 미리 컴파일하는 도구(`qmlcachegen`)가 타입을 알고 더 빠른 코드를 만듭니다.
+
+<Note>
+QML에서 쓰는 C++ 객체의 수명을 조심하세요. QML이 만든 객체(`Counter { }`)는 QML이 소유하고, C++에서 만들어 넘긴 객체는 C++가 소유하는 것이 원칙입니다. C++ 함수가 부모 없는 새 QObject를 돌려주면 QML의 자바스크립트 쓰레기 수집기가 소유권을 가져가 지울 수 있으므로, 그 객체를 C++에서 계속 쓸 생각이면 부모를 주거나 `QQmlEngine::setObjectOwnership`으로 소유를 명시합니다.
+</Note>
+
+## 정리
+
+- C++ 클래스를 QObject로 만들어 속성(NOTIFY 포함), Q_INVOKABLE 메서드, 시그널을 올리면 QML이 그대로 쓰고 바인딩한다
+- 타입은 qmlRegisterType으로, 하나뿐인 객체는 싱글턴으로 내놓고, 모델은 roleNames로 역할 이름을 붙인다
+- 실제 프로젝트에서는 QML_ELEMENT와 qt_add_qml_module로 선언형 등록을 하며, 객체 소유권을 분명히 한다

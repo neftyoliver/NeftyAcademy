@@ -1,0 +1,136 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'assert가 못 하던 것과 C++26 초안의 계약. 네 가지 평가 방식을 흉내 내어 잰 값, 무엇을 두고 다투는가';
+export const terms = ['contract_assert', '~pre', '~post'];
+
+[「인터페이스 설계」](#/read/cpp-advanced/des-interface)와 [「오류 전달 전략」](#/read/cpp-advanced/des-errors)에서 타입으로 못 막는 조건은 `assert`로 확인하고, 어긴 것은 버그이므로 멈춘다고 했습니다. 계약은 그 `assert`를 언어의 일부로 올린 것입니다. `assert`의 한계부터 봅니다.
+
+## assert가 못 하는 것
+
+| 한계 | 돌려 본 것 |
+| --- | --- |
+| 조건이 본문 안에 있다 | 선언만 보는 사람과 도구는 조건을 모른다 |
+| 조건 안에 일을 넣을 수 있다 | `assert(take())`가 든 프로그램이 `taken=9 left=2`를 찍다가 `-DNDEBUG`에서는 `taken=0 left=3`을 찍었다 |
+| 켜고 끄기가 파일마다다 | `assert`가 든 `inline` 함수를 두 파일이 쓰고 한쪽만 `-DNDEBUG`로 빌드했다. `-O0`에서는 링크 순서가 두 파일의 답을 함께 정했다 |
+
+셋째는 [경화의 단언에서 본 것](#/read/cpp-advanced/safe-hardening)과 같은 일입니다. 켠 파일이 먼저 링크되면 끈 파일도 멈췄고, 끈 파일이 먼저면 켠 파일도 지나쳤습니다. 여기에 넷째가 있습니다. 어겼을 때 하는 일이 "메시지를 찍고 `abort`" 하나뿐이어서, 기록을 남기거나 다르게 끝내려는 프로젝트는 저마다 자기 매크로를 만듭니다.
+
+## 초안의 계약
+
+```cpp nocheck
+int scale(const int value, int percent)
+    pre (percent >= 0 && percent <= 100)        // 불리기 전에 참이어야 한다
+    post (result : result <= value);            // 돌려줄 때 참이어야 한다
+
+void drain(Queue& queue)
+{
+    while (!queue.empty()) queue.pop();
+    contract_assert(queue.empty());             // 본문 안의 단언
+}
+```
+
+C++26 초안(N5050)의 문법입니다. GCC 14와 Clang 20은 이 문법을 받지 않아서 **이 블록은 컴파일해 보지 못했습니다.** 아래의 규칙은 초안의 글에서 확인한 것입니다.
+
+| 규칙 | `assert`와 다른 점 |
+| --- | --- |
+| `pre`와 `post`는 함수의 첫 선언에 적는다 | 조건이 헤더에 보인다. 다시 선언할 때는 빼거나 똑같이 적는다 |
+| 조건 안에서 바깥의 변수는 `const`로 보인다 | `pre (++count)`는 컴파일 오류다. 포인터 너머까지 막지는 못한다 |
+| 조건은 평가되지 않을 수도, 여러 번 평가될 수도 있다 | 조건에 기대는 부작용을 처음부터 쓸 수 없게 한다 |
+| `post`는 정상으로 돌아갈 때만 본다 | 예외로 나가면 검사하지 않는다 |
+| `post`가 값 매개변수를 쓰려면 그것이 `const`여야 한다 | 본문이 바꾼 값으로 검사하는 일을 막는다. 위의 `value`가 그래서 `const`다 |
+| 가상 함수에는 붙일 수 없다 | 초안에 들어가지 못한 부분이다 |
+
+## 네 가지 평가 방식
+
+조건을 어겼을 때 무슨 일이 일어나는지는 코드에 적지 않습니다. **빌드가 정합니다.**
+
+| 방식 | 조건 | 어기면 |
+| --- | --- | --- |
+| ignore | 평가하지 않는다 | 아무 일도 없다 |
+| observe | 평가한다 | 처리기를 부르고 **계속 간다** |
+| enforce | 평가한다 | 처리기를 부르고, 처리기가 돌아오면 끝낸다 |
+| quick-enforce | 평가한다 | 처리기 없이 바로 끝낸다 |
+
+처리기는 `::handle_contract_violation`이라는 함수이고, 어긴 종류와 위치와 조건의 글이 담긴 `std::contracts::contract_violation`을 받습니다. 프로그램이 이 함수를 바꿔 끼울 수 있는지는 구현이 정합니다. 초안은 enforce를 기본으로 하고 전부 ignore로 돌리는 옵션을 두라고 권합니다.
+
+이 넷을 매크로로 흉내 내어 돌려 봤습니다. 계약 그 자체가 아니라, 같은 뜻의 코드를 손으로 쓴 것입니다.
+
+```cpp
+#include <exception>
+#include <print>
+#include <source_location>
+
+struct Violation {
+    const char* comment;
+    std::source_location where;
+};
+void handle_violation(const Violation& v)
+{
+    std::println("{}번 줄에서 어겼다: {}", v.where.line(), v.comment);
+}
+
+#define REPORT(c) handle_violation({#c, std::source_location::current()})
+#define PRE_IGNORE(c) ((void)sizeof(!(c)))
+#define PRE_OBSERVE(c) ((c) ? (void)0 : REPORT(c))
+#define PRE_ENFORCE(c) ((c) ? (void)0 : (REPORT(c), std::terminate()))
+#define PRE_QUICK_ENFORCE(c) ((c) ? (void)0 : __builtin_trap())
+
+#define PRE PRE_OBSERVE          // 방식은 한곳에서 고른다
+
+int scale(int value, int percent)
+{
+    PRE(percent >= 0 && percent <= 100);
+    return value * percent / 100;
+}
+
+int main()
+{
+    std::println("{}", scale(200, 50));
+    std::println("{}", scale(200, 150));        // 어긴다
+    std::println("끝까지 왔다");
+}
+```
+
+```text
+100
+24번 줄에서 어겼다: percent >= 0 && percent <= 100
+300
+끝까지 왔다
+```
+
+observe는 알리고 나서 **틀린 인자로 계산을 계속했습니다.** 이미 도는 코드에 조건을 새로 붙일 때 무엇이 걸리는지 살피는 용도이지, 막는 장치가 아닙니다. 원소 4,096개짜리 버퍼의 `at(i)`에 이 매크로를 넣고 쟀습니다(GCC 14 `-O2`).
+
+| 방식 | 차례로 읽기 | 섞인 번호로 읽기 | 검사 1,000곳의 코드 |
+| --- | --- | --- | --- |
+| ignore | 0.26 ns | 0.26 ns | 16 KB |
+| observe | 0.27 | 0.37 | 128 KB |
+| enforce | 0.26 | 0.31 | 32 KB |
+| quick-enforce | 0.26 | 0.31 | 34 KB |
+
+- **끝내는 방식은 쌉니다.** 실패하는 길이 돌아오지 않으므로 컴파일러가 그 길을 한쪽으로 치워 둡니다. Clang 20에서는 차례로 읽는 루프가 enforce와 quick-enforce에서도 ignore와 같은 0.13이었습니다.
+- **observe가 가장 비쌉니다.** 처리기에서 돌아와 이어 가야 하므로 검사마다 돌아올 길이 붙습니다. Clang에서 차례로 읽기가 0.13에서 0.28이 됐고, 코드는 GCC에서 여덟 배였습니다.
+- **끝내는 방식은 작기도 합니다.** GCC에서는 둘 다 검사 하나에 16~18바이트를 더했습니다. Clang에서는 quick-enforce가 16바이트, enforce가 62바이트였습니다. 초안이 quick-enforce를 따로 둔 까닭이 이 크기입니다.
+
+## 다투는 것
+
+위원회는 2025년 2월에 계약을 초안에 넣었고, 2026년 10월의 최종 투표는 [부결됐습니다](#/read/cpp-syntax/ver-26). 반대의 까닭으로 알려진 것이 계약입니다. 쟁점은 위의 표에서 바로 나옵니다.
+
+- **같은 코드가 빌드에 따라 검사하기도 하고 안 하기도 합니다.** 찬성하는 쪽은 시험할 때와 내보낼 때 방식을 고르게 하려는 의도된 설계이고 여러 해에 걸쳐 거듭 승인됐다고 말합니다. 반대하는 쪽은 꺼질 수 있는 검사를 안전 장치로 믿기 어렵고 설계가 덜 익었다고 말합니다.
+- **[경화된 전제 조건](#/read/cpp-advanced/safe-hardening)이 계약의 말로 적혀 있습니다.** 계약을 빼려면 경화를 다시 적어야 하고, 둘을 떼어 달라는 요구가 여럿 있었습니다.
+- **가상 함수가 빠졌습니다.** 상속으로 만든 인터페이스에는 조건을 적을 수 없습니다.
+
+<Note>
+2026년 11월 21일 현재 위원회가 다음 길을 정하는 회의를 열고 있고 결과는 공개되지 않았습니다. GCC 16이 실험 단계로 구현했다고 알려져 있지만 이 책에서는 돌려 보지 못했습니다. GCC 14의 `-fcontracts`는 2019년에 표준에서 빠진 옛 설계여서 `[[pre: 조건]]`이라는 다른 문법을 씁니다. 그 문법으로는 어긴 조건의 글과 줄을 찍고 끝나는 것을 확인했습니다.
+</Note>
+
+## 오늘 쓸 것
+
+- **조건에는 읽기만 넣습니다.** 초안이 강제하는 것을 지금은 규율로 지킵니다.
+- **조건을 선언 옆에 주석으로 적습니다.** 계약이 오면 그 줄이 `pre`가 됩니다.
+- **매크로는 하나만 두고 프로그램 전체를 같은 설정으로 빌드합니다.** 위의 흉내나 [GSL의 `Expects`](#/read/cpp-advanced/safe-guidelines)처럼 어겼을 때 할 일을 한곳에서 고르게 합니다.
+
+## 정리
+
+- `assert`는 조건이 본문에 숨고, 부작용을 막지 못하고, 파일마다 켜고 꺼진다. 계약은 조건을 선언에 올리고 조건 안의 변수를 `const`로 만든다
+- 어겼을 때의 일은 빌드가 넷 가운데 고른다. 흉내로 재 보니 끝내는 방식은 거의 공짜였고 observe가 속도와 크기 모두에서 가장 비쌌다
+- C++26 초안에 들어 있으나 최종 투표가 부결됐고 결과는 정해지지 않았다. 이 책의 컴파일러로는 초안의 문법을 돌려 보지 못했다

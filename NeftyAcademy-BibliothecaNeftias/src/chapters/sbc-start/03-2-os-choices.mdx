@@ -1,0 +1,94 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'Raspberry Pi OS의 세 판과 Lite, 64비트와 32비트, 지금 판과 Legacy, 우분투를 고를 때, 그 밖의 배포판';
+export const terms = ['arm64', 'armhf'];
+
+Imager의 OS 목록은 깁니다. 처음이라면 답은 거의 언제나 맨 위에 있는 Raspberry Pi OS입니다. 다만 그 안에서도 세 판과 두 가지 비트 수와 두 세대를 골라야 하고, 가끔은 다른 배포판이 맞는 일도 있습니다. 이 쪽은 그 갈림길을 차례로 봅니다.
+
+## Raspberry Pi OS의 세 판
+
+Raspberry Pi OS는 데비안에 라즈베리파이의 커널과 도구를 얹은 배포판입니다. 2026년 10월 판은 데비안 13(트릭시)에 커널 6.18입니다.
+
+| 판 | 든 것 | 받는 크기 | 카드에 필요한 자리 |
+| --- | --- | --- | --- |
+| Raspberry Pi OS | 데스크톱 | 1.3GB | 6.4GB |
+| Full | 데스크톱과 권장 프로그램 | 2.0GB | 9.5GB |
+| Lite | 글자 화면뿐 | 0.5GB | 2.9GB |
+
+- **이 책은 Lite로 간다**: 화면 없이 네트워크로 다룰 보드에는 데스크톱이 필요 없습니다. 문서도 화면 없이 쓰는 보드에 Lite를 권합니다. 받을 것도 올릴 것도 적고, 켜져 있는 동안 도는 프로그램도 적습니다
+- **Lite가 있는 자리**: Imager의 OS 목록 맨 위에는 데스크톱 판만 보입니다. Lite와 Full은 "Raspberry Pi OS (other)" 안에 있습니다
+- **데스크톱을 고를 때**: 모니터를 붙여 PC처럼 쓰거나 창이 뜨는 프로그램을 만들 때입니다. 원격 데스크톱(VNC)도 Lite에서는 쓸 수 없습니다
+- **표의 숫자**: 64비트 판의 값입니다. 판이 새로 나올 때마다 조금씩 달라집니다
+
+## 64비트와 32비트
+
+| 판 | 도는 보드 |
+| --- | --- |
+| 64비트 | 3, 4, 5, Zero 2 W와 그 계열 |
+| 32비트 | 모든 보드 |
+
+- **이 책의 세 보드는 64비트**: 5, 4 Model B, Zero 2 W 모두 64비트 판이 돕니다. 이 서가의 예제와 교차 컴파일 설정도 64비트 Arm을 기준으로 합니다([「교차 컴파일: PC에서 라즈베리파이용으로」](#/read/c-mid/build-cross))
+- **32비트가 필요한 때**: 첫 Zero나 1, 2처럼 칩이 32비트인 보드, 또는 32비트로만 나온 프로그램을 돌려야 할 때입니다
+- **둘은 실행 파일이 다르다**: 64비트 판에서 빌드한 실행 파일은 32비트 판에서 돌지 않습니다. 보드를 여러 대 쓴다면 비트 수를 맞춰 둡니다
+
+## 지금 판과 Legacy
+
+| 세대 | 바탕 | 커널 |
+| --- | --- | --- |
+| 지금 판 | 데비안 13(트릭시) | 6.18 |
+| Legacy | 데비안 12(북웜) | 6.12 |
+
+- **새로 시작한다면 지금 판**: Legacy는 앞 세대에 보안 갱신만 이어 주는 판입니다. 쓰려는 프로그램이나 확장 보드의 드라이버가 아직 새 세대를 지원하지 않을 때에만 고릅니다
+- **세대를 올릴 때는 새로 쓴다**: 문서는 한 세대에서 다음 세대로 넘어갈 때 그 자리에서 올리지 말고 카드에 새로 설치하기를 권합니다. 설정과 자료를 옮길 수 있게 평소에 정리해 둡니다([「이미지 통째로 백업하기」](#/read/sbc-start/care-backup))
+- **컴파일러도 세대를 따른다**: 데비안 13의 기본 컴파일러는 GCC 14.2이고 12는 GCC 12.2였습니다. 이 서가의 C 예제는 C23으로 쓰여 있어서 트릭시에서는 `gcc -std=c23`으로 그대로 컴파일됩니다. 북웜의 GCC는 `nullptr` 같은 C23의 낱말을 아직 모릅니다
+
+## 우분투
+
+우분투도 라즈베리파이용 이미지를 내고, Imager의 "Other general-purpose OS" 안에 있습니다. 2026년의 장기 지원판은 26.04 LTS이고 2031년 4월까지 지원됩니다.
+
+- **Desktop과 Server**: Desktop은 램 4GB와 저장 공간 16GB 이상을 요구합니다. Server는 글자 화면뿐인 판입니다. Zero 2 W에서는 Server가 돕니다
+- **부트로더가 새것이어야 한다**: 26.04는 5에서 2025년 2월 11일 이후, 4에서 2022년 11월 25일 이후의 부트로더를 요구합니다. 날짜는 Raspberry Pi OS에서 `sudo rpi-eeprom-update`로 봅니다([「부트로더 EEPROM과 부팅 순서」](#/read/sbc-start/cfg-eeprom))
+- **고를 만한 때**: PC나 서버에서 쓰는 우분투와 같은 패키지와 같은 판을 보드에서도 쓰고 싶을 때입니다
+- **치르는 값**: 라즈베리파이의 문서와 이 책은 Raspberry Pi OS를 기준으로 쓰여 있습니다. `raspi-config`나 `vcgencmd` 같은 도구는 우분투에 깔려 있지 않거나 다르게 동작할 수 있습니다
+
+## 그 밖의 것
+
+| Imager의 갈래 | 든 것의 예 |
+| --- | --- |
+| Other general-purpose OS | Ubuntu, Alpine Linux, Armbian OS, DietPi |
+| Media player OS | 영상과 음악을 트는 데 쓰는 OS |
+| Emulation and game OS | 옛 게임기와 컴퓨터를 흉내 내는 OS |
+| Other specific-purpose OS | 홈 오토메이션, 3D 프린터 제어 |
+
+- **고르는 기준**: 내 보드를 지원하는가, Imager에서 미리 정한 설정을 받아 주는가, 갱신이 꾸준히 나오는가, 막혔을 때 읽을 문서가 있는가를 봅니다. Customisation 단계는 그것을 지원하는 OS에서만 나타납니다
+- **가장 많이 쓰는 것**: Imager의 내려받기 통계에서는 Raspberry Pi OS 계열이 가장 많고 우분투가 그다음입니다. 쓰는 사람이 많은 쪽이 물어볼 곳도 많습니다
+
+## 올린 뒤 확인하기
+
+```sh
+cat /etc/os-release           # 배포판의 이름과 세대
+uname -r                      # 커널의 판
+dpkg --print-architecture     # arm64 면 64비트 판, armhf 면 32비트 판
+gcc --version                 # 컴파일러의 판
+```
+
+<Note>
+이 쪽의 크기와 판 번호는 2026년 10월 6일에 나온 Raspberry Pi OS와 2026년 11월의 내려받기 쪽을 기준으로 적었습니다. 숫자는 몇 달마다 바뀌므로, 고를 때에는 Imager에 뜨는 날짜와 내려받기 쪽을 직접 봅니다. 위의 명령은 보드에서 돌려 보지 못했습니다.
+</Note>
+
+## 정리
+
+- 화면 없이 쓸 보드에는 Raspberry Pi OS Lite 64비트를 올린다. Imager에서는 "Raspberry Pi OS (other)" 안에 있다
+- 새로 시작한다면 지금 판(트릭시)을 고르고, 세대를 올릴 때에는 카드에 새로 설치한다
+- 우분투와 다른 배포판도 돌지만, 문서와 도구는 Raspberry Pi OS를 기준으로 한다
+
+## 참고 문서
+
+- [Raspberry Pi OS 내려받기 쪽(판마다의 날짜, 커널, 데비안 세대, 크기, 도는 보드)](https://www.raspberrypi.com/software/operating-systems/)
+- [Raspberry Pi 문서: Raspberry Pi OS(세 판, 세대, 갱신하는 법과 새로 설치하라는 권고)](https://www.raspberrypi.com/documentation/computers/os.html)
+- [Raspberry Pi 문서: Getting started(화면 없이 쓸 때의 Lite 권고, VNC와 Lite, Customisation을 지원하는 OS)](https://www.raspberrypi.com/documentation/computers/getting-started.html)
+- [Debian 13 릴리스 노트: What's new(GCC, glibc, 커널의 판)](https://www.debian.org/releases/trixie/release-notes/whats-new.en.html)
+- [Ubuntu: Install Ubuntu on a Raspberry Pi(26.04 LTS의 Desktop과 Server, 요구 사양)](https://ubuntu.com/download/raspberry-pi)
+- [Ubuntu 문서: Install Ubuntu on the Raspberry Pi(지원하는 보드와 부트로더의 최소 날짜)](https://ubuntu.com/hardware/docs/boards/how-to/ubuntu_supported/raspberry-pi/)
+- [Ubuntu 26.04 LTS 릴리스 노트(지원 기간)](https://documentation.ubuntu.com/release-notes/26.04/)
+- [Raspberry Pi Imager 통계(OS별 내려받기 비율)](https://rpi-imager-stats.raspberrypi.org)

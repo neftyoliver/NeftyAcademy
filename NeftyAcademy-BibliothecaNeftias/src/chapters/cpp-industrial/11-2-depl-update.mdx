@@ -1,0 +1,189 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '업데이트: A/B 칸에 통째로 쓰기, 서명과 롤백 방지, 시험 부팅과 스스로 확정, 데이터 변환과 배포 순서';
+
+공장의 장비는 몇 년 동안 돌면서 여러 번 고쳐집니다. 버그를 고치고, 기능을 더하고, 보안 구멍을 막습니다([「보안」](#/read/cpp-industrial/depl-security)). 그런데 업데이트 하나가 잘못되면 라인이 서고, 장비가 먼 곳에 있으면 사람이 가야 합니다. 그래서 업데이트는 실패해도 원래대로 돌아오는 길부터 설계합니다.
+
+## A/B로 통째로 바꾸기
+
+파일을 하나씩 덮어쓰는 업데이트는 중간에 멈추면 새 것과 옛 것이 섞인 장비를 남깁니다. 그래서 산업용 장비는 보통 운영 체제와 프로그램을 담은 **이미지**를 통째로 바꾸고, 저장 장치에 같은 크기의 칸을 둘(A와 B) 둡니다. 돌고 있는 칸은 건드리지 않고 다른 칸에 새 이미지를 쓴 뒤, 부트로더에게 다음에는 새 칸으로 몇 번만 시험해 보라고 알립니다. 새 판이 켜져서 스스로 괜찮다고 확정하면 그 칸이 주 칸이 되고, 확정하지 못한 채 시험 횟수를 다 쓰면 부트로더가 옛 칸으로 돌아갑니다. U-Boot의 `bootcount`와 `bootlimit`, systemd-boot의 부팅 횟수 세기가 이 일을 하고, RAUC, SWUpdate, Mender, OSTree 같은 도구가 이미지 쓰기와 서명 확인을 맡습니다.
+
+아래는 그 흐름을 흉내 낸 것입니다. 서명만은 OpenSSL의 Ed25519로 실제로 만들고 확인합니다.
+
+```cpp pkg=openssl
+#include <openssl/evp.h>
+#include <cstdio>
+#include <string>
+#include <vector>
+
+using Bytes = std::vector<unsigned char>;
+
+struct Image { std::string version; int counter; std::string data; Bytes sig; };
+
+Bytes signed_part(const Image& m) {          // 판, 롤백 방지 번호, 내용을 함께 서명
+    std::string s = m.version + '\n' + std::to_string(m.counter) + '\n' + m.data;
+    return Bytes(s.begin(), s.end());
+}
+
+// 빌드 서버: 비밀 키로 서명한다
+EVP_PKEY* build_key = EVP_PKEY_Q_keygen(nullptr, nullptr, "ED25519");
+Image release(std::string ver, int counter, std::string data) {
+    Image m{ver, counter, data, Bytes(64)};
+    Bytes msg = signed_part(m);
+    size_t len = m.sig.size();
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    EVP_DigestSignInit(ctx, nullptr, nullptr, nullptr, build_key);
+    EVP_DigestSign(ctx, m.sig.data(), &len, msg.data(), msg.size());
+    EVP_MD_CTX_free(ctx);
+    return m;
+}
+
+// 장비: 공개 키만 가지고 있다
+EVP_PKEY* make_device_key() {
+    unsigned char pub[32];
+    size_t n = sizeof pub;
+    EVP_PKEY_get_raw_public_key(build_key, pub, &n);
+    return EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, nullptr, pub, n);
+}
+EVP_PKEY* device_key = make_device_key();
+
+bool verify(const Image& m) {
+    Bytes msg = signed_part(m);
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    EVP_DigestVerifyInit(ctx, nullptr, nullptr, nullptr, device_key);
+    bool ok = EVP_DigestVerify(ctx, m.sig.data(), m.sig.size(),
+                               msg.data(), msg.size()) == 1;
+    EVP_MD_CTX_free(ctx);
+    return ok;
+}
+
+struct Slot { std::string version = "-"; int counter = 0; };
+struct Device {
+    Slot slot[2];
+    int active = 0, trial = -1, tries = 0;   // 부트로더 환경 변수
+    int min_counter = 0;                     // 이보다 낮은 판은 받지 않는다
+    int running = 0;
+};
+const char* name(int s) { return s == 0 ? "A" : "B"; }
+
+void install(Device& d, const Image& m, bool power_cut = false) {
+    std::printf("설치 %s: ", m.version.c_str());
+    if (!verify(m)) { std::printf("서명이 맞지 않아 거부\n"); return; }
+    if (m.counter < d.min_counter) {
+        std::printf("롤백 방지 번호 %d < %d, 거부\n", m.counter, d.min_counter);
+        return;
+    }
+    int t = 1 - d.active;                    // 돌고 있지 않은 칸에 쓴다
+    d.slot[t] = {power_cut ? "깨짐" : m.version, m.counter};
+    if (power_cut) { std::printf("칸 %s에 쓰다가 정전\n", name(t)); return; }
+    d.trial = t;                             // 다 쓰고 확인한 뒤에야 바꾼다
+    d.tries = 3;
+    std::printf("칸 %s에 씀, 시험 부팅 %d번 허락\n", name(t), d.tries);
+}
+
+void boot(Device& d) {
+    if (d.trial >= 0 && d.tries == 0) {
+        std::printf("  부트로더: 시험 횟수를 다 써서 칸 %s로 되돌아감\n",
+                    name(d.active));
+        d.trial = -1;
+    }
+    if (d.trial >= 0) { --d.tries; d.running = d.trial; }
+    else d.running = d.active;
+    std::printf("  부팅: 칸 %s (%s)%s\n", name(d.running),
+                d.slot[d.running].version.c_str(),
+                d.running == d.trial ? " 시험 중" : "");
+}
+
+void health(Device& d, bool ok) {                // 새 판이 스스로 확인한다
+    if (d.running != d.trial) return;
+    if (!ok) {
+        std::printf("  확인 실패: 확정하지 않고 워치독이 다시 켬\n");
+        return;
+    }
+    d.active = d.trial;
+    d.trial = -1;
+    d.min_counter = d.slot[d.active].counter;
+    std::printf("  확인 통과: 칸 %s 확정, 롤백 방지 번호 %d\n", name(d.active),
+                d.min_counter);
+}
+
+int main() {
+    Device d;
+    d.slot[0] = {"v1.9", 4};
+    d.min_counter = 4;
+    std::printf("[1] 정상 업데이트\n");
+    install(d, release("v2.0", 5, "제어 프로그램 2.0"));
+    boot(d);
+    health(d, true);
+
+    std::printf("[2] 전송 중에 바뀐 이미지\n");
+    Image bad = release("v2.1", 6, "제어 프로그램 2.1");
+    bad.data[0] ^= 1;
+    install(d, bad);
+
+    std::printf("[3] 쓰는 중 정전\n");
+    Image v21 = release("v2.1", 6, "제어 프로그램 2.1");
+    install(d, v21, true);
+    boot(d);
+
+    std::printf("[4] PLC와 말하지 못하는 새 판\n");
+    install(d, v21);
+    for (int i = 0; i < 4; ++i) {
+        boot(d);
+        health(d, false);
+    }
+
+    std::printf("[5] 서명은 맞지만 오래된 판\n");
+    install(d, release("v1.9", 4, "제어 프로그램 1.9"));
+}
+```
+
+```text
+[1] 정상 업데이트
+설치 v2.0: 칸 B에 씀, 시험 부팅 3번 허락
+  부팅: 칸 B (v2.0) 시험 중
+  확인 통과: 칸 B 확정, 롤백 방지 번호 5
+[2] 전송 중에 바뀐 이미지
+설치 v2.1: 서명이 맞지 않아 거부
+[3] 쓰는 중 정전
+설치 v2.1: 칸 A에 쓰다가 정전
+  부팅: 칸 B (v2.0)
+[4] PLC와 말하지 못하는 새 판
+설치 v2.1: 칸 A에 씀, 시험 부팅 3번 허락
+  부팅: 칸 A (v2.1) 시험 중
+  확인 실패: 확정하지 않고 워치독이 다시 켬
+  부팅: 칸 A (v2.1) 시험 중
+  확인 실패: 확정하지 않고 워치독이 다시 켬
+  부팅: 칸 A (v2.1) 시험 중
+  확인 실패: 확정하지 않고 워치독이 다시 켬
+  부트로더: 시험 횟수를 다 써서 칸 B로 되돌아감
+  부팅: 칸 B (v2.0)
+[5] 서명은 맞지만 오래된 판
+설치 v1.9: 롤백 방지 번호 4 < 5, 거부
+```
+
+- **서명**: 장비는 공개 키만 가지고 있어서, 빌드 서버의 비밀 키로 서명한 이미지만 받습니다. 판과 롤백 방지 번호도 서명 안에 넣어야 바꿔치기할 수 없습니다. 실제로는 이미지의 해시에 서명하고, 비밀 키는 하드웨어 보안 모듈(HSM) 같은 곳에 두고 꺼내지 않습니다
+- **바꾸는 순서**: 부트로더 설정은 다 쓰고 확인한 다음에 바꿉니다. 그래서 [3]에서 쓰는 중에 정전이 나도 장비는 옛 판으로 켜졌습니다
+- **스스로 확정**: 새 판은 켜졌다고 확정되지 않습니다. [「산업용 PC」](#/read/cpp-industrial/depl-ipc)의 환경 확인과 PLC 통신까지 통과해야 확정하고, 그러지 못하면 [「워치독」](#/read/cpp-industrial/rel-watchdog)이 다시 켜는 사이에 시험 횟수가 줄어 옛 칸으로 돌아갑니다
+- **롤백 방지**: 확정하면 롤백 방지 번호를 올려, 서명이 맞더라도 알려진 취약점이 있는 옛 판으로는 내려가지 못하게 합니다. 자동 되돌리기는 확정 전에만 일어나므로 둘은 부딪치지 않습니다
+
+<Note>
+칸을 둘 두면 저장 공간이 두 배로 듭니다. 공간이 모자란 장비는 작은 복구용 시스템으로 부팅해 하나뿐인 칸을 다시 쓰기도 하지만, 그동안 장비가 일을 하지 못하고 실패하면 복구용 시스템에 기대야 합니다. 느린 회선에서는 바뀐 부분만 보내는 델타 업데이트로 전송량을 줄입니다. 부트로더와 커널 자체가 바뀌지 않았는지는 보안 부팅(secure boot)이 켤 때마다 서명으로 확인합니다.
+</Note>
+
+## 데이터와 설정
+
+이미지는 되돌릴 수 있어도 데이터는 따로 삽니다. 레시피, 설정, 이력은 이미지 밖의 데이터 칸에 두고, 파일마다 형식 판 번호를 둡니다. 새 판은 옛 형식을 읽을 수 있어야 하고, 형식을 바꾸는 변환은 확정한 뒤에 합니다. 확정 전에 변환해 버리면, 되돌아간 옛 판이 새 형식을 읽지 못해 켜지기는 해도 일을 하지 못합니다.
+
+## 언제, 어떻게 내보내나
+
+- **멈춘 때에만**: 업데이트는 기계가 안전 상태에 있고 작업자가 HMI에서 허락했을 때만 시작합니다. 돌고 있는 기계의 제어 프로그램을 바꾸지 않습니다
+- **조금씩**: 먼저 한 대, 다음에 한 라인, 그다음에 공장 전체로 넓히며, 앞 단계의 장비가 며칠 문제없이 돌았는지 보고 넘어갑니다
+- **기록**: 어느 장비에 어느 판이 깔렸는지, 언제 누가 바꿨는지 남깁니다. 고장이 나면 가장 먼저 묻는 것이 최근에 무엇이 바뀌었느냐입니다
+- **안전에 닿는 변경**: 안전 기능에 영향을 주는 변경은 [「검증 문서」](#/read/cpp-industrial/safe-docs)의 영향 분석과 재검증을 거친 판만 내보냅니다
+
+## 정리
+
+- 업데이트는 이미지를 쓰지 않는 칸에 통째로 쓰고 부트로더가 몇 번만 시험 부팅하게 하며, 새 판이 스스로 확인해 확정하지 못하면 옛 칸으로 돌아가게 한다
+- 장비는 공개 키로 판과 롤백 방지 번호까지 담은 서명을 확인하고, 확정한 뒤 롤백 방지 번호를 올려 취약한 옛 판으로 내려가지 못하게 한다
+- 데이터 형식 변환은 확정한 뒤에 하고, 업데이트는 멈춘 기계에서 허락을 받아 한 대부터 조금씩 넓히며, 장비마다 판을 기록한다

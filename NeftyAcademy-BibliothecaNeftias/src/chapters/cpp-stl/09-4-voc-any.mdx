@@ -1,0 +1,159 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '아무 타입이나 담는 상자, 꺼낼 때 타입을 정확히 맞춰야 한다는 것, 치르는 값, variant와 고르기';
+export const terms = ['std::any', '~any', 'any_cast', 'bad_any_cast'];
+
+`std::any`는 복사할 수 있는 **아무 타입의 값 하나**를 담습니다. [`variant`](#/read/cpp-stl/voc-variant)가 "적어 둔 후보 가운데 하나"라면 `any`는 후보를 적지 않습니다. 그만큼 자유롭고, 그만큼 컴파일러가 도와주지 못합니다. C의 `void*`가 하던 일을 타입 검사와 함께 하는 도구입니다.
+
+## 담고 꺼내기
+
+```cpp
+#include <any>
+#include <print>
+#include <string>
+
+int main()
+{
+    std::any box = 42;
+    std::println("int 인가 {}", box.type() == typeid(int));
+    std::println("{}", std::any_cast<int>(box));
+
+    box = std::string("hello");             // 다른 타입을 넣어도 된다
+    std::println("{}", std::any_cast<std::string>(box));
+
+    try {
+        std::println("{}", std::any_cast<int>(box));       // 든 것은 string 이다
+    } catch (const std::bad_any_cast&) {
+        std::println("int 가 아니다");
+    }
+
+    // 포인터 꼴: 아니면 nullptr
+    if (const auto* text = std::any_cast<std::string>(&box))
+        std::println("string {}글자", text->size());
+
+    box.reset();
+    std::println("비었나 {}", !box.has_value());
+}
+```
+
+```text
+int 인가 true
+42
+hello
+int 가 아니다
+string 5글자
+비었나 true
+```
+
+`std::any_cast<T>(box)`는 값을 **복사해** 돌려줍니다. 큰 객체를 복사 없이 보려면 포인터 꼴 `std::any_cast<T>(&box)`를 쓰거나 `std::any_cast<const T&>(box)`로 참조를 청합니다.
+
+## 타입을 정확히 맞춰야 한다
+
+꺼낼 때 적는 타입은 넣은 타입과 **글자 그대로** 같아야 합니다. 바꿀 수 있는 타입이어도 안 됩니다.
+
+```cpp
+#include <any>
+#include <print>
+#include <string>
+
+template <typename T>
+bool holds(const std::any& box) { return std::any_cast<T>(&box) != nullptr; }
+
+int main()
+{
+    const std::any number = 42;             // int
+    std::println("int {} / long {} / double {}", holds<int>(number),
+                 holds<long>(number), holds<double>(number));
+
+    // const char* 가 들어간다. string 이 아니다
+    const std::any text = "led";
+    std::println("string {} / const char* {}", holds<std::string>(text),
+                 holds<const char*>(text));
+
+    const std::any size = sizeof(int);      // std::size_t
+    std::println("int {} / size_t {}", holds<int>(size), holds<std::size_t>(size));
+}
+```
+
+```text
+int true / long false / double false
+string false / const char* true
+int false / size_t true
+```
+
+`int`를 넣고 `long`으로 꺼낼 수 없고, `"led"`를 넣으면 `std::string`이 아니라 `const char*`가 들어갑니다. 넣는 쪽과 꺼내는 쪽이 다른 사람이면 이 어긋남은 실행해 봐야 드러납니다. 넣을 때 `std::any(std::string("led"))`처럼 타입을 적어 주는 것이 버릇이 되어야 합니다.
+
+## 치르는 값
+
+| | 내용 |
+| --- | --- |
+| 크기 | GCC 14에서 16바이트 |
+| 할당 | 포인터 하나에 들어가는 작은 값(`int`, `double`)은 안에 담는다. 그보다 크면 힙에 둔다 |
+| 꺼내기 | 실행 중에 타입 정보를 견준다 |
+| 요건 | 담는 타입이 복사할 수 있어야 한다. `std::unique_ptr`는 못 담는다 |
+
+`std::string`만 담아도 할당이 한 번 일어납니다. 빠른 경로에서 수없이 만들고 버리는 값에는 맞지 않습니다.
+
+## 쓰는 자리
+
+쓸 만한 곳은 **담는 쪽이 내용의 타입을 알 필요가 없는 곳**입니다.
+
+```cpp
+#include <any>
+#include <map>
+#include <print>
+#include <string>
+
+// 이벤트에 딸려 다니는 자료. 이 코드는 무엇이 들었는지 모르고 전하기만 한다
+struct Event {
+    std::string name;
+    std::any payload;
+};
+
+void on_temperature(const Event& event)
+{
+    if (const auto* celsius = std::any_cast<double>(&event.payload))
+        std::println("{}: {:.1f}도", event.name, *celsius);
+    else
+        std::println("{}: 자료의 타입이 다르다", event.name);
+}
+
+int main()
+{
+    on_temperature({"temp", 23.5});
+    on_temperature({"temp", std::string("n/a")});
+
+    // 이름으로 찾는 속성 주머니
+    std::map<std::string, std::any> properties;
+    properties["pin"] = 17;
+    properties["label"] = std::string("status led");
+    std::println("{} {}", std::any_cast<int>(properties.at("pin")),
+                 std::any_cast<std::string>(properties.at("label")));
+}
+```
+
+```text
+temp: 23.5도
+temp: 자료의 타입이 다르다
+17 status led
+```
+
+이벤트를 나르는 통로, 플러그인이 맡겨 두는 사용자 자료, 콜백의 `void* user_data` 자리가 그런 곳입니다.
+
+| 상황 | 고르는 것 |
+| --- | --- |
+| 올 수 있는 타입을 **안다** | `std::variant`. 빠뜨린 경우를 컴파일러가 잡는다 |
+| 타입은 모르지만 **할 일**은 정해져 있다 | 가상 함수나 [`std::function`](#/read/cpp-stl/voc-function) |
+| 타입도 할 일도 모르고 맡아서 전하기만 한다 | `std::any` |
+
+실제로는 첫째와 둘째가 대부분입니다. `any`를 쓰려는 자리가 보이면, 올 수 있는 타입을 정말 적을 수 없는지 먼저 따져 봅니다. 적을 수 있으면 `variant`가 낫습니다. 설정 값처럼 "정수, 실수, 글, 참·거짓 가운데 하나"인 것은 `any`가 아니라 `variant`의 일입니다.
+
+<Note>
+`std::any`는 타입 정보(RTTI)에 기댑니다. `-fno-rtti`로 빌드하는 임베디드 프로젝트에서는 `type()`을 쓸 수 없고, 라이브러리에 따라 `any_cast`도 제약을 받습니다. 그런 환경에서는 처음부터 `variant`로 설계합니다.
+</Note>
+
+## 정리
+
+- `std::any`는 복사할 수 있는 아무 값이나 담는다. 꺼낼 때는 넣은 타입을 글자 그대로 적어야 한다
+- 작은 값이 아니면 힙을 쓰고, 꺼낼 때마다 타입을 견준다
+- 올 수 있는 타입을 적을 수 있으면 `variant`를 쓴다. `any`는 내용을 모른 채 전하기만 하는 자리에 쓴다

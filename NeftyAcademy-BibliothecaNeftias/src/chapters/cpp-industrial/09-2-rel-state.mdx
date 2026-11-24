@@ -1,0 +1,123 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '상태 기계로 짜기: 불 변수 대신 이름 붙인 상태, PackML 상태 모델, 표로 정한 전이, 시간 한도';
+
+장비의 동작 순서를 짜다 보면 `isRunning`, `isStopping`, `wasAborted`, `resetDone` 같은 불 변수가 하나씩 늘어납니다. 변수가 n개면 조합은 2ⁿ개인데, 그중 말이 되는 조합은 몇 개뿐이고, 나머지는 아무도 생각해 보지 않은 상태입니다. "정지 중인데 시작 버튼이 눌리고 동시에 고장이 나면?" 같은 질문에 코드가 무엇을 할지 아무도 모릅니다. 이것을 막는 방법은 장비가 있을 수 있는 상태를 **이름 붙여 나열**하고, 상태 사이의 전이를 **표로 정하는** 것입니다.
+
+## PackML의 상태 모델
+
+포장 기계 업계가 만든 PackML(ISA-TR88.00.02)은 기계의 상태를 17개로 표준화했습니다. Idle, Execute, Held, Stopped, Aborted처럼 머무는 상태와, Starting, Holding, Stopping처럼 이름이 "~ing"로 끝나는 **동작 상태**가 있습니다. 동작 상태에서는 그 상태의 일(예열, 감속, 원점 복귀)을 하고, 일이 끝나면 "상태 완료(SC)"로 다음 상태로 갑니다. 회사마다 기계가 달라도 상태의 이름과 의미가 같으므로, 라인의 감독 시스템이 여러 회사의 기계를 같은 방식으로 다룰 수 있습니다. 그중 14개 상태로 상태 기계를 짰습니다.
+
+```cpp
+// PackML식 상태 기계: 명령과 "동작 끝(SC)"으로만 상태가 바뀌고, 나머지는 거부
+#include <cstdio>
+#include <map>
+#include <set>
+#include <utility>
+
+enum S { Stopped, Resetting, Idle, Starting, Execute, Completing, Complete,
+         Holding, Held, Unholding, Stopping, Aborting, Aborted, Clearing };
+const char* sn[] = {"Stopped", "Resetting", "Idle", "Starting", "Execute",
+                    "Completing", "Complete", "Holding", "Held", "Unholding",
+                    "Stopping", "Aborting", "Aborted", "Clearing"};
+// SC: 동작 상태의 일 끝
+enum C { Reset, Start, Hold, Unhold, Stop, Abort, Clear, SC };
+const char* cn[] = {"Reset", "Start", "Hold", "Unhold", "Stop", "Abort", "Clear",
+                    "SC"};
+
+const std::map<std::pair<S, C>, S> table = {
+    {{Stopped, Reset}, Resetting},  {{Resetting, SC}, Idle},
+    {{Idle, Start}, Starting},      {{Starting, SC}, Execute},
+    {{Execute, SC}, Completing},    {{Completing, SC}, Complete},
+    {{Complete, Reset}, Resetting},
+    {{Execute, Hold}, Holding},     {{Holding, SC}, Held},
+    {{Held, Unhold}, Unholding},    {{Unholding, SC}, Execute},
+    {{Stopping, SC}, Stopped},      {{Aborting, SC}, Aborted},
+    {{Aborted, Clear}, Clearing},   {{Clearing, SC}, Stopped}};
+// 이름이 "~ing"인 동작 상태: 그 상태에서 할 일이 끝나면 SC로 다음 상태로 간다
+const std::set<S> acting = {Resetting, Starting, Completing, Holding, Unholding,
+                            Stopping, Aborting, Clearing};
+
+class Machine {
+    S s = Stopped;
+    int ticksInState = 0;
+public:
+    void command(C c) {
+        S next;
+        // 어디서든
+        if (c == Abort && s != Aborting && s != Aborted) next = Aborting;
+        else if (c == Stop && s != Stopped && s != Stopping && s != Aborting &&
+                 s != Aborted && s != Clearing) next = Stopping;
+        else if (auto it = table.find({s, c}); it != table.end()) next = it->second;
+        else { std::printf("  %-10s 에서 %s 거부\n", sn[s], cn[c]); return; }
+        std::printf("  %-10s --%s--> %s\n", sn[s], cn[c], sn[next]);
+        s = next;
+        ticksInState = 0;
+    }
+    // 매 주기: 동작 상태의 일을 조금씩 하고, 끝나면 SC, 너무 오래 걸리면 Abort
+    void tick(int workTicks, int timeoutTicks) {
+        if (!acting.contains(s)) return;
+        if (++ticksInState >= timeoutTicks) {
+            std::printf("  %s 시간 초과\n", sn[s]);
+            command(Abort);
+        } else if (ticksInState >= workTicks) {
+            command(SC);
+        }
+    }
+    S state() const { return s; }
+};
+
+int main() {
+    Machine m;
+    m.command(Start);                            // 멈춘 상태에서는 시작할 수 없다
+    m.command(Reset);
+    m.tick(1, 10);                               // 초기화 끝 → Idle
+    m.command(Start);
+    m.tick(1, 10);                               // 시작 동작 끝 → Execute
+    m.command(Hold);                             // 재료가 떨어져 잠시 멈춤
+    m.tick(1, 10);
+    m.command(Unhold);
+    m.tick(1, 10);
+    m.command(Stop);                             // 정지
+    for (int i = 0; i < 12 && m.state() == Stopping; ++i)
+        m.tick(100, 5);                          // 멈추는 동작이 끝나지 않는다
+    m.tick(1, 10);                               // Aborting 끝 → Aborted
+    m.command(Reset);                            // Aborted에서는 Clear부터
+    m.command(Clear);
+    m.tick(1, 10);
+}
+```
+
+```text
+  Stopped    에서 Start 거부
+  Stopped    --Reset--> Resetting
+  Resetting  --SC--> Idle
+  Idle       --Start--> Starting
+  Starting   --SC--> Execute
+  Execute    --Hold--> Holding
+  Holding    --SC--> Held
+  Held       --Unhold--> Unholding
+  Unholding  --SC--> Execute
+  Execute    --Stop--> Stopping
+  Stopping 시간 초과
+  Stopping   --Abort--> Aborting
+  Aborting   --SC--> Aborted
+  Aborted    에서 Reset 거부
+  Aborted    --Clear--> Clearing
+  Clearing   --SC--> Stopped
+```
+
+- **전이는 표에 있다**: 어느 상태에서 어느 명령이 어디로 가는지가 `table` 한곳에 있습니다. 표에 없는 조합은 모두 거부되므로 "생각해 보지 않은 상태"가 생기지 않습니다. 멈춘 상태에서의 Start, Aborted 상태에서의 Reset이 거부되었습니다
+- **Stop과 Abort는 거의 어디서든**: 정지와 비상 중단은 대부분의 상태에서 받아들여야 하므로 표 대신 규칙으로 두었습니다. Abort는 고장이나 비상 정지에 쓰고, 그 뒤에는 원인을 치운 뒤 Clear를 거쳐야만 다시 시작할 수 있습니다
+- **동작 상태에는 시간 한도**: 멈추는 동작이 정해진 시간 안에 끝나지 않자 Abort로 넘어갔습니다. 동작 상태에서 영원히 기다리는 기계는 멈춘 것과 같습니다
+- **상태가 화면과 기록의 언어가 된다**: HMI는 지금 상태를 그대로 보여 주고, 상태가 바뀔 때마다 기록하면 "언제 왜 멈췄나"를 그대로 읽을 수 있습니다. OEE 계산의 가동·정지 시간도 상태 기록에서 나옵니다
+
+<Note>
+상태가 많아지면 상태 안에 상태를 두는 계층 상태 기계가 편합니다. C++에서는 이 예처럼 열거형과 표로 짜거나, `std::variant`로 상태마다 다른 데이터를 담거나, Boost.SML 같은 라이브러리를 씁니다. Qt를 쓴다면 [「상태 관리」](#/read/cpp-qt/qarch-state)의 QStateMachine도 같은 일을 합니다. 어떤 방식이든 상태도 그림을 문서로 남겨, 코드의 표와 그림이 같은지 검토할 수 있게 합니다.
+</Note>
+
+## 정리
+
+- 불 변수를 늘리는 대신 장비가 있을 수 있는 상태에 이름을 붙이고, 상태 사이의 전이를 표로 정해 표에 없는 조합은 거부한다
+- PackML은 머무는 상태와 "~ing" 동작 상태로 된 17개 상태를 표준화했으며, 동작 상태는 일이 끝나면 SC로 넘어간다
+- 정지와 중단은 거의 어디서든 받아들이고, 동작 상태에는 시간 한도를 두며, 상태 변화를 화면과 기록의 언어로 쓴다

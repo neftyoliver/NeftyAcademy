@@ -1,0 +1,239 @@
+import { Note } from 'paragoniahex';
+
+export const summary = 'GPU 프로파일링: 타임스탬프 쿼리로 구간의 시간 재기, 통계 쿼리, 기다리지 않고 읽기, 재는 방법 검증';
+export const terms = [
+  'vkCmdWriteTimestamp2', 'vkResetQueryPool', 'timestampPeriod', 'timestampValidBits',
+  'timestampComputeAndGraphics',
+];
+
+프레임이 느릴 때 CPU의 시계로는 GPU의 어디가 느린지 알 수 없습니다. 제출은 일을 큐에 넣고 바로 돌아오고, 일은 그 뒤에 GPU에서 돌기 때문입니다([「펜스와 세마포어」](#/read/cpp-vulkan/tri-sync)). 그래서 GPU가 일하는 길목에 시각을 적게 하는 타임스탬프 쿼리로 시간을 재고, 통계 쿼리로 일의 양을 셉니다([「정점 버퍼와 인덱스 버퍼」](#/read/cpp-vulkan/buf-vertex)). 아래 프로그램은 프레임을 세 구간으로 나눠 잽니다.
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp,vkx_cmd.hpp,vkx_resource.hpp,vkx_bind.hpp,vkx_pipeline.hpp,vkx_draw.hpp
+#include <algorithm>
+#include <chrono>
+#include "vkx_bind.hpp"
+#include "vkx_cmd.hpp"
+#include "vkx_draw.hpp"
+#include "vkx_pipeline.hpp"
+
+// 구간 "도형": 작은 삼각형 3000개를 60×50 격자로 놓는다
+const char* MANY_VS = R"(#version 450
+void main() {
+    int tri = gl_VertexIndex / 3, corner = gl_VertexIndex % 3;
+    vec2 at = vec2(tri % 60, tri / 60) / 30.0 - 0.99;
+    gl_Position = vec4(at + vec2(corner == 1, corner == 2) * 0.03, 0.0, 1.0);
+})";
+// 프래그먼트마다 loops번 돈다. 구간 "흐림"과 "합성"은 이것으로 화면 전체를 칠한다
+const char* LOOP_FS = R"(#version 450
+layout(push_constant) uniform Push { int loops; };
+layout(location = 0) out float value;
+void main() {
+    value = 0.0;
+    for (int i = 0; i < loops; ++i) value += sin(gl_FragCoord.x * float(i));
+})";
+
+int main() {
+    vkx::Instance inst = vkx::make_instance();
+    vkx::Device dev = vkx::make_device(inst.handle);
+    vkx::Commands cmds = vkx::make_commands(dev);
+
+    // 이 큐에서 시간을 잴 수 있는가, 눈금 하나는 몇 나노초인가
+    uint32_t nf = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(dev.gpu, &nf, nullptr);
+    std::vector<VkQueueFamilyProperties> families(nf);
+    vkGetPhysicalDeviceQueueFamilyProperties(dev.gpu, &nf, families.data());
+    const uint32_t bits = families[dev.family].timestampValidBits;
+    const double period = dev.props.limits.timestampPeriod;
+    std::printf("눈금 하나 %g ns, 타임스탬프 %u비트, 그래픽·컴퓨트 큐 모두: %s\n",
+                period, bits,
+                dev.props.limits.timestampComputeAndGraphics ? "예" : "아니오");
+    if (bits == 0) return 0;
+    const uint64_t mask = bits == 64 ? ~0ull : (1ull << bits) - 1;
+
+    const uint32_t ZONES = 3, FRAMES = 5;
+    const char* names[ZONES] = {"도형", "흐림", "합성"};
+    const VkFormat FORMAT = VK_FORMAT_R32_SFLOAT;
+    vkx::Image targets[ZONES];      // 구간마다 64×64 렌더 타깃 하나
+    for (vkx::Image& t : targets)
+        t = vkx::make_image(dev, {64, 64}, FORMAT,
+                            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+    VkPipelineLayout layout = vkx::make_layout(dev, {}, 4);
+    auto shader = [&](const char* glsl, shaderc_shader_kind kind) {
+        return vkx::make_shader(dev, vkx::compile(glsl, kind));
+    };
+    VkShaderModule many_vs = shader(MANY_VS, shaderc_vertex_shader);
+    VkShaderModule full_vs = shader(vkx::FULLSCREEN_VS, shaderc_vertex_shader);
+    VkShaderModule loop_fs = shader(LOOP_FS, shaderc_fragment_shader);
+    VkPipeline many = vkx::make_pipeline(
+        dev, {.vertex = many_vs, .fragment = loop_fs, .layout = layout,
+              .color = FORMAT});
+    VkPipeline full = vkx::make_pipeline(
+        dev, {.vertex = full_vs, .fragment = loop_fs, .layout = layout,
+              .color = FORMAT});
+
+    // 타임스탬프는 구간의 경계마다 하나씩, 통계는 구간마다 두 가지를 센다
+    VkQueryPoolCreateInfo tci{
+        .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+        .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = ZONES + 1};
+    VkQueryPoolCreateInfo sci{
+        .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+        .queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS, .queryCount = ZONES,
+        .pipelineStatistics =
+            VK_QUERY_PIPELINE_STATISTIC_VERTEX_SHADER_INVOCATIONS_BIT |
+            VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT};
+    VkQueryPool times, stats;
+    vkCreateQueryPool(dev.handle, &tci, nullptr, &times);
+    vkCreateQueryPool(dev.handle, &sci, nullptr, &stats);
+
+    struct Stamp { uint64_t ticks, ready; };   // 값 뒤에 준비됐는지가 따라온다
+    auto ready = [&] {                         // 기다리지 않고 묻는다
+        Stamp t[ZONES + 1];
+        vkGetQueryPoolResults(
+            dev.handle, times, 0, ZONES + 1, sizeof t, t, sizeof(Stamp),
+            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+        return std::count_if(t, t + ZONES + 1, [](Stamp s) { return s.ready; });
+    };
+    struct Result { double ms[ZONES], submit_ms; uint64_t counts[ZONES][2]; };
+    // 프레임을 다섯 번 재서 구간마다 가장 짧았던 시간을 남긴다
+    auto measure = [&](int blur_loops, bool show) {
+        Result best{{1e9, 1e9, 1e9}, 1e9, {}};
+        for (uint32_t frame = 0; frame < FRAMES; ++frame) {
+            vkResetQueryPool(dev.handle, times, 0, ZONES + 1);   // 쓰기 전에 비운다
+            vkResetQueryPool(dev.handle, stats, 0, ZONES);
+            VkCommandBuffer cmd = vkx::begin(cmds);
+            // 앞의 명령이 모두 끝난 때의 시각을 적으라고 기록한다
+            const auto DONE = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            vkCmdWriteTimestamp2(cmd, DONE, times, 0);
+            for (uint32_t zone = 0; zone < ZONES; ++zone) {
+                const int loops = zone == 1 ? blur_loops : 40;
+                vkCmdBeginQuery(cmd, stats, zone, 0);
+                vkx::begin_drawing(cmd, targets[zone]);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                  zone == 0 ? many : full);
+                vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_ALL, 0, 4, &loops);
+                vkCmdDraw(cmd, zone == 0 ? 9000 : 3, 1, 0, 0);
+                vkCmdEndRendering(cmd);
+                vkCmdEndQuery(cmd, stats, zone);
+                vkCmdWriteTimestamp2(cmd, DONE, times, zone + 1);
+            }
+            vkEndCommandBuffer(cmd);
+            if (show && frame == 0)
+                std::printf("제출 전에 준비된 타임스탬프: %td개\n", ready());
+
+            VkCommandBufferSubmitInfo one{
+                .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+                .commandBuffer = cmd};
+            VkSubmitInfo2 si{.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+                             .commandBufferInfoCount = 1,
+                             .pCommandBufferInfos = &one};
+            const auto before = std::chrono::steady_clock::now();
+            vkQueueSubmit2(dev.queue, 1, &si, cmds.done);
+            const std::chrono::duration<double, std::milli> call =
+                std::chrono::steady_clock::now() - before;
+            best.submit_ms = std::min(best.submit_ms, call.count());
+            vkWaitForFences(dev.handle, 1, &cmds.done, VK_TRUE, UINT64_MAX);
+            vkResetFences(dev.handle, 1, &cmds.done);
+            if (show && frame == 0)
+                std::printf("끝난 뒤에 준비된 타임스탬프: %td개\n", ready());
+
+            uint64_t t[ZONES + 1];
+            vkGetQueryPoolResults(dev.handle, times, 0, ZONES + 1, sizeof t, t, 8,
+                                  VK_QUERY_RESULT_64_BIT);
+            vkGetQueryPoolResults(dev.handle, stats, 0, ZONES, sizeof best.counts,
+                                  best.counts, 16, VK_QUERY_RESULT_64_BIT);
+            for (uint32_t zone = 0; zone < ZONES; ++zone) {
+                // 유효 비트만 남기면 값이 한 바퀴 넘쳤어도 차는 맞다
+                const uint64_t ticks = (t[zone + 1] - t[zone]) & mask;
+                best.ms[zone] = std::min(best.ms[zone], ticks * period / 1e6);
+            }
+        }
+        for (uint32_t zone = 0; zone < ZONES; ++zone)   // 시간은 표준 오류로
+            std::fprintf(stderr, "%s %.3f ms, ", names[zone], best.ms[zone]);
+        std::fprintf(stderr, "제출 호출 %.3f ms\n", best.submit_ms);
+        return best;
+    };
+
+    const Result base = measure(4000, true);
+    std::puts("구간  정점 셰이더  프래그먼트 셰이더");
+    for (uint32_t zone = 0; zone < ZONES; ++zone)
+        std::printf("%s %12llu %18llu\n", names[zone],
+                    (unsigned long long)base.counts[zone][0],
+                    (unsigned long long)base.counts[zone][1]);
+    std::printf("가장 오래 걸린 구간: %s\n",
+                names[std::max_element(base.ms, base.ms + ZONES) - base.ms]);
+    const double total = base.ms[0] + base.ms[1] + base.ms[2];
+    std::printf("제출 호출이 GPU가 일한 시간의 10분의 1 안에 돌아왔는가: %s\n",
+                base.submit_ms * 10 < total ? "예" : "아니오");
+    // 재는 방법을 믿어도 되는지: 한 구간의 일만 늘려 그 구간의 시간만 느는지 본다
+    const Result more = measure(32000, false);
+    std::printf("흐림의 반복을 여덟 배로 늘리자 시간이 세 배 넘게 는 구간:");
+    for (uint32_t zone = 0; zone < ZONES; ++zone)
+        if (more.ms[zone] > 3 * base.ms[zone]) std::printf(" %s", names[zone]);
+    std::puts("");
+
+    vkDestroyQueryPool(dev.handle, times, nullptr);
+    vkDestroyQueryPool(dev.handle, stats, nullptr);
+    vkDestroyPipeline(dev.handle, many, nullptr);
+    vkDestroyPipeline(dev.handle, full, nullptr);
+    for (VkShaderModule m : {many_vs, full_vs, loop_fs})
+        vkDestroyShaderModule(dev.handle, m, nullptr);
+    vkDestroyPipelineLayout(dev.handle, layout, nullptr);
+    for (vkx::Image& t : targets) vkx::destroy(dev, t);
+    vkx::destroy(dev, cmds);
+    vkx::destroy(dev);
+    vkx::destroy(inst);
+}
+```
+
+```text
+눈금 하나 1 ns, 타임스탬프 64비트, 그래픽·컴퓨트 큐 모두: 예
+제출 전에 준비된 타임스탬프: 0개
+끝난 뒤에 준비된 타임스탬프: 4개
+구간  정점 셰이더  프래그먼트 셰이더
+도형         9000               1236
+흐림            3               4096
+합성            3               4096
+가장 오래 걸린 구간: 흐림
+제출 호출이 GPU가 일한 시간의 10분의 1 안에 돌아왔는가: 예
+흐림의 반복을 여덟 배로 늘리자 시간이 세 배 넘게 는 구간: 흐림
+```
+
+시간은 돌릴 때마다 달라서 표준 오류로 내보냈습니다. 이 책의 기계에서 한 번 돌린 값이고, 둘째 줄은 흐림의 반복을 여덟 배로 늘렸을 때입니다.
+
+```text
+도형 1.668 ms, 흐림 16.530 ms, 합성 0.355 ms, 제출 호출 0.067 ms
+도형 1.654 ms, 흐림 130.710 ms, 합성 0.437 ms, 제출 호출 0.077 ms
+```
+
+- **GPU의 시계로 적는다**: `vkCmdWriteTimestamp2`는 부른 때의 시각이 아니라, 앞의 명령이 주어진 단계까지 끝난 때의 시각을 쿼리에 적게 합니다. 단계는 하나만 줄 수 있고 `ALL_COMMANDS`면 모두 끝난 때입니다. 이웃한 두 값의 차에 `timestampPeriod`(눈금 하나의 나노초)를 곱하면 구간의 시간입니다. 차례가 보장되는 것은 같은 제출 안의 값끼리뿐입니다
+- **잴 수 있는 큐**: `timestampValidBits`가 0인 큐 패밀리에서는 잴 수 없고, 아니면 36~64비트입니다([「큐 패밀리」](#/read/cpp-vulkan/setup-queues)). `timestampComputeAndGraphics`가 참이면 그래픽이나 컴퓨트를 하는 큐는 모두 됩니다. 값은 유효 비트를 넘으면 0으로 돌아가므로 차를 낸 뒤 마스크를 씌웁니다
+- **결과는 나중에 생긴다**: 쿼리는 쓰기 전에 리셋하고(여기서는 `hostQueryReset` 기능의 `vkResetQueryPool`), GPU가 그 자리를 지나야 값이 준비됩니다. 제출 전에는 0개였습니다. `WAIT` 플래그는 준비될 때까지 CPU를 세우므로, 프레임 루프에서는 `WITH_AVAILABILITY`로 물어 준비된 몇 프레임 전의 값을 읽습니다([「여러 프레임을 겹쳐 진행하기」](#/read/cpp-vulkan/vsync-frames))
+- **통계는 일의 양**: 도형은 정점 셰이더가 9,000번, 흐림과 합성은 프래그먼트 셰이더가 4,096번 돌았습니다. 횟수가 같은 흐림과 합성의 시간이 수십 배 다르듯, 횟수는 한 번에 드는 시간을 말해 주지 않습니다. 이 수는 한 구현 안에서만 견줍니다. 장치의 구조에 따라 세는 방식이 다르고, 타일 기반 장치는 장면을 여러 번 되풀이해 수가 달라질 수 있습니다
+- **짧은 값을 쓰고 검증한다**: 잡음은 시간을 늘리는 쪽으로 끼므로 여러 번 재어 가장 짧은 값을 씁니다. 그리고 한 구간의 일만 늘렸을 때 그 구간의 시간만 느는지 봅니다. 출력의 끝줄이 그 확인입니다
+
+## 재는 자리
+
+구간의 경계는 렌더 패스 밖에 둡니다. 타일 기반 GPU는 렌더 패스를 타일별로 처리하므로, 렌더 패스 안에서 적은 두 타임스탬프의 차는 타일 하나의 시간이거나 0에 가까운 값일 수 있습니다([「GPU 파이프라인」](#/read/cpp-vulkan/vk-gpu-pipeline)). 컴퓨트 디스패치도 앞뒤에 타임스탬프를 적어 같은 방법으로 잽니다([「컴퓨트와 GPGPU」](#/read/cpp-vulkan/compute)).
+
+CPU의 시간축에 GPU의 구간을 나란히 놓으려면 `VK_KHR_calibrated_timestamps`로 장치의 시계와 CPU의 시계를 거의 같은 순간에 읽어 둡니다. 이 확장을 켜면 제출이 달라도 타임스탬프의 차례가 보장됩니다. 직접 재지 않고 RenderDoc에서 액션마다 걸린 GPU 시간을 볼 수도 있습니다([「RenderDoc」](#/read/cpp-vulkan/vdbg-renderdoc)).
+
+<Note>
+타임스탬프가 정확히 언제 적히는지는 구현에 달려 있고, 주어진 단계보다 늦게 적어도 됩니다. 이 책의 lavapipe에서는 렌더링 뒤에 컴퓨트 디스패치를 두었더니 디스패치에 걸린 시간이 그 앞의 렌더링 구간에 붙어 나왔습니다. 그래서 이 예제는 그리는 구간만 쟀습니다. 처음 재는 장치에서는 위의 검증부터 합니다. 또 lavapipe는 CPU로 그리므로 위 시간의 크기는 GPU의 빠르기와 무관합니다.
+</Note>
+
+## 정리
+
+- 타임스탬프 쿼리는 GPU가 그 자리까지 일한 때의 시각을 적고, 같은 제출 안의 두 값의 차에 timestampPeriod를 곱해 구간의 시간을 얻는다
+- 쿼리는 쓰기 전에 리셋하고 결과는 실행이 끝난 뒤에 준비되므로, 프레임 루프에서는 기다리지 않고 몇 프레임 전의 값을 읽는다
+- 통계 쿼리는 일의 양을, 타임스탬프는 걸린 시간을 알려 주고, 재는 방법은 한 구간의 일만 늘려 보아 먼저 검증한다
+
+## 참고 문서
+
+- [Vulkan 명세 1.3: Queries(쿼리의 상태, 리셋, 결과 읽기)](https://registry.khronos.org/vulkan/specs/1.3/html/chap17.html)
+- [Vulkan 레퍼런스: vkCmdWriteTimestamp2(단계, 차례, 넘침)](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdWriteTimestamp2.html)
+- [Vulkan 레퍼런스: VkQueryPipelineStatisticFlagBits(세는 것과 구현 차이)](https://docs.vulkan.org/refpages/latest/refpages/source/VkQueryPipelineStatisticFlagBits.html)
+- [Vulkan 레퍼런스: VkQueueFamilyProperties(timestampValidBits)](https://docs.vulkan.org/refpages/latest/refpages/source/VkQueueFamilyProperties.html)
+- [Khronos Vulkan Samples: Timestamp queries(지원 확인, 결과 플래그)](https://docs.vulkan.org/samples/latest/samples/api/timestamp_queries/README.html)
+- [Vulkan 제안서: VK_EXT_calibrated_timestamps(시계 맞추기)](https://docs.vulkan.org/features/latest/features/proposals/VK_EXT_calibrated_timestamps.html)
+- [Vulkan 제안서: VK_QCOM_elapsed_timer_query(타일 기반 GPU의 타임스탬프)](https://docs.vulkan.org/features/latest/features/proposals/VK_QCOM_elapsed_timer_query.html)
+- [RenderDoc 문서: Event Browser(액션의 GPU 시간)](https://renderdoc.org/docs/window/event_browser.html)

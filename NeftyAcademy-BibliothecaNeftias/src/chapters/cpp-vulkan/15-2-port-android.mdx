@@ -1,0 +1,187 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '안드로이드: 화면 회전 미리 돌리기, 벌칸 판과 기기, 로더와 함수 찾기, 검증 레이어, 모바일 GPU의 습관';
+export const terms = [
+  'VkSurfaceTransformFlagBitsKHR', 'VkAndroidSurfaceCreateInfoKHR', 'preTransform',
+  'currentTransform',
+];
+
+안드로이드에서 벌칸은 기본이 되는 저수준 그래픽 API입니다. 다만 로더가 운영체제의 일부이고, 화면이 돌아가며, GPU가 대개 타일 기반이라 데스크톱과 다르게 다룰 것이 생깁니다. 아래 프로그램은 그 가운데 화면 회전을 다룹니다. 세로가 본래 방향인 전화기를 가로로 눕혔다고 치고, 스왑체인의 크기를 정해 그림을 미리 돌립니다.
+
+```cpp vk with=vkx_instance.hpp,vkx_device.hpp,vkx_cmd.hpp,vkx_resource.hpp,vkx_bind.hpp,vkx_pipeline.hpp,vkx_draw.hpp
+#include <string>
+#include <utility>
+#include "vkx_bind.hpp"
+#include "vkx_cmd.hpp"
+#include "vkx_draw.hpp"
+#include "vkx_pipeline.hpp"
+
+// 사각형 하나. pre는 클립 공간에서 미리 돌리는 2×2 행렬의 두 열이다
+const char* VS = R"(#version 450
+layout(push_constant) uniform Push { vec4 rect; vec4 pre; float shade; };
+void main() {
+    vec2 p = vec2((gl_VertexIndex & 1) == 0 ? rect.x : rect.z,
+                  (gl_VertexIndex & 2) == 0 ? rect.y : rect.w);
+    gl_Position = vec4(mat2(pre.xy, pre.zw) * p, 0.0, 1.0);
+})";
+const char* FS = R"(#version 450
+layout(push_constant) uniform Push { vec4 rect; vec4 pre; float shade; };
+layout(location = 0) out float value;
+void main() { value = shade; })";
+
+struct Plan {
+    VkExtent2D extent;                    // 스왑체인 이미지의 크기
+    VkSurfaceTransformFlagBitsKHR pre;    // 스왑체인에 적을 preTransform
+    float matrix[4];                      // 클립 공간에서 곱할 회전
+};
+
+// 표면이 알려 준 값으로 스왑체인의 크기와 미리 돌릴 회전을 정한다
+Plan plan(const VkSurfaceCapabilitiesKHR& caps) {
+    Plan p{caps.currentExtent, caps.currentTransform, {1, 0, 0, 1}};
+    const auto R90 = VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR;
+    const auto R180 = VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR;
+    const auto R270 = VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR;
+    if (p.pre & (R90 | R270))             // 화면 본래 방향의 크기로 되돌린다
+        std::swap(p.extent.width, p.extent.height);
+    // y가 아래인 클립 공간에서 시계 방향 90도는 (x, y) → (-y, x)
+    const float turn[3][4] = {{0, 1, -1, 0}, {-1, 0, 0, -1}, {0, -1, 1, 0}};
+    const int which = p.pre & R90 ? 0 : p.pre & R180 ? 1 : p.pre & R270 ? 2 : -1;
+    if (which >= 0) std::copy(turn[which], turn[which] + 4, p.matrix);
+    return p;
+}
+
+int main() {
+    vkx::Instance inst = vkx::make_instance();
+    vkx::Device dev = vkx::make_device(inst.handle);
+    vkx::Commands cmds = vkx::make_commands(dev);
+    VkPipelineLayout layout = vkx::make_layout(dev, {}, 36);
+    auto vs = vkx::make_shader(dev, vkx::compile(VS, shaderc_vertex_shader));
+    auto fs = vkx::make_shader(dev, vkx::compile(FS, shaderc_fragment_shader));
+    const VkFormat FORMAT = VK_FORMAT_R32_SFLOAT;
+    VkPipeline pipeline = vkx::make_pipeline(
+        dev, {.vertex = vs, .fragment = fs, .layout = layout, .color = FORMAT,
+              .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP});
+
+    // 장면을 extent 크기의 이미지에 그려 글자로 돌려준다. 좌표는 가로 화면 기준이다
+    auto render = [&](VkExtent2D extent, const float* pre) {
+        vkx::Image target = vkx::make_image(
+            dev, extent, FORMAT,
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+        vkx::Buffer pixels =
+            vkx::make_buffer(dev, extent.width * extent.height * 4,
+                             VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+        struct Push { float rect[4], pre[4], shade; };
+        const Push scene[] = {
+            {{-1, 0.5f, 1, 1}, {}, 0.4f},                  // 땅
+            {{-0.75f, -0.5f, -0.5f, 0.5f}, {}, 0.7f},      // 기둥
+            {{-0.5f, -0.5f, -0.125f, -0.25f}, {}, 1.0f},   // 깃발
+            {{0.5f, -0.75f, 0.75f, -0.5f}, {}, 0.6f}};     // 해
+        VkCommandBuffer cmd = vkx::begin(cmds);
+        vkx::begin_drawing(cmd, target);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        for (Push push : scene) {
+            std::copy(pre, pre + 4, push.pre);
+            vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_ALL, 0, 36, &push);
+            vkCmdDraw(cmd, 4, 1, 0, 0);
+        }
+        vkx::end_drawing(cmd, target, pixels);
+        vkx::submit_and_wait(dev, cmds);
+        auto* v = static_cast<const float*>(pixels.mapped);
+        std::vector<std::string> rows(extent.height);
+        for (uint32_t i = 0; i < extent.width * extent.height; ++i)
+            rows[i / extent.width] += ".:-=+*#%@"[int(v[i] * 8.999f)];
+        vkx::destroy(dev, pixels);
+        vkx::destroy(dev, target);
+        return rows;
+    };
+
+    // 세로가 본래 방향인 전화기(8×16)를 가로로 눕혔을 때 표면이 알려 주는 값
+    VkSurfaceCapabilitiesKHR caps{
+        .currentExtent = {16, 8},
+        .currentTransform = VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR};
+    const Plan p = plan(caps);
+    std::printf("표면: 지금 크기 %u×%u, 지금 변환 ROTATE_90\n",
+                caps.currentExtent.width, caps.currentExtent.height);
+    std::printf("스왑체인: 크기 %u×%u, preTransform은 지금 변환과 %s\n",
+                p.extent.width, p.extent.height,
+                p.pre == caps.currentTransform ? "같게" : "다르게");
+
+    const float identity[4] = {1, 0, 0, 1};
+    const auto wide = render(caps.currentExtent, identity);
+    const auto tall = render(p.extent, p.matrix);
+    std::puts("미리 돌려 그린 스왑체인 이미지(왼쪽)와 돌리지 않은 가로 그림");
+    for (uint32_t y = 0; y < p.extent.height; ++y)
+        std::printf("%s%s%s\n", tall[y].c_str(), y < wide.size() ? "    " : "",
+                    y < wide.size() ? wide[y].c_str() : "");
+    // 눕힌 전화기를 보는 눈에는 세로 이미지가 반시계 방향으로 90도 돌아가 보인다
+    bool same = true;
+    for (uint32_t y = 0; y < caps.currentExtent.height; ++y)
+        for (uint32_t x = 0; x < caps.currentExtent.width; ++x)
+            same = same && tall[x][p.extent.width - 1 - y] == wide[y][x];
+    std::printf("눕힌 전화기에서 보이는 그림이 가로 그림과 같은가: %s\n",
+                same ? "예" : "아니오");
+
+    vkDestroyPipeline(dev.handle, pipeline, nullptr);
+    vkDestroyPipelineLayout(dev.handle, layout, nullptr);
+    vkDestroyShaderModule(dev.handle, vs, nullptr);
+    vkDestroyShaderModule(dev.handle, fs, nullptr);
+    vkx::destroy(dev, cmds);
+    vkx::destroy(dev);
+    vkx::destroy(inst);
+}
+```
+
+```text
+표면: 지금 크기 16×8, 지금 변환 ROTATE_90
+스왑체인: 크기 8×16, preTransform은 지금 변환과 같게
+미리 돌려 그린 스왑체인 이미지(왼쪽)와 돌리지 않은 가로 그림
+==......    ................
+==......    ............**..
+==####..    ..##@@@.........
+==####..    ..##............
+==...@..    ..##............
+==...@..    ..##............
+==...@..    ================
+==......    ================
+==......
+==......
+==......
+==......
+==....*.
+==....*.
+==......
+==......
+눕힌 전화기에서 보이는 그림이 가로 그림과 같은가: 예
+```
+
+- **누가 돌리는가**: 스왑체인의 `preTransform`이 표면의 `currentTransform`과 다르면, 화면에 내보낼 때마다 안드로이드의 합성기가 그림을 돌립니다. 그만큼 GPU와 전력을 더 쓰고, 구글이 잰 기기에서는 프레임 시간이 1~3밀리초씩 튀었습니다. 둘이 같으면 프로그램이 이미 돌려 그렸다는 뜻이라 합성기가 손대지 않습니다. 이것이 미리 돌리기입니다
+- **크기는 본래 방향으로**: 눕힌 표면은 지금 크기를 16×8이라고 알리지만, 스왑체인은 화면 본래 방향인 8×16으로 만듭니다. 90도나 270도면 가로와 세로를 바꿉니다
+- **클립 공간에서 돌린다**: 투영까지 끝난 좌표에 회전을 한 번 더 곱합니다. 장면과 셰이더는 가로 화면 기준 그대로입니다. `ROTATE_90`은 시계 방향 90도이고, y가 아래로 커지는 벌칸의 클립 공간에서는 (x, y)가 (−y, x)로 갑니다([「정점 셰이더와 프래그먼트 셰이더」](#/read/cpp-vulkan/glsl-stages)). 왼쪽 이미지를 반시계 방향으로 돌려 보면 오른쪽 그림입니다
+- **함께 돌릴 것**: 화면 일부에만 쓰는 뷰포트와 시저도 같은 회전으로 옮깁니다. 셰이더의 `dFdx`와 `dFdy`는 이미지의 축을 따르므로, 90도에서는 서로 바꾸고 한쪽의 부호를 뒤집습니다
+- **돌아간 것을 아는 법**: Android 10부터는 화면이 돌면 `vkQueuePresentKHR`이 `VK_SUBOPTIMAL_KHR`을 돌려줍니다. 그때 스왑체인을 새 `currentTransform`으로 다시 만듭니다([「프레임 루프」](#/read/cpp-vulkan/tri-loop))
+
+## 데스크톱과 다른 점
+
+- **판과 기기**: 벌칸은 Android 7.0부터 있고, 1.1은 Android 10, 1.3은 Android 13부터 쓸 수 있습니다. 실제로 되는 판은 드라이버에도 달려 있습니다. 구글이 권하는 최소선은 Android 10, 벌칸 1.1, 2022년 안드로이드 기준 프로파일입니다. 이 책의 예제는 1.3을 전제하므로, 낮은 판에서는 같은 기능을 확장으로 찾습니다([「장치 기능에 따라 가르기」](#/read/cpp-vulkan/port-features))
+- **로더와 함수**: 로더는 운영체제에 든 `libvulkan.so`로, 데스크톱의 것과 다른 구현입니다. 여기에 링크하면 코어 함수만 저절로 이어지므로, 확장 함수는 `vkGetDeviceProcAddr`로 직접 찾습니다([「가속 구조」](#/read/cpp-vulkan/rt-accel)). 창은 `VK_KHR_android_surface`의 `VkAndroidSurfaceCreateInfoKHR`에 `ANativeWindow`를 넘겨 표면으로 만듭니다
+- **셰이더와 검증 레이어**: 셰이더는 빌드할 때 SPIR-V로 만들어 앱에 싣습니다([「glslang과 shaderc」](#/read/cpp-vulkan/spv-compile)). 검증 레이어는 `libVkLayer_khronos_validation.so`를 APK의 `jniLibs` 아래 ABI별 폴더에 넣고 인스턴스에서 켭니다. 메시지는 logcat에 `VALIDATION` 꼬리표로 나옵니다
+- **모바일 GPU의 습관**: 렌더 패스를 열고 닫는 값이 비싸므로 수를 줄입니다. 앞의 내용이 필요 없으면 `LOAD` 대신 `CLEAR`나 `DONT_CARE`로 열고, 남길 필요가 없으면 `DONT_CARE`로 닫습니다([「렌더 패스와 동적 렌더링」](#/read/cpp-vulkan/tri-renderpass)). 깊이처럼 남기지 않는 첨부물은 `TRANSIENT_ATTACHMENT`로 만들어 메모리를 아낍니다. 메모리가 CPU와 GPU로 나뉘지 않은 기기가 많아 `DEVICE_LOCAL`에 기대지도 않습니다
+- **도구**: RenderDoc은 안드로이드에서도 프레임을 잡고, Android GPU Inspector와 GPU 회사의 프로파일러도 있습니다. 프레임 간격은 구글의 Frame Pacing 라이브러리로 맞춥니다
+
+<Note>
+이 프로그램은 안드로이드 기기 없이, 표면이 알려 줄 값을 손으로 넣어 돌렸습니다. 실제 기기에서는 `vkGetPhysicalDeviceSurfaceCapabilitiesKHR`이 준 값을 `plan`에 넘깁니다. 방향을 고정한 앱도 예외가 아니어서, 세로가 본래 방향인 전화기의 가로 전용 게임은 늘 미리 돌려야 합니다.
+</Note>
+
+## 정리
+
+- 스왑체인은 화면 본래 방향의 크기로 만들고 preTransform을 currentTransform과 같게 한 뒤, 클립 공간에서 그림을 미리 돌려 합성기의 회전을 없앤다
+- 안드로이드의 벌칸은 기기마다 판이 다르고 로더가 코어 함수만 이어 주므로, 판과 프로파일을 확인하고 확장 함수는 직접 찾는다
+- 검증 레이어는 앱에 실어서 켜고, 렌더 패스의 수와 불러오기·남기기를 줄여 타일 기반 GPU에 맞춘다
+
+## 참고 문서
+
+- [Android Developers: Get started with Vulkan on Android(판, 로더, 프로파일, 도구)](https://developer.android.com/games/develop/vulkan/native-engine-support)
+- [Android Developers: Handle device orientation with Vulkan pre-rotation](https://developer.android.com/games/optimize/vulkan-prerotation)
+- [Android NDK: Vulkan validation layers on Android(APK에 싣기, logcat)](https://developer.android.com/ndk/guides/graphics/validation-layer)
+- [Android NDK: Vulkan design guidelines(렌더 패스, 메모리 타입)](https://developer.android.com/ndk/guides/graphics/design-notes)
+- [Vulkan 레퍼런스: VkAndroidSurfaceCreateInfoKHR](https://docs.vulkan.org/refpages/latest/refpages/source/VkAndroidSurfaceCreateInfoKHR.html)

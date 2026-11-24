@@ -1,0 +1,162 @@
+import { Note } from 'paragoniahex';
+
+export const summary = '플러그인: 인터페이스와 IID, Q_PLUGIN_METADATA, QPluginLoader로 찾아 불러 쓰기, 호환성 규칙';
+export const terms = [
+  'QPluginLoader', 'Q_DECLARE_INTERFACE', 'Q_INTERFACES', 'Q_PLUGIN_METADATA', 'qobject_cast',
+  'QLibrary',
+];
+export const noterms = ['future'];
+
+앱을 다시 빌드하지 않고 기능을 더하고 싶을 때 **플러그인**을 씁니다. 이미지 편집기의 필터, 에디터의 언어 지원, 장비 제어 프로그램의 기기별 드라이버가 그런 예입니다. Qt 자신도 이 구조로 되어 있어서, [「데스크톱 배포 도구」](#/read/cpp-qt/dep-desktop)에서 본 플랫폼, 이미지 형식, SQL 드라이버가 모두 플러그인입니다. 게임 엔진 책의 [「동적 라이브러리와 핫 리로드」](#/read/cpp-game-engine/plat-hot-reload)에서는 `dlopen`으로 직접 라이브러리를 불렀는데, Qt의 플러그인 장치는 그 위에 **메타데이터**, 인터페이스 확인, 판 확인을 얹고 플랫폼마다 다른 부분을 감춰 줍니다.
+
+텍스트 필터 플러그인을 받는 작은 앱을 만들어 실제로 빌드했습니다.
+
+## 인터페이스 정하기
+
+앱과 플러그인이 지킬 약속은 순수 가상 함수만 가진 클래스로 씁니다.
+
+`filter.h`
+
+```cpp nocheck
+// filter.h: 앱과 플러그인이 함께 쓰는 인터페이스
+#pragma once
+#include <QString>
+#include <QtPlugin>
+
+class TextFilter {
+public:
+    virtual ~TextFilter() = default;
+    virtual QString apply(const QString& text) const = 0;
+};
+
+#define TextFilter_iid "academy.nefty.TextFilter/1.0"
+Q_DECLARE_INTERFACE(TextFilter, TextFilter_iid)
+```
+
+`Q_DECLARE_INTERFACE`는 이 인터페이스에 **IID**라는 이름표를 붙입니다. 나중에 `qobject_cast`가 플러그인 객체를 이 인터페이스로 바꿀 때 IID 문자열로 확인하므로, 인터페이스를 바꾸면 IID의 판(`/1.0`)도 올려야 옛 플러그인을 잘못 쓰지 않습니다.
+
+## 플러그인 만들기
+
+`plugins/upper.cpp`
+
+```cpp nocheck
+// plugins/upper.cpp: 글자를 대문자로 바꾸는 플러그인
+#include <QObject>
+#include "../filter.h"
+
+class UpperFilter : public QObject, public TextFilter {
+    Q_OBJECT
+    Q_PLUGIN_METADATA(IID TextFilter_iid FILE "upper.json")
+    Q_INTERFACES(TextFilter)
+public:
+    QString apply(const QString& text) const override { return text.toUpper(); }
+};
+
+#include "upper.moc"
+```
+
+`plugins/upper.json`
+
+```json
+{ "name": "대문자", "version": "1.2" }
+```
+
+- 플러그인 클래스는 `QObject`와 인터페이스를 함께 상속하고, `Q_INTERFACES`로 어떤 인터페이스를 구현했는지 moc에 알립니다
+- `Q_PLUGIN_METADATA`는 이 클래스가 플러그인의 진입점임을 표시합니다. 한 라이브러리에 하나만 둡니다. `FILE`로 지정한 JSON은 그대로 라이브러리 안에 들어갑니다
+- 글자를 뒤집는 `reverse.cpp`도 같은 모양이고, `future.cpp`는 IID를 `TextFilter/2.0`으로 바꾼, 이 앱보다 새 인터페이스용 플러그인입니다
+
+## 찾아서 불러 쓰기
+
+`main.cpp`
+
+```cpp nocheck
+// main.cpp: plugins 폴더의 플러그인을 찾아 불러 쓴다
+#include <QCoreApplication>
+#include <QDir>
+#include <QJsonObject>
+#include <QPluginLoader>
+#include <cstdio>
+#include "filter.h"
+
+int main(int argc, char* argv[]) {
+    QCoreApplication app(argc, argv);
+    QDir dir(app.applicationDirPath() + "/plugins");
+    const QStringList files = dir.entryList(QDir::Files, QDir::Name);
+    std::printf("플러그인 폴더의 파일 %lld개\n", (long long)files.size());
+
+    for (const QString& file : files) {
+        QPluginLoader loader(dir.filePath(file));
+        const QJsonObject meta = loader.metaData();    // 아직 불러오지 않는다
+        if (meta.isEmpty()) {
+            std::printf("  %s: 플러그인이 아님\n", qPrintable(file));
+            continue;
+        }
+        const QString iid = meta.value("IID").toString();
+        if (iid != TextFilter_iid) {
+            std::printf("  %s: 다른 인터페이스(%s)라서 건너뜀\n",
+                        qPrintable(file), qPrintable(iid));
+            continue;
+        }
+        const QJsonObject info = meta.value("MetaData").toObject();
+        // instance()가 라이브러리를 불러오고 플러그인 객체를 만든다
+        auto* filter = qobject_cast<TextFilter*>(loader.instance());
+        if (!filter) {
+            std::printf("  %s: %s\n", qPrintable(file),
+                        qPrintable(loader.errorString()));
+            continue;
+        }
+        std::printf("  %s: %s %s → %s\n", qPrintable(file),
+                    qPrintable(info.value("name").toString()),
+                    qPrintable(info.value("version").toString()),
+                    qPrintable(filter->apply("hello qt")));
+    }
+}
+```
+
+`CMakeLists.txt`
+
+```cmake
+cmake_minimum_required(VERSION 3.21)
+project(filters LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_AUTOMOC ON)
+find_package(Qt6 REQUIRED COMPONENTS Core)
+
+qt_add_executable(filters main.cpp filter.h)
+target_link_libraries(filters PRIVATE Qt6::Core)
+
+foreach(name upper reverse future)
+    qt_add_plugin(${name})
+    target_sources(${name} PRIVATE plugins/${name}.cpp)
+    target_link_libraries(${name} PRIVATE Qt6::Core)
+    set_target_properties(${name} PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/plugins)
+endforeach()
+```
+
+`qt_add_plugin`은 플러그인용 라이브러리를 만듭니다. Qt가 공유 라이브러리로 빌드되어 있으면 실행 중에 불러오는 모듈 라이브러리가 되고, 정적 Qt라면 정적 플러그인이 됩니다. 빌드하고 플러그인 폴더에 플러그인이 아닌 파일 하나를 더 넣은 뒤 실행했습니다.
+
+```text nocheck
+$ cmake -S . -B build -G Ninja && cmake --build build
+$ echo "plain text" > build/plugins/README.txt
+$ ./build/filters
+플러그인 폴더의 파일 4개
+  README.txt: 플러그인이 아님
+  libfuture.so: 다른 인터페이스(academy.nefty.TextFilter/2.0)라서 건너뜀
+  libreverse.so: 거꾸로 1.0 → tq olleh
+  libupper.so: 대문자 1.2 → HELLO QT
+```
+
+- `metaData()`는 라이브러리를 **불러오지 않고** 파일 안의 메타데이터만 읽습니다. 플러그인 목록을 메뉴에 보여 주는 일은 이것만으로 충분하고, 실제 코드는 사용자가 고를 때 불러오면 됩니다
+- 메타데이터의 `IID`로 인터페이스와 판을 먼저 걸렀습니다. `future`처럼 맞지 않는 플러그인은 불러오지도 않습니다. JSON 파일의 내용은 `MetaData` 아래에 들어 있습니다
+- `instance()`가 라이브러리를 불러오고 플러그인 객체(루트 객체)를 하나 만듭니다. 이 객체는 로더 객체가 사라져도 남아 있다가 `unload()`를 부를 때 지워집니다
+
+<Note>
+플러그인과 앱은 같은 주 판(Qt 6)이어야 하고, Qt는 앱이 쓰는 Qt보다 **새 판**으로 빌드한 플러그인을 거부합니다. 컴파일러가 다르거나 Windows에서 디버그와 릴리스 빌드를 섞으면 C++ ABI가 달라 문제가 생깁니다. `unload()`는 같은 라이브러리를 쓰는 다른 로더가 남아 있으면 실제로 내리지 않으며, 내리면 플러그인 객체도 지워지므로 그 뒤에 쓰면 안 됩니다. Qt 플러그인이 아닌 보통 라이브러리의 C 함수를 부를 때는 `QLibrary::resolve`를 쓰고, 플러그인을 실행 파일 안에 넣는 방법은 [「정적 빌드」](#/read/cpp-qt/dep-static)에서 보았습니다.
+</Note>
+
+## 정리
+
+- 플러그인 인터페이스는 순수 가상 클래스와 Q_DECLARE_INTERFACE로 정하고, 바꿀 때마다 IID의 판을 올린다
+- 플러그인은 QObject와 인터페이스를 함께 상속해 Q_PLUGIN_METADATA와 Q_INTERFACES를 달고, qt_add_plugin으로 빌드한다
+- QPluginLoader의 metaData로 불러오기 전에 IID와 정보를 확인하고, instance와 qobject_cast로 인터페이스를 얻어 쓴다
