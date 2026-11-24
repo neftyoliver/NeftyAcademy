@@ -26,10 +26,10 @@ const TIP_FONT = 13; // 노드 위에 뜨는 이름표. 배율의 제곱근만�
 const CHAPTER_TITLED_R = 30;
 const SUB_TITLED_R = 22;
 // 노드 속 글자의 크기(노드 반지름의 몇 배인가). 제목은 큰 것부터 대 보고 줄임표 없이 들어가는 첫 크기를 쓴다
-const NUM_FONT = 0.25;
-const TITLE_FONTS = [0.31, 0.28, 0.25];
+const NUM_FONT = 0.3;
+const TITLE_FONTS = [0.38, 0.34, 0.3, 0.27];
 const TITLE_LEADING = 1.16; // 줄 사이 = 글자 크기의 몇 배
-const ZOOM_MAX = 8;
+const ZOOM_MAX = 16; // 책이 많은 지도에서도 쪽 노드의 제목을 읽을 수 있을 만큼
 const HOVER_WAIT = 160; // 마우스가 노드에 이만큼(ms) 머물러야 그 노드를 고른다. 지나가다 스친 노드의 줄까지 그려져 남지 않게
 const FLOW_SPEED = 46; // 화살표가 흐르는 빠르기(화면 단위/초)
 const FLOW_GAP = 64; // 흐르는 화살표 사이의 거리
