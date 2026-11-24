@@ -170,7 +170,7 @@ const KEPT = new Map<string, ReadonlySet<string>>();
 const NONE: ReadonlySet<string> = new Set();
 
 /** 화살촉. 오른쪽(+x)을 향한다 */
-const HEAD = 'M-5 -4.2 L4.5 0 L-5 4.2 L-2.4 0 Z';
+const HEAD = 'M-7.5 -6.3 L6.8 0 L-7.5 6.3 L-3.6 0 Z'; // 흐르는 화살촉. 줄 위에서 잘 보이는 크기
 
 /**
  * 흐르는 화살표 한 줄. pts = 가리키는 쪽에서 가리킨 쪽으로 가는 길(화면 좌표), r = 도착하는 노드의 반지름.
@@ -198,7 +198,7 @@ function Flow({ pts, r, still }: { pts: Point[]; r: number; still: boolean }) {
               <animateMotion dur={`${dur.toFixed(2)}s`} begin={`${(-(dur * i) / n).toFixed(2)}s`} repeatCount="indefinite" rotate="auto" path={d} />
             </path>
           ))}
-      <path className="bf-flow-head is-end" d={HEAD} transform={`translate(${(end.x - ux * (r + 3)).toFixed(1)} ${(end.y - uy * (r + 3)).toFixed(1)}) rotate(${turn.toFixed(1)})`} />
+      <path className="bf-flow-head is-end" d={HEAD} transform={`translate(${(end.x - ux * (r + 6)).toFixed(1)} ${(end.y - uy * (r + 6)).toFixed(1)}) rotate(${turn.toFixed(1)})`} />
     </g>
   );
 }
@@ -458,11 +458,11 @@ export function WebView({ books }: { books: Book[] }) {
     return () => el.removeEventListener('wheel', onWheel);
   }, [books.length === 0]);
 
-  // 지도가 처음에 화면 안에 다 들어오게 높이를 맞춘다: 지도의 위쪽에서 화면의 아래쪽까지
+  // 지도의 높이: 지도의 위쪽에서 화면의 아래쪽까지. 위에 글이 많아 그 거리가 짧아도 화면 높이의 78%는 쓴다
   useLayoutEffect(() => {
     const measureFit = (): void => {
       const el = svg.current;
-      if (el) setFit(Math.max(260, window.innerHeight - (el.getBoundingClientRect().top + window.scrollY) - 20));
+      if (el) setFit(Math.max(260, Math.round(window.innerHeight * 0.78), window.innerHeight - (el.getBoundingClientRect().top + window.scrollY) - 20));
     };
     measureFit();
     window.addEventListener('resize', measureFit);
@@ -734,7 +734,7 @@ export function WebView({ books }: { books: Book[] }) {
             p.order.map((o, i) => (
               <g key={`${p.book.id}-${i}`} className={o.sub ? 'is-sub' : undefined}>
                 <path d={path(o.line)} />
-                <path className="bf-web-arrow" d={arrow(o.line, o.sub ? 3.2 : 4.2)} />
+                <path className="bf-web-arrow" d={arrow(o.line, o.sub ? 4.2 : 5.6)} />
               </g>
             )),
           )}
