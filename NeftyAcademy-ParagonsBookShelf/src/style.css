@@ -160,6 +160,8 @@ a { color: inherit; }
 .bf-web-guide svg { width: 16px; height: 16px; flex: none; overflow: visible; }
 .bf-web-guide svg.is-line { width: 28px; height: 10px; }
 .bf-web-guide .is-book { fill: color-mix(in srgb, var(--bf-ink) 55%, var(--bf-paper)); }
+.bf-web-guide .is-book.is-side { fill: color-mix(in srgb, var(--bf-ink) 35%, var(--bf-paper)); }
+.bf-web-guide .is-lib-line { stroke: #fff; stroke-opacity: 0.6; stroke-width: 0.6; }
 .bf-web-guide .is-chapter { fill: var(--bf-paper); stroke: var(--bf-ink); stroke-width: 1.4; }
 .bf-web-guide .is-page { fill: color-mix(in srgb, var(--bf-ink) 22%, var(--bf-paper)); stroke: var(--bf-ink); stroke-width: 1.1; }
 .bf-web-guide .is-order, .bf-web-guide .is-link, .bf-web-guide .is-in, .bf-web-guide .is-out { fill: none; stroke-linecap: round; }
@@ -525,6 +527,11 @@ a { color: inherit; }
 .bf-menu-inner { margin-left: 14px; padding-left: 8px; border-left: 1px solid var(--bf-line); }
 .bf-menu-open { display: block; font-size: 13px; color: var(--bf-muted); text-decoration: none; padding: 3px 0; }
 .bf-menu-open:hover { color: var(--bf-ink); }
+/* 라이브러리(안에 책이 든 책): 작은 책 둘 사이에 큰 책 하나. 제목은 세 권에 걸쳐 쓰므로 글자에 책 색의 테두리를 둘러 틈에서도 읽히게 한다 */
+.bf-library .bf-lib-side { fill: color-mix(in srgb, var(--node) 72%, var(--bf-paper)); }
+.bf-library .bf-lib-line { stroke: #fff; stroke-opacity: 0.45; stroke-linecap: round; }
+.bf-node.is-library text { fill: #fff; paint-order: stroke; stroke: color-mix(in srgb, var(--node) 75%, #000); stroke-width: 3px; stroke-linejoin: round; }
+.bf-node.is-library text.bf-node-num { opacity: 0.85; }
 /* 지도에서 서가 안의 책: 챕터와 같은 자리에 놓이되 사각형으로, 색을 채워 책임을 알린다 */
 .bf-node-chapter.is-book .bf-shape { fill: color-mix(in srgb, var(--node) 55%, var(--bf-paper)); stroke-width: 2.5; }
 .bf-node-chapter.is-book text { fill: #fff; }

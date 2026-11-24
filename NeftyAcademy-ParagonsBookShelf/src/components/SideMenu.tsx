@@ -133,7 +133,7 @@ function MenuBook({ book, current }: { book: Book; current?: { bookId: string; c
       {book.books?.length ? (
         <div className="bf-menu-inner">
           <a className="bf-menu-open" href={href({ name: 'book', bookId: book.id })}>
-            서가 열기
+            라이브러리 열기
           </a>
           {book.books.map((b) => (
             <MenuBook key={b.id} book={b} current={current} />

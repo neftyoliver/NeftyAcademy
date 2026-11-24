@@ -29,7 +29,7 @@ export function BookPage({ bookId }: { bookId: string }) {
         ) : null}
         {inner.length > 0 ? (
           <p className="bf-shelf-note">
-            책 {inner.length}권이 들어 있는 서가 · 챕터 {progress.total}개 가운데 {progress.written}개를 썼습니다
+            책 {inner.length}권이 들어 있는 라이브러리 · 챕터 {progress.total}개 가운데 {progress.written}개를 썼습니다
           </p>
         ) : null}
       </header>

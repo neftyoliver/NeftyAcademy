@@ -123,6 +123,28 @@ const hexPoints = (c: Point, r: number, rotate: number): string =>
     .map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`)
     .join(' ');
 
+/**
+ * 라이브러리(안에 책이 들어 있는 책)의 모양: 작은 책 둘 사이에 큰 책 하나가 서 있고, 큰 책 위쪽에 희미한 선 두 줄.
+ * r = 원으로 그리던 때의 반지름. 가장 먼 점(작은 책의 아래 바깥 모서리)이 r 의 1.02배라 줄이 비켜 가는 거리 안에 든다.
+ */
+function LibraryShape({ at, r }: { at: Point; r: number }) {
+  const box = (x0: number, y0: number, x1: number, y1: number, cls?: string) => (
+    <rect className={cls} x={at.x + x0 * r} y={at.y + y0 * r} width={(x1 - x0) * r} height={(y1 - y0) * r} rx={r * 0.06} />
+  );
+  const line = (y: number) => <line className="bf-lib-line" x1={at.x - 0.2 * r} x2={at.x + 0.2 * r} y1={at.y + y * r} y2={at.y + y * r} style={{ strokeWidth: r * 0.035 }} />;
+  return (
+    <g className="bf-shape bf-library">
+      {box(-0.78, -0.3, -0.38, 0.66, 'bf-lib-side')}
+      {box(0.38, -0.3, 0.78, 0.66, 'bf-lib-side')}
+      {box(-0.33, -0.86, 0.33, 0.66)}
+      {line(-0.7)}
+      {line(-0.6)}
+    </g>
+  );
+}
+/** 라이브러리 모양 안에서 제목이 쓰는 자리(세 권에 걸쳐 쓰고, 글자에 테두리를 둘러 틈에서도 읽힌다) */
+const libraryHalf = (r: number): HalfWidth => squareHalf(0.76 * r, 0.1 * r);
+
 /** 모양을 s 배로 줄인 것의 폭. 글이 가장자리에 붙지 않게 한다 */
 const inset = (half: HalfWidth, s: number): HalfWidth => (y) => s * half(y / s);
 /** 반지름 r 인 원(하위 챕터) */
@@ -202,8 +224,8 @@ function chaptersAt(book: Book, spots: Point[], rotate: number): PlacedChapter[]
 }
 
 /** 책 제목을 책의 사각형에 맞춰 나눈다(배율 1의 크기). 다 들어가는 첫 글자 크기를 쓴다 */
-function bookTitle(title: string): { lines: string[]; font: number; leading: number } {
-  const half = squareHalf(BOOK_R * BOOK_SQUARE, BOOK_R * BOOK_ROUND);
+function bookTitle(title: string, library = false): { lines: string[]; font: number; leading: number } {
+  const half = library ? libraryHalf(BOOK_R) : squareHalf(BOOK_R * BOOK_SQUARE, BOOK_R * BOOK_ROUND);
   let out = { lines: [title], font: BOOK_FONT, leading: BOOK_LEADING };
   for (const font of BOOK_FONTS) {
     const leading = font * (BOOK_LEADING / BOOK_FONT);
@@ -275,7 +297,7 @@ function Flow({ pts, r, still, px, width }: { pts: Point[]; r: number; still: bo
 
 /**
  * 지도 보기. 책은 둥근 사각형, 챕터는 번호 붙은 육각형, 하위 챕터(쪽)는 챕터 둘레에 육각형을 그리며 놓인 작은 원.
- * 서가 안의 책은 챕터 자리에 놓이되 작은 사각형이다. 지도 위에 모양과 줄, 조작법의 설명(MapGuide)이 붙는다.
+ * 서가 안의 책은 챕터 자리에 놓이되 작은 사각형이다. 안에 책이 든 책(라이브러리)은 책 세 권이 서 있는 모양이다. 지도 위에 모양과 줄, 조작법의 설명(MapGuide)이 붙는다.
  * 연한 빨강 화살표 줄은 읽는 순서(목록 보기와 같은 순서)다. 책마다 자기 색의 점선 테두리가 영역을 표시한다.
  *
  * 책이 여러 권이면 지도 전체가 육각형이 되고, 책들은 양파 껍질처럼 겹겹이(한 겹에 여섯 권 안팎) 놓인다(onion.ts).
@@ -317,6 +339,15 @@ function MapGuide() {
             <rect className="is-book" x="-6.6" y="-6.6" width="13.2" height="13.2" rx="3.6" />
           </svg>
           책
+        </li>
+        <li>
+          <svg viewBox="-8 -8 16 16" aria-hidden="true">
+            <rect className="is-book is-side" x="-7.2" y="-2.4" width="3.4" height="8.6" rx="0.6" />
+            <rect className="is-book is-side" x="3.8" y="-2.4" width="3.4" height="8.6" rx="0.6" />
+            <rect className="is-book" x="-3" y="-7.6" width="6" height="13.8" rx="0.6" />
+            <path className="is-lib-line" d="M-1.8 -5.6 H1.8 M-1.8 -4.4 H1.8" />
+          </svg>
+          라이브러리(책이 든 책)
         </li>
         <li>
           <svg viewBox="-8 -8 16 16" aria-hidden="true">
@@ -954,17 +985,19 @@ export function WebView({ books }: { books: Book[] }) {
                     })}
                     <a
                       href={c.innerBook ? href({ name: 'book', bookId: c.innerBook }) : href({ name: 'read', bookId: p.book.id, chapterId: c.chapter.id })}
-                      className={`bf-node bf-node-chapter${chapterTitled ? ' is-titled' : ''}${c.innerBook ? ' is-book' : ''}${c.chapter.draft ? ' is-draft' : ''}${focus === key ? ' is-focus' : ''}${read ? (inner ? ' is-complete' : ' is-read') : ''}`}
+                      className={`bf-node bf-node-chapter${chapterTitled ? ' is-titled' : ''}${c.innerBook ? ' is-book' : ''}${inner?.books?.length ? ' is-library' : ''}${c.chapter.draft ? ' is-draft' : ''}${focus === key ? ' is-focus' : ''}${read ? (inner ? ' is-complete' : ' is-read') : ''}`}
                       aria-label={`${p.book.title} ${c.label}. ${c.chapter.title}${c.chapter.draft ? ' (준비 중)' : ''}`}
                       {...tip(`${c.label}. ${c.chapter.title}${c.chapter.draft ? ' · 준비 중' : ''}`, c.at, false, key)}
                     >
-                      {c.innerBook ? (
+                      {inner?.books?.length ? (
+                        <LibraryShape at={at} r={radii.chapter} />
+                      ) : c.innerBook ? (
                         <rect className="bf-shape" x={at.x - radii.chapter * INNER_SQUARE} y={at.y - radii.chapter * INNER_SQUARE} width={2 * radii.chapter * INNER_SQUARE} height={2 * radii.chapter * INNER_SQUARE} rx={radii.chapter * INNER_ROUND} />
                       ) : (
                         <polygon className="bf-shape" points={hexPoints(at, radii.chapter, rotate)} />
                       )}
                       {chapterTitled ? (
-                        titled(at, radii.chapter, c.label, c.chapter.title, c.innerBook ? squareHalf(radii.chapter * INNER_SQUARE, radii.chapter * INNER_ROUND) : hexHalf(radii.chapter, rotate))
+                        titled(at, radii.chapter, c.label, c.chapter.title, inner?.books?.length ? libraryHalf(radii.chapter) : c.innerBook ? squareHalf(radii.chapter * INNER_SQUARE, radii.chapter * INNER_ROUND) : hexHalf(radii.chapter, rotate))
                       ) : (
                         <text x={at.x} y={at.y} dy="0.35em" style={{ fontSize: radii.chapter * CHAPTER_FONT }}>
                           {c.label}
@@ -974,10 +1007,10 @@ export function WebView({ books }: { books: Book[] }) {
                   </g>
                 );
               })}
-              <a href={href({ name: 'book', bookId: p.book.id })} className={`bf-node bf-node-book${reading && readOf(p.book).complete ? ' is-complete' : ''}`} aria-label={p.book.title}>
-                <rect className="bf-shape" x={bookAt.x - radii.book * BOOK_SQUARE} y={bookAt.y - radii.book * BOOK_SQUARE} width={2 * radii.book * BOOK_SQUARE} height={2 * radii.book * BOOK_SQUARE} rx={radii.book * BOOK_ROUND} />
+              <a href={href({ name: 'book', bookId: p.book.id })} className={`bf-node bf-node-book${p.book.books?.length ? ' is-library' : ''}${reading && readOf(p.book).complete ? ' is-complete' : ''}`} aria-label={p.book.books?.length ? `라이브러리 ${p.book.title}` : p.book.title}>
+                {p.book.books?.length ? <LibraryShape at={bookAt} r={radii.book} /> : <rect className="bf-shape" x={bookAt.x - radii.book * BOOK_SQUARE} y={bookAt.y - radii.book * BOOK_SQUARE} width={2 * radii.book * BOOK_SQUARE} height={2 * radii.book * BOOK_SQUARE} rx={radii.book * BOOK_ROUND} />}
                 {(() => {
-                  const t = bookTitle(p.book.title);
+                  const t = bookTitle(p.book.title, !!p.book.books?.length);
                   return t.lines.map((line, i, all) =>
                     line ? (
                       <text key={i} x={bookAt.x} y={bookAt.y + (i - (all.length - 1) / 2) * t.leading * k} dy="0.35em" style={{ fontSize: t.font * k }}>
